@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { app, BrowserWindow } from "electron";
 import { installWindowSecurity, secureWebPreferences } from "./security";
+import { installWindowZoom } from "./zoom";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 
@@ -20,6 +21,7 @@ export function createMainWindow(): BrowserWindow {
 
   const trustedUrl = rendererUrl();
   installWindowSecurity(window, trustedUrl);
+  installWindowZoom(window);
   void window.loadURL(trustedUrl);
   window.once("ready-to-show", () => window.show());
   return window;

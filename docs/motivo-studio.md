@@ -44,6 +44,10 @@ pressing Cancel asks that process to stop; a terminal action event reports the
 observed result. Cancellation is best effort at the desktop boundary, while
 Tactus remains responsible for supervised plugin descendants.
 
+The window opens at 120% zoom. `Ctrl` + mouse wheel and `Ctrl` + `+` / `-`
+adjust the complete interface between 80% and 200%; `Ctrl` + `0` restores the
+120% default.
+
 ## Typed boundary
 
 The renderer is sandboxed, has no Node integration, and cannot access host paths

@@ -54,6 +54,10 @@ stdout/stderr frames are projected to the renderer in real time. Cancel asks the
 main process to terminate that Tactus process. When the action finishes, the
 renderer refreshes the Studio snapshot.
 
+Studio starts at 120% zoom for more readable desktop text. Hold `Ctrl` while
+using the mouse wheel, or use `Ctrl` + `+` / `-`, to zoom between 80% and 200%.
+Use `Ctrl` + `0` to return to 120%.
+
 Cancellation uses Electron/Node's platform process termination and is
 best-effort. Tactus supervises the subprocesses it starts, but forcibly killing
 the Tactus leader is not a universal process-tree guarantee on every operating
