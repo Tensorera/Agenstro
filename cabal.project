@@ -1,1 +1,3 @@
-packages: ./clef-sdk
+packages:
+  ./clef-sdk
+  ./segno-flow

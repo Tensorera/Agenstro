@@ -109,7 +109,7 @@ Snapshot differences cannot observe reads or transient writes, and concurrent
 writers make attribution ambiguous. Cooperative operations can later emit
 more precise access events without changing that limitation.
 
-### 6. Motivo projects Tactus; Segno remains frozen
+### 6. Motivo projects Tactus; Segno was initially frozen
 
 The cutover initially froze Motivo. The `0.3` follow-up revives only a thin
 TypeScript/React projection over versioned, redacted Rust control queries.
@@ -117,18 +117,18 @@ Electron main owns the selected root and Tactus child; the sandboxed renderer
 receives named, schema-checked IPC. Motivo does not parse runtime state or own a
 second daemon/workflow runtime.
 
-Segno Flow's current cron/lease scheduler is not a replay engine. It is frozen
-until the plugin trace format is stable. A future replay feature must state
-whether it reuses recorded plugin results or explicitly performs live calls;
-arbitrary Haskell `IO` is not generally replayable.
+This decision initially left Segno Flow frozen. ADR-0004 later replaced its
+Python/Rust scheduler with a Haskell persistent-task driver. That driver is
+scheduling rather than replay: it does not substitute recorded plugin results,
+and arbitrary Haskell `IO` remains generally unreplayable.
 
 ## Migration
 
 The Haskell package and Rust Tactus `0.3` path are authoritative. Superseded
 Clef/Tactus product cores remain available through Git history; selected Python
 archives remain migration evidence and must not gain new features. Motivo's
-projection is current; Segno remains frozen until its future role is redesigned
-explicitly.
+projection is current. Segno's redesigned role and removal consequences are
+defined separately by ADR-0004.
 
 ## Consequences
 

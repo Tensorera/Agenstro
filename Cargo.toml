@@ -7,8 +7,6 @@ members = [
   "crates/agentro-proto",
   "crates/agentro-store",
   "crates/agentro-workspace",
-  "segno-flow/rust/segno-core",
-  "segno-flow/rust/segnod",
   "tactus-runtime",
 ]
 
@@ -24,11 +22,8 @@ agentro-contracts = { version = "=0.2.0", path = "crates/agentro-contracts" }
 agentro-process = { version = "=0.2.0", path = "crates/agentro-process" }
 agentro-proto = { version = "=0.2.0", path = "crates/agentro-proto" }
 agentro-store = { version = "=0.2.0", path = "crates/agentro-store" }
-chrono = { version = "=0.4.44", default-features = false, features = ["std"] }
-chrono-tz = { version = "=0.10.4", default-features = false, features = ["std"] }
 clap = { version = "=4.5.60", features = ["derive"] }
 command-group = { version = "=5.0.1", default-features = false }
-cron = "=0.17.0"
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 dunce = "=1.0.5"
 ignore = { version = "=0.4.31", default-features = false }
@@ -38,8 +33,6 @@ prost-types = { version = "=0.14.4", default-features = false, features = ["std"
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 protoc-bin-vendored = "=3.2.0"
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
-segno-core = { version = "=0.2.0", path = "segno-flow/rust/segno-core" }
-segnod = { version = "=0.2.0", path = "segno-flow/rust/segnod" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = { version = "=0.10.9", default-features = false }
@@ -49,10 +42,8 @@ toml = "=0.9.11"
 tonic = { version = "=0.14.6", default-features = false, features = ["codegen", "server"] }
 tonic-prost = { version = "=0.14.6", default-features = false }
 tonic-prost-build = { version = "=0.14.6", default-features = false }
-unicode-normalization = "=0.1.25"
 uuid = { version = "=1.24.0", default-features = false, features = ["std", "v7"] }
 winreg = "=0.56.0"
-zip = { version = "=4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

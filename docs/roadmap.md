@@ -1,8 +1,8 @@
 ---
 title: Agenstro roadmap
 status: alpha
-last_verified: 2026-08-15
-applies_to: "Clef Haskell 0.3 + Tactus Rust 0.3 source-alpha direction"
+last_verified: 2026-08-16
+applies_to: "Clef/Segno Haskell 0.3 + Tactus Rust 0.3 source-alpha direction"
 ---
 
 # Agenstro roadmap
@@ -15,15 +15,16 @@ the stated platform gate agree.
 
 | Label | Meaning |
 | --- | --- |
-| Current gate | Required behavior for the Clef/Tactus/Motivo `0.3` path |
+| Current gate | Required behavior for the Clef/Tactus/Segno/Motivo `0.3` path |
 | Hardening candidate | Fits the architecture but is not yet a stable promise |
 | Exploratory | Needs a bounded design/prototype before support can be claimed |
-| Frozen | Retained source with no current feature or packaging claim |
+| Historical | Available through Git history or excluded migration material; not a current compatibility target |
 | Non-goal | Intentionally absent from the core |
 
 ## Current `0.3` source gate
 
-The current pair is Clef `0.3.0.0` and Tactus `0.3.0`:
+The current runtime set is Clef `0.3.0.0`, Tactus `0.3.0`, and Segno
+`0.3.0.0`:
 
 - Clef is a small GHC2021 EDSL with typed provider, effect, and generic plugin
   calls;
@@ -36,14 +37,23 @@ The current pair is Clef `0.3.0.0` and Tactus `0.3.0`:
 - providers, effects, and general plugins share the language-neutral
   `agenstro.plugin/v1` JSONL boundary;
 - Rust adapters cover Codex, Claude Code, OpenCode, and `workspace.paths`;
+- Clef provides typed `Trigger state event`, `State state`, and
+  `PersistentTask` composition without owning scheduling;
+- Segno provides the single-node Haskell driver, pure interval/UTC-cron
+  planning, durable cursors and lifecycle, a SQLite state plugin, and
+  at-least-once occurrence delivery;
+- every Segno occurrence executes its Clef job through Tactus, while lifecycle
+  state stays separate from typed business state;
 - fake-driven tests make no authenticated model request; and
 - Motivo Studio is a typed Electron/React projection over the versioned Tactus
-  Studio control API; Segno Flow remains frozen outside the gate.
+  Studio control API.
 
-The source gate includes Haskell build/tests, Rust format/check/test/clippy,
-protocol/adaptor tests with local fakes, an offline Tactus-to-GHC path, the
-multi-step topology example, Motivo format/lint/typecheck/Vitest/package, and a
-strict documentation build. Rust verification must use a temporary
+The source gate includes Clef and Segno Haskell build/tests, Rust
+format/check/test/clippy, protocol/adaptor tests with local fakes, offline
+Tactus-to-GHC paths, virtual-clock Segno scheduling with a fake active-window
+source, the multi-step topology example, Motivo
+format/lint/typecheck/Vitest/package, and a strict documentation build. Rust
+verification must use a temporary
 `CARGO_TARGET_DIR` and clean it afterward so the repository does not accumulate
 gigabytes of build output.
 
@@ -150,11 +160,30 @@ non-secret UI preferences, and richer trace filtering. It must not become a
 second runtime, daemon, general shell, credential store, or approval-policy
 owner.
 
+### Segno persistent-task hardening
+
+The first Segno driver is intentionally single-node and local. Compatible
+follow-up work includes:
+
+- explicit misfire and catch-up policies beyond the bounded planner result;
+- lifecycle inspection and recovery tooling for `OutcomeUnknown`;
+- state-schema migration fixtures and backend conformance tests;
+- filesystem, webhook, job-completion, and manual trigger plugins;
+- explicit correlation-key/window semantics before any multi-source `and`;
+  and
+- PostgreSQL or another backend implemented behind the existing state plugin
+  methods.
+
+These additions must preserve short CAS transactions, business/lifecycle state
+separation, and Tactus execution of each Clef job. A second node cannot simply
+share the current SQLite directory and be called distributed scheduling.
+
 ## Exploratory surface
 
-### Segno Flow and replay
+### Recorded-result replay
 
-Segno remains frozen because scheduling and replay require distinct semantics:
+Segno now implements scheduling, but replay remains exploratory because it has
+distinct semantics:
 
 1. **Recorded-result replay** substitutes previously captured terminal values
    and must define trace integrity, missing evidence, schema drift, and secret
@@ -164,8 +193,10 @@ Segno remains frozen because scheduling and replay require distinct semantics:
 3. **Ordinary Haskell `IO`** is not intercepted by Clef and is generally not
    replayable.
 
-Scheduling, retry, and replay are not synonyms. No Segno revival should begin
-until trace ownership and substitution rules are explicit.
+Scheduling, retry, and replay are not synonyms. The current Segno driver always
+executes a new occurrence through Tactus; it never substitutes a recorded
+terminal value. Replay work still requires explicit trace ownership and
+substitution rules.
 
 ## Current non-goals
 
@@ -174,11 +205,12 @@ The `0.3` core does not promise:
 - hostile-code isolation for Haskell or plugins;
 - plugin signing, authentication, capability tokens, approval UI, or a
   credential broker;
-- a daemon, socket API, service discovery, or persistent provider session;
+- a network daemon/API, service discovery, or persistent provider session;
 - a global static DAG for arbitrary Haskell control flow;
-- artifact publication, CAS, checkpoint restore, workspace transactions, or
-  Git rollback;
-- exactly-once provider calls/effect cleanup or automatic retry;
+- artifact publication, workspace transactions, automatic checkpoint restore,
+  or Git rollback outside Segno's explicit business-state CAS;
+- exactly-once provider calls/effect cleanup or automatic retry after an
+  ambiguous external outcome;
 - read/transient-write detection or attribution by `workspace.paths`;
 - permission equivalence among Codex, Claude Code, and OpenCode;
 - automatic translation of historical cell/notebook workflows or scheduler
@@ -194,7 +226,7 @@ boundary, migration impact, and honest residual limitations.
 A proposal becomes current only when all applicable evidence exists:
 
 1. an accepted, bounded contract;
-2. code in the authoritative Haskell Clef or Rust Tactus path;
+2. code in the authoritative Haskell Clef/Segno or Rust Tactus path;
 3. deterministic tests, including platform-specific cases where relevant;
 4. a support-matrix entry separating fake/offline/live evidence;
 5. user documentation and failure guidance;

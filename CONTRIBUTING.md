@@ -1,9 +1,9 @@
 # Contributing to Agenstro
 
-Agenstro `0.3` has three current implementation surfaces: Clef is the Haskell
-EDSL, Tactus is the Rust execution kernel, and Motivo Studio is its
-TypeScript/React visual projection. Segno Flow stays frozen. Do not introduce
-another workflow runtime or silently revive a legacy daemon path.
+Agenstro `0.3` has four current implementation surfaces: Clef is the Haskell
+EDSL, Tactus is the Rust execution kernel, Segno is the Haskell persistent-task
+driver, and Motivo Studio is the TypeScript/React visual projection. Do not
+revive the removed Python/Rust Segno stack or a legacy daemon path.
 
 ## Ownership boundaries
 
@@ -19,10 +19,13 @@ another workflow runtime or silently revive a legacy daemon path.
 | `archive/` | Read-only historical snapshots |
 | `crates/`, `proto/` | Retained legacy foundation code; not the Tactus `0.3` kernel |
 | `motivo-studio/` | Current Electron main/preload/React projection over Tactus control DTOs |
-| `segno-flow/` | Frozen; no current feature or packaging claim |
+| `segno-flow/haskell/src/` | Current Segno driver, lifecycle, plugin hosts, and SQLite backend |
+| `segno-flow/haskell/test/` | Offline virtual-clock, persistence, and protocol tests |
+| `segno-flow/examples/` | Explicit opt-in persistent-task examples; default gates use fakes |
+| `segno-flow/segno-flow.cabal` | Current Haskell package and `segno` executable |
 
-Changes to Segno should be limited to build hygiene, migration documentation,
-or a separately approved revival plan.
+Old Segno Python/Rust packages and their independent desktop surface are not
+current compatibility targets. Git history is the migration record.
 
 ## Design rules
 
@@ -46,8 +49,9 @@ or a separately approved revival plan.
    journal as replay, exactly-once execution, an artifact store, or rollback.
 8. Keep `workspace.paths` observational. It may report a final path delta, but
    it does not own files, retain contents, detect reads, or prove attribution.
-9. Do not add a daemon, credential broker, CAS, checkpoint system, or implicit
-   retry policy to the `0.3` core without a separate design decision.
+9. Keep persistent scheduling in Segno. Its versioned business-state CAS and
+   explicit checkpoints must remain separate from Tactus journals and from
+   Segno-owned lifecycle records.
 10. Keep Motivo a projection. Renderer code cannot import Node/Electron, and
     Electron main must call versioned Tactus control commands instead of
     parsing `tactus.toml`, `runtime.json`, or trace directories.
@@ -103,6 +107,32 @@ Add regression coverage for:
 
 Real provider calls are opt-in manual tests and must never run in the default
 gate.
+
+## Haskell Segno changes
+
+Keep the public model smaller than the scheduler implementation:
+
+- trigger leaves belong to open plugins; Haskell owns only typed
+  `mapTrigger`, `filterTrigger`, `mergeTrigger`, and state-aware `gate`;
+- do not add an `and` combinator without explicit correlation-key and time-
+  window semantics;
+- keep business `State state` physically and logically separate from lifecycle,
+  attempts, leases, fencing tokens, and trigger cursors;
+- use short compare-and-set transactions; never hold a database transaction
+  over a workflow or provider call;
+- keep interval/cron planning pure and let the driver own waiting;
+- execute every installed Clef task through Tactus rather than bypassing its
+  process/plugin boundary; and
+- preserve the honest at-least-once claim. Ambiguous external outcomes become
+  `OutcomeUnknown`, not an automatic unsafe retry.
+
+The built-in active-window example and all default Segno tests must run without
+a model. Use a fake window source and virtual time for deterministic scheduling
+coverage; a real foreground-window smoke is explicit and platform-local.
+
+Version one does not implement exactly-once execution, distributed drivers,
+serialized Haskell continuations, arbitrary workflow replay, or rollback of
+external effects.
 
 ### Keep Cargo artifacts out of the checkout
 
@@ -168,15 +198,15 @@ implicitly change `agenstro.plugin/v1`, and neither version promises replay.
 
 ## Documentation
 
-The MkDocs site publishes only the current Clef Haskell/Tactus Rust path plus
-selected migration material. Historical pages may remain excluded, but must not
-be presented as current support.
+The MkDocs site publishes the current Clef/Segno Haskell, Tactus Rust, and
+Motivo Studio path plus selected migration material. Historical pages may
+remain excluded, but must not be presented as current support.
 
 - Update `docs/getting-started.md` when installation or CLI syntax changes.
 - Update `docs/architecture.md` when runtime ownership changes.
 - Update protocol/reference pages for field-level changes.
 - Update `docs/troubleshooting.md` for reproducible user-facing failures.
-- Update `docs/roadmap.md` when a frozen surface or release gate changes.
+- Update `docs/roadmap.md` when a surface or release gate changes.
 
 Validate navigation and links:
 
@@ -212,7 +242,7 @@ git diff --cached --check
 Keep a change scoped to one architectural concern. State:
 
 - the user-visible outcome;
-- which current or frozen surfaces changed;
+- which current or historical surfaces changed;
 - exact validation commands and results;
 - whether any live provider request occurred; and
 - remaining limitations.

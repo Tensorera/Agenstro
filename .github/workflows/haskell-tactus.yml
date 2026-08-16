@@ -1,4 +1,4 @@
-name: Clef and Tactus 0.3
+name: Clef, Tactus, and Segno 0.3
 
 on:
   pull_request:
@@ -8,8 +8,10 @@ on:
       - "Cargo.toml"
       - "cabal.project"
       - "clef-sdk/**"
+      - "CONTRIBUTING.md"
       - "examples/topology-holes/**"
       - "motivo-studio/**"
+      - "segno-flow/**"
       - "tactus-runtime/**"
       - "README.md"
       - "docs/**"
@@ -21,8 +23,10 @@ on:
       - "Cargo.toml"
       - "cabal.project"
       - "clef-sdk/**"
+      - "CONTRIBUTING.md"
       - "examples/topology-holes/**"
       - "motivo-studio/**"
+      - "segno-flow/**"
       - "tactus-runtime/**"
       - "README.md"
       - "docs/**"
@@ -66,7 +70,7 @@ jobs:
         run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
 
   clef-haskell:
-    name: Clef Haskell (${{ matrix.os }}, GHC ${{ matrix.ghc }})
+    name: Clef and Segno Haskell (${{ matrix.os }}, GHC ${{ matrix.ghc }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,10 +102,32 @@ jobs:
       - name: Put Tactus on PATH
         shell: bash
         run: echo "$CARGO_TARGET_DIR/debug" >> "$GITHUB_PATH"
-      - name: Build Clef
+      - name: Update Hackage index
+        run: cabal update
+      - name: Build Clef and Segno
         run: cabal build all --enable-tests
       - name: Test Clef with fake streaming plugins
-        run: cabal test all --test-show-details=direct
+        run: cabal test clef-sdk:test:clef-sdk-tests --test-show-details=direct
+      - name: Test Segno with virtual time and fake process boundaries
+        run: cabal test segno-flow:test:segno-flow-tests --test-show-details=direct
+      - name: Type-check the model-free active-window persistent task
+        run: >-
+          cabal exec -- ghc -fno-code -package clef-sdk -package segno-flow
+          segno-flow/examples/active-window/900_record_active_window.hs
+      - name: Exercise Segno through Tactus package resolution
+        shell: bash
+        run: |
+          smoke="$RUNNER_TEMP/segno-package-e2e"
+          script="$smoke/.tactus/scripts/900_record_active_window.hs"
+          manifest="$smoke/task-manifest.json"
+          segno_bin="$(cabal list-bin segno-flow:exe:segno)"
+          tactus init "$smoke" --sdk "$GITHUB_WORKSPACE/clef-sdk"
+          "$segno_bin" init --root "$smoke" --sdk "$GITHUB_WORKSPACE/segno-flow"
+          cp segno-flow/examples/active-window/900_record_active_window.hs "$script"
+          tactus check --root "$smoke" --package segno-flow "$script"
+          SEGNO_MODE=describe SEGNO_RESULT_PATH="$manifest" \
+            tactus run --root "$smoke" --package segno-flow --script "$script"
+          python -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); assert value["api"] == "agenstro.segno.task/v1"' "$manifest"
       - name: Exercise Haskell through the typed Rust dispatcher
         run: >-
           cargo +stable test --locked -p tactus-runtime --test runtime
@@ -116,6 +142,12 @@ jobs:
         shell: bash
         run: |
           cd clef-sdk
+          cabal check
+          cabal sdist
+      - name: Validate the Segno source distribution
+        shell: bash
+        run: |
+          cd segno-flow
           cabal check
           cabal sdist
       - name: Run the real Tactus-to-GHC path

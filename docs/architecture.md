@@ -1,29 +1,28 @@
 ---
 title: Agenstro 0.3 architecture
 status: alpha
-last_verified: 2026-08-15
-applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
+last_verified: 2026-08-16
+applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, and Segno Haskell 0.3.0.0"
 ---
 
 # Agenstro 0.3 architecture
 
-Agenstro has two authoritative runtime components and one visual projection.
+Agenstro has three authoritative runtime components and one visual projection.
 Clef is a compact typed Haskell EDSL. Tactus is the Rust process/runtime kernel
 that prepares a project, executes Clef programs, supervises plugins, routes
-events, and records factual run evidence. Motivo Studio is a TypeScript/React
-desktop client that asks Tactus for redacted, versioned projections.
+events, and records factual run evidence. Segno is the Haskell driver for typed
+persistent tasks. Motivo Studio is a TypeScript/React desktop client that asks
+Tactus for redacted, versioned projections.
 
 The architectural split is:
 
 | Component | Owns | Deliberately does not own |
 | --- | --- | --- |
-| Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, incremental event sink | Provider catalogue, permission policy, custom language parser, daemon, global scheduler, artifacts, authentication |
+| Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, incremental event sink, typed `Trigger state event`/`State state`/`PersistentTask` boundary | Provider catalogue, permission policy, custom language parser, scheduler loop, lifecycle database, artifacts, authentication |
 | Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio control DTOs | Haskell workflow semantics, provider credentials, daemon/API service, CAS, replay, rollback, GUI |
+| Segno `0.3.0.0` | Single-node driver, trigger cursors, occurrence lifecycle, leases/fences, SQLite state plugin, interval/cron planning, invocation/result handoff to Tactus | Workflow value semantics, distributed consensus, exactly-once effects, rollback, replay, provider execution |
 | Motivo `0.3.0` | Electron window/preload boundary, React visualization, named Zod IPC, one top-level Tactus action | Workflow semantics, config/trace parsing, general filesystem/shell access, daemon, scheduler, replay, credentials |
 | Plugins | Provider/effect/domain behavior behind `agenstro.plugin/v1` | Core workflow composition and runtime ownership |
-
-Segno Flow remains frozen code. It is outside the `0.3` execution graph and
-release gate.
 
 ## Component flow
 
@@ -58,6 +57,17 @@ tactus run
                               |
                               +-> same supervisor/journal path above
 
+segno driver (Haskell, long lived)
+        |
+        +-> plan trigger leaves through Tactus -> interval / cron plugin
+        +-> persist cursor + lifecycle --------> private lifecycle.sqlite3
+        +-> load/CAS typed business state -----> segno.state plugin
+                                                   -> business.sqlite3
+        +-> tactus run --package segno-flow ---> one Clef PersistentTask
+                                                    |
+                                                    +-> Ignore / Complete /
+                                                        Retry / Fail
+
 Motivo renderer (sandboxed React)
         |
         | named, Zod-validated IPC
@@ -69,8 +79,10 @@ Electron main (workspace root + child handle)
 tactus studio inspect/events + generate/check/run/smoke
 ```
 
-There is no resident service between these boxes. Each invocation is
-self-contained and correlated by request/run identifiers.
+Clef and Tactus remain one-shot. The optional Segno driver is the one resident
+local loop: it must wait even when no workflow process exists. Each trigger,
+state, workflow, provider, and effect invocation is still a separately
+correlated process operation; Segno does not expose a network daemon API.
 
 ## Clef: static composition, open runtime
 
@@ -107,6 +119,14 @@ The Haskell layer intentionally leaves these values open:
 
 This prevents the core type model from becoming an out-of-date provider enum.
 Typed convenience wrappers can be added at stable plugin boundaries.
+
+Clef also defines the small typed handoff used by Segno. `Trigger state event`
+has plugin-provided leaves and Haskell `mapTrigger`, `filterTrigger`,
+`mergeTrigger`, and state-aware `gate` composition. `State state` carries a
+stable key, schema version/migration, initial value, backend, and explicit
+compare-and-set behavior. `PersistentTask` binds both to a Clef workflow that
+returns `Ignore`, `Complete`, `Retry`, or `Fail`. Clef describes and executes
+one occurrence; it does not schedule or persist lifecycle state.
 
 ## Tactus workspace and typed configuration
 
@@ -186,6 +206,68 @@ incremental parser enqueues it for its isolated `EventSink` worker.
 
 Human diagnostics travel on stderr. They remain outside protocol frames and
 typed workflow return values.
+
+## Segno persistent-task driver
+
+Segno owns the time and state that must survive between Clef processes. Its
+driver repeatedly:
+
+1. loads each installed task manifest and durable trigger cursor;
+2. asks a trigger plugin to plan occurrences at the current observed time;
+3. inserts each occurrence using its deterministic idempotency key;
+4. advances the source cursor only after durable insertion;
+5. claims ready work with an attempt, lease, and fencing token;
+6. loads the typed business-state snapshot;
+7. invokes the installed Haskell script through Tactus; and
+8. validates and commits the script's explicit decision.
+
+The driver owns waiting. Built-in `time.interval` and `time.cron` plugins are
+pure planners: configuration plus cursor plus current time produces due
+occurrences and a next wake time. They never call `sleep`. Missed occurrences
+can therefore be calculated after restart and tested against a virtual clock.
+Cron is UTC-only in version one.
+
+An occurrence carries trigger and occurrence identities, logical and observed
+time, cursor, idempotency key, attempt, and a typed payload. Delivery is at
+least once. A local transport failure cannot prove that an external effect did
+not complete, so an ambiguous execution becomes `OutcomeUnknown` instead of
+an automatic retry.
+
+## Segno state and plugin boundary
+
+Scheduler lifecycle and workflow business state are deliberately separate.
+Segno alone updates `Dormant`, `Ready`, `Claimed`, `Running`, `Waiting`,
+`Succeeded`, `Failed`, and `OutcomeUnknown`, together with occurrence,
+attempt, lease, and fence metadata. A user's `State state` value cannot mutate
+those records.
+
+The workflow reads an immutable `StateHandle state`. An explicit checkpoint is
+a short compare-and-set operation and returns a handle with a new opaque
+revision. No database transaction remains open while a workflow or agent runs.
+A committed checkpoint is not rolled back if the workflow later fails or a
+plugin has already changed external state. A business-state CAS and the later
+lifecycle transition are separate durable facts; version one does not claim a
+crash-atomic commit across the two SQLite databases.
+
+Trigger leaves and state backends use the same open one-shot plugin process
+shape as other Agenstro plugins. Trigger plugins expose `describe`, `plan`,
+`poll`, `acknowledge`, and `smoke`; state plugins expose `describe`, `load`,
+`compare-and-set`, `append`, `history`, and `smoke`. SQLite is the first local
+backend. A future PostgreSQL, Redis, queue, filesystem, or webhook plugin can be
+implemented in any language without widening Clef's Haskell core.
+
+Segno keeps its durable files below the selected workspace, separate from
+Tactus run evidence:
+
+```text
+.tactus/
+  scripts/
+  runs/
+  segno/
+    jobs/
+    state/
+    triggers/
+```
 
 ## Motivo Studio projection
 
@@ -286,20 +368,28 @@ isolation.
 
 The `0.3` architecture has no:
 
-- daemon, socket API, service discovery, or persistent provider session;
+- network daemon/API, service discovery, or persistent provider session;
 - authentication, capability token, approval UI, or credential broker;
-- artifact tracker, CAS, checkpoint, workspace transaction, or rollback;
-- exactly-once provider/effect guarantee or automatic retry;
+- artifact tracker, workspace transaction, or rollback;
+- exactly-once provider/effect guarantee or automatic retry after an
+  ambiguous external outcome;
 - global static DAG for arbitrary Haskell control flow; or
 - deterministic replay of arbitrary Haskell `IO`.
 
-## Frozen surface
+Segno adds versioned business-state CAS and explicit checkpoints for persistent
+tasks. It does not turn a workspace, provider invocation, or arbitrary `IO`
+block into a transaction.
 
-Segno Flow remains a scheduling/replay exploration. Any revival must separate
-recorded-result replay from a new live provider invocation and acknowledge that
-ordinary Haskell `IO` is not interceptable. It does not participate in the
-current build/runtime claim.
+## Scheduling is not replay
+
+Segno schedules a new occurrence and executes it through Tactus. It does not
+substitute a recorded plugin result, serialize a Haskell continuation, or
+intercept arbitrary `IO`. Re-running an occurrence can perform external work
+again. Exactly-once delivery, distributed multi-node scheduling, automatic
+external-effect rollback, and arbitrary workflow replay remain explicit
+non-goals for this release.
 
 See the [plugin protocol](reference/plugin-protocol-v1.md), [support
-matrix](reference/support-matrix.md), and [roadmap](roadmap.md) for the exact
-current boundary.
+matrix](reference/support-matrix.md), [Segno guide](segno.md), and
+[ADR-0004](adr/0004-haskell-segno-persistent-tasks.md) for the exact current
+boundary.

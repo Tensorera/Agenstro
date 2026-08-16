@@ -14,7 +14,7 @@ The current source-alpha line is `0.3`:
 | [`tactus-runtime`](tactus-runtime/) | Rust `0.3.0` | Workspace, process supervision, event routing, run journals, and CLI |
 | Local plugins | `agenstro.plugin/v1` | One-shot JSONL processes in any implementation language |
 | [`motivo-studio`](motivo-studio/) | TypeScript/Electron `0.3.0` | Visual Tactus workspace, plugin, action, and trace projection |
-| [`segno-flow`](segno-flow/) | frozen | Retained scheduling/replay exploration; not a `0.3` release gate |
+| [`segno-flow`](segno-flow/) | Haskell/Cabal `0.3.0.0` | Pluginized typed persistent-task driver for Tactus workspaces |
 
 ## The small core
 
@@ -30,6 +30,8 @@ Clef exposes a conventional Haskell API:
 - `require`, `requireBecause`, and `attempt` express typed workflow control.
 - `EventSink` receives provider/plugin events as each complete JSONL frame
   arrives; events do not pollute the workflow's typed return value.
+- `Trigger state event`, `State state`, and `PersistentTask` form the small
+  typed boundary for durable Segno tasks.
 
 Provider names, models, reasoning effort, flags, and plugin-specific options are
 open runtime values, not closed Haskell enumerations. GHC checks value wiring;
@@ -41,6 +43,14 @@ one-shot process group, routes events incrementally, and writes factual
 `agenstro.trace/v1` journals below `.tactus/runs/`. It is not a daemon and does
 not provide authentication, a credential broker, CAS/artifact storage,
 checkpoint restore, or rollback.
+
+Segno is the optional Haskell persistent-task driver. Haskell composes typed
+trigger leaves with `mapTrigger`, `filterTrigger`, `mergeTrigger`, and `gate`;
+plugins provide the leaves and state backends. The first built-ins are pure
+interval/UTC-cron planners and SQLite business state. Segno owns waiting,
+cursors, attempts, leases, fencing, and lifecycle, while every actual Clef job
+still executes through Tactus. Delivery is at least once; it is scheduling,
+not replay or an exactly-once transaction.
 
 Motivo Studio is a thin TypeScript + React desktop client over that Rust
 kernel. Electron main invokes the installed `tactus` executable with argv
@@ -55,18 +65,37 @@ Install Rust with `rustup` and Haskell with GHCup. Clef currently declares
 one native coding-agent CLI (`codex`, `claude`, or `opencode`) is needed only
 for the corresponding live provider call.
 
-From the repository root:
+On Windows, put the GHCup shims and Cargo's executable directory on the current
+PowerShell `PATH`, then install both public commands into the Cargo directory:
 
 ```powershell
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
+Set-Location $repoRoot
+
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
-cabal build all
+cabal build all --enable-tests
+cabal install segno-flow:exe:segno `
+  --installdir $toolBin `
+  --overwrite-policy=always
+
+Get-Command tactus,segno -All
 tactus --version
+segno --version
+tactus check --help | Select-String -Pattern '--package'
 ```
 
-The current Rust Tactus path has no Python runtime dependency. A third-party
-plugin may still be implemented in Python, TypeScript, C#, Rust, Haskell, or any
-other language that can obey the JSONL process contract.
+These are also the upgrade commands: `--force` replaces an older Tactus and
+`--overwrite-policy=always` replaces an older Segno. Checking `--package` is
+important because an earlier binary can also print `tactus 0.3.0` while lacking
+the Segno package-extension option. Open a new terminal if `Get-Command -All`
+still resolves a stale executable first.
+
+The current Tactus and Segno paths have no Python runtime dependency. A
+third-party plugin may still be implemented in Python, TypeScript, C#, Rust,
+Haskell, or any other language that can obey the JSONL process contract.
 
 ## Try it in a project
 
@@ -121,6 +150,66 @@ For a deterministic four-stage example, see
 ASCII-grid parser, through component and hole counting, to a reviewed CLI. Its
 checked-in Rust oracle uses a temporary Cargo target directory and cleans it
 after the test.
+
+## Run a persistent task
+
+For an existing initialized project, verify the marker and add Segno in place.
+`segno init` preserves existing Tactus content while adding its package link,
+plugin registrations, and `.tactus\segno` state layout:
+
+```powershell
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$projectRoot = (Resolve-Path D:\work\my-project).Path
+if (-not (Test-Path (Join-Path $projectRoot ".tactus\tactus.toml"))) {
+  throw "Run tactus init first"
+}
+
+tactus doctor --root $projectRoot
+segno init --root $projectRoot --sdk (Join-Path $repoRoot "segno-flow")
+```
+
+An installed task binds typed trigger leaves, typed/versioned business state,
+and one Clef workflow. The driver persists trigger cursors and lifecycle, then
+runs each due occurrence through Tactus:
+
+```powershell
+$script = Join-Path $projectRoot ".tactus\scripts\900_record_active_window.hs"
+Copy-Item `
+  (Join-Path $repoRoot "segno-flow\examples\active-window\900_record_active_window.hs") `
+  $script
+
+# Warm the local Clef + Segno Cabal project without executing the task.
+tactus check --root $projectRoot --package segno-flow `
+  --timeout-seconds 7200 $script
+
+segno install --root $projectRoot $script
+segno once --root $projectRoot
+segno status --root $projectRoot --job record-active-window
+segno history --root $projectRoot --state-key example.active-window --limit 20
+
+# Keep this terminal open for subsequent one-minute occurrences.
+segno driver --root $projectRoot --poll-seconds 5
+```
+
+The first cold `tactus check` may download Haskell packages and compile Clef,
+Segno, `cron`, SQLite bindings, and Win32 support. Several minutes of compiler
+output is normal; subsequent checks reuse the Cabal store and build cache.
+`--timeout-seconds 0` disables the direct Tactus deadline, while the example
+uses a generous finite value above.
+
+`--poll-seconds` controls only the driver's maximum idle wait; it does not
+change the task's 60-second interval. For long-running workflows, pass
+`--task-timeout-seconds N` to `segno install`, `once`, and `driver`. Its default
+is 1,800 seconds, accepted range is 1 through 604,800, and zero is not allowed.
+Segno derives its Running lease from the same budget.
+
+The example records the Windows foreground-window title every minute without a
+model or network call. The first `once` is due immediately. Titles can include
+document names, URLs, or account names; both SQLite history and Tactus run
+evidence retain them locally and should not be committed. Delivery is at least
+once, but an ambiguous timed-out/failed task becomes `OutcomeUnknown` and is
+not retried automatically. See the [Segno guide](docs/segno.md) before deciding
+whether any external effect is safe to repeat.
 
 ## Visualize a Tactus workspace
 
@@ -247,7 +336,7 @@ docs/                   current docs and selected migration material
 archive/                frozen historical source snapshots
 crates/, proto/         retained legacy foundation code, outside the 0.3 gate
 motivo-studio/          current TypeScript/React Tactus visualizer
-segno-flow/             frozen scheduling/replay exploration
+segno-flow/             current Haskell persistent-task driver and plugins
 ```
 
 Private design notes under `secretdoc/`, `.tactus/` target-project state, model
@@ -296,9 +385,11 @@ MkDocs command uses Python only as the documentation tool, not as part of
 Tactus.
 
 Start with the [getting-started guide](docs/getting-started.md), [architecture
-overview](docs/architecture.md), [plugin protocol](docs/reference/plugin-protocol-v1.md),
+overview](docs/architecture.md), [CLI reference](docs/reference/cli-v0.3.md),
+[Segno guide](docs/segno.md), [plugin protocol](docs/reference/plugin-protocol-v1.md),
 [support matrix](docs/reference/support-matrix.md), and [troubleshooting
-guide](docs/troubleshooting.md).
+guide](docs/troubleshooting.md). Release-level changes are summarized in the
+[changelog](CHANGELOG.md).
 
 This repository is currently private. No public release or additional license
 grant is implied by access to this alpha checkout.

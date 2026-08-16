@@ -1,5 +1,5 @@
-site_name: Agenstro 0.3 Haskell + Rust Alpha
-site_description: Clef Haskell DSL and Tactus Rust runtime documentation
+site_name: Agenstro 0.3
+site_description: Clef and Segno Haskell DSLs with the Tactus Rust runtime
 repo_name: Tensorera/agenstro
 repo_url: https://github.com/Tensorera/agenstro
 docs_dir: docs
@@ -14,27 +14,6 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-
-# Historical architecture pages remain in Git and describe superseded runtime
-# ownership. The published 0.3 surface is Clef Haskell, Tactus Rust, and the
-# thin Motivo Studio projection. Segno Flow remains frozen.
-exclude_docs: |
-  adr/0001-versioned-rust-foundation.md
-  adr/0002-daemon-state-and-electron-boundaries.md
-  alpha-cross-language-slice.md
-  tutorials/**
-  how-to/**
-  explanation/**
-  migrations/prototype-to-greenfield.md
-  reference/agent-configuration.md
-  reference/clef-api.md
-  reference/clef-entities.md
-  reference/clef/**
-  reference/glossary.md
-  reference/index.md
-  reference/known-limitations.md
-  reference/source-contracts.md
-  reference/tactus-*.md
 
 validation:
   nav:
@@ -51,15 +30,21 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Architecture: architecture.md
+  - Segno persistent tasks: segno.md
   - Motivo Studio: motivo-studio.md
   - Reference:
       - Local plugin protocol v1: reference/plugin-protocol-v1.md
+      - CLI reference: reference/cli-v0.3.md
+      - Segno plugin wire v1: reference/segno-plugin-wire-v1.md
       - Studio control API v1: reference/studio-control-v1.md
       - Support matrix: reference/support-matrix.md
   - Operations:
       - Troubleshooting: troubleshooting.md
+  - Contributing:
+      - Writing documentation: how-to/write-documentation.md
   - Project direction: roadmap.md
   - Decisions:
       - ADR 0003 - Haskell DSL and local plugins: adr/0003-haskell-dsl-and-local-plugins.md
+      - ADR 0004 - Haskell Segno persistent tasks: adr/0004-haskell-segno-persistent-tasks.md
   - Migration:
       - 0.2 to Haskell 0.3: migrations/0.2-to-haskell-0.3.md

@@ -13,7 +13,7 @@ import Clef.Plugin.Protocol
   )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (SomeException, bracket, catch, finally, throwIO, try)
 import Control.Monad (forM, unless)
 import Data.Aeson
   ( FromJSON (parseJSON),
@@ -23,6 +23,7 @@ import Data.Aeson
     object,
     withObject,
     (.:),
+    (.:?),
     (.=),
   )
 import Data.Aeson.Types (Parser, parseEither)
@@ -36,10 +37,10 @@ import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
-import System.Directory (getCurrentDirectory)
-import System.Environment (getArgs, getExecutablePath)
+import System.Directory (getCurrentDirectory, removeFile)
+import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (exitFailure)
-import System.IO (stderr)
+import System.IO (hClose, openBinaryTempFile, stderr)
 import qualified System.IO as IO
 import System.Timeout (timeout)
 
@@ -76,7 +77,11 @@ runTests = do
           ("invoke records provider value and observer evidence separately", testInvokeAndObserve workspace executable),
           ("observer begin cancellation cleans up earlier observers", testObserverBeginCancellation workspace executable),
           ("observer end cancellation does not skip remaining observers", testObserverEndCancellation workspace executable),
-          ("typed workspace path operations", testWorkspaceOperations workspace executable)
+          ("typed workspace path operations", testWorkspaceOperations workspace executable),
+          ("Segno trigger manifest is typed and deterministic", testSegnoManifest),
+          ("Segno describe publishes an atomic result document", testSegnoDescribe workspace),
+          ("Segno execute checkpoints through the generic state plugin", testSegnoExecute workspace executable),
+          ("Segno gate ignores before loading the Clef runtime", testSegnoGate workspace)
         ]
   outcomes <- forM tests runOne
   unless (and outcomes) exitFailure
@@ -557,6 +562,230 @@ testWorkspaceOperations workspace executable = do
   assertEqual "added paths" ["created.txt"] (WorkspacePaths.workspaceAddedPaths changes)
   assertEqual "forget result" True (WorkspacePaths.workspaceSnapshotForgotten forgotten)
 
+segnoCounterTask :: PersistentTask Int Int Int
+segnoCounterTask =
+  persistentTask "minute-counter" selectedTrigger selectedState $ \occurrence handle -> do
+    checkpointed <- checkpoint (CheckpointId "record-window") handle (occurrencePayload occurrence)
+    case checkpointed of
+      Left conflict ->
+        pure . Fail $
+          TaskFailure
+            { taskFailureCode = "state_conflict",
+              taskFailureMessage = Text.pack (show conflict),
+              taskFailureDetails = Nothing
+            }
+      Right nextHandle -> pure (Complete (KeepState nextHandle) (occurrencePayload occurrence))
+  where
+    selectedState = state (StateKey "window-count") (SchemaVersion 2) 0
+    selectedTrigger =
+      gate (\counter tick -> tick > counter) . mapTrigger (+ 1) . filterTrigger (> 0) $
+        triggerSource
+          (TriggerId "each-minute")
+          "time.interval"
+          (object ["milliseconds" .= ("60000" :: Text)])
+
+testSegnoManifest :: IO ()
+testSegnoManifest = do
+  manifest <- either throwIO pure (taskManifest segnoCounterTask)
+  (api, taskName, sourceCount, backend, initialValue) <-
+    parseFakeParams
+      ( withObject "task manifest" $ \fields -> do
+          api <- fields .: "api"
+          taskName <- fields .: "task"
+          sources <- fields .: "sources"
+          stateValue <- fields .: "state"
+          (backend, initialValue) <-
+            withObject "state manifest" (\stateFields -> (,) <$> stateFields .: "backend" <*> stateFields .: "initial") stateValue
+          pure (api, taskName, length (sources :: [Value]), backend, initialValue)
+      )
+      manifest :: IO (Text, Text, Int, Text, Int)
+  assertEqual "manifest api" "agenstro.segno.task/v1" api
+  assertEqual "manifest task" "minute-counter" taskName
+  assertEqual "manifest source count" 1 sourceCount
+  assertEqual "manifest default state backend" "segno.state" backend
+  assertEqual "manifest initial state" 0 initialValue
+  let duplicateTrigger =
+        mergeTrigger
+          (triggerSource (TriggerId "same") "manual" (object []) :: Trigger Int Int)
+          (triggerSource (TriggerId "same") "manual" (object []) :: Trigger Int Int)
+      duplicateTask :: PersistentTask Int Int Int
+      duplicateTask = persistentTask "duplicate" duplicateTrigger (state (StateKey "counter") (SchemaVersion 1) (0 :: Int)) (\_ _ -> pure Ignore)
+  case taskManifest duplicateTask of
+    Left (InvalidSegnoDefinition message) ->
+      unless ("unique" `Text.isInfixOf` message) (failTest "duplicate trigger error lost its reason")
+    other -> failTest $ "duplicate trigger identities should fail, received " <> showManifestResult other
+
+testSegnoDescribe :: FilePath -> IO ()
+testSegnoDescribe workspace = do
+  resultPath <- vacantTemporaryPath workspace "segno-describe-result.json"
+  let environment =
+        [ ("SEGNO_MODE", "describe"),
+          ("SEGNO_RESULT_PATH", resultPath)
+        ]
+  flip finally (removeIfPresent resultPath) $ do
+    withEnvironment environment (runPersistentTask segnoCounterTask)
+    encoded <- ByteString.readFile resultPath
+    actual <- case eitherDecodeStrict' encoded of
+      Left message -> failTest $ "Segno describe result is not JSON: " <> message
+      Right value -> pure value
+    expected <- either throwIO pure (taskManifest segnoCounterTask)
+    assertEqual "describe result" expected actual
+
+testSegnoExecute :: FilePath -> FilePath -> IO ()
+testSegnoExecute workspace executable = do
+  invocationPath <- temporaryFile workspace "segno-invocation.json"
+  runtimePath <- temporaryFile workspace "segno-runtime.json"
+  resultPath <- vacantTemporaryPath workspace "segno-result.json"
+  LazyByteString.writeFile invocationPath (encode (segnoInvocation 0 1))
+  LazyByteString.writeFile runtimePath (encode (segnoRuntimeDocument workspace executable))
+  let environment =
+        [ ("SEGNO_MODE", "execute"),
+          ("SEGNO_INVOCATION_PATH", invocationPath),
+          ("SEGNO_RESULT_PATH", resultPath),
+          ("TACTUS_RUNTIME_CONFIG", runtimePath)
+        ]
+      cleanup = mapM_ removeIfPresent [invocationPath, runtimePath, resultPath]
+  flip finally cleanup $ do
+    withEnvironment environment (runPersistentTask segnoCounterTask)
+    encoded <- ByteString.readFile resultPath
+    result <- case eitherDecodeStrict' encoded of
+      Left message -> failTest $ "Segno result is not JSON: " <> message
+      Right value -> pure value
+    (api, occurrenceIdentity, kind, transitionKind, revisionValue, output) <-
+      parseFakeParams parseSegnoResult result :: IO (Text, Text, Text, Text, Maybe Text, Int)
+    assertEqual "execute result api" "agenstro.segno.result/v1" api
+    assertEqual "execute occurrence" "occ-minute-1" occurrenceIdentity
+    assertEqual "execute decision" "complete" kind
+    assertEqual "execute state transition" "keep" transitionKind
+    assertEqual "checkpoint revision flows into final transition" (Just "checkpoint-1") revisionValue
+    assertEqual "mapped trigger payload reaches workflow" 2 output
+
+testSegnoGate :: FilePath -> IO ()
+testSegnoGate workspace = do
+  invocationPath <- temporaryFile workspace "segno-gated-invocation.json"
+  resultPath <- vacantTemporaryPath workspace "segno-gated-result.json"
+  LazyByteString.writeFile invocationPath (encode (segnoInvocation 10 1))
+  let environment =
+        [ ("SEGNO_MODE", "execute"),
+          ("SEGNO_INVOCATION_PATH", invocationPath),
+          ("SEGNO_RESULT_PATH", resultPath),
+          ("TACTUS_RUNTIME_CONFIG", workspace <> "/intentionally-missing-segno-runtime.json")
+        ]
+      cleanup = mapM_ removeIfPresent [invocationPath, resultPath]
+  flip finally cleanup $ do
+    withEnvironment environment (runPersistentTask segnoCounterTask)
+    encoded <- ByteString.readFile resultPath
+    result <- case eitherDecodeStrict' encoded of
+      Left message -> failTest $ "gated Segno result is not JSON: " <> message
+      Right value -> pure value
+    kind <-
+      parseFakeParams
+        ( withObject "Segno result" $ \fields -> do
+            decision <- fields .: "decision"
+            withObject "decision" (.: "kind") decision
+        )
+        result :: IO Text
+    assertEqual "gate rejection becomes Ignore" "ignore" kind
+
+segnoInvocation :: Int -> Int -> Value
+segnoInvocation storedValue payloadValue =
+  object
+    [ "api" .= ("agenstro.segno.invocation/v1" :: Text),
+      "task" .= ("minute-counter" :: Text),
+      "attempt" .= (1 :: Int),
+      "fencing_token" .= ("fence-1" :: Text),
+      "trigger"
+        .= object
+          [ "trigger_id" .= ("each-minute" :: Text),
+            "occurrence_id" .= ("occ-minute-1" :: Text),
+            "logical_time" .= ("2026-08-16T12:00:00Z" :: Text),
+            "observed_time" .= ("2026-08-16T12:00:01Z" :: Text),
+            "cursor" .= object ["tick" .= (1 :: Int)],
+            "idempotency_key" .= ("minute:2026-08-16T12:00:00Z" :: Text),
+            "payload" .= payloadValue
+          ],
+      "state"
+        .= object
+          [ "key" .= ("window-count" :: Text),
+            "revision" .= (Just "state-1" :: Maybe Text),
+            "schema_version" .= (2 :: Int),
+            "value" .= storedValue
+          ]
+    ]
+
+segnoRuntimeDocument :: FilePath -> FilePath -> Value
+segnoRuntimeDocument workspace executable =
+  object
+    [ "api" .= ("clef.runtime/v1" :: Text),
+      "workspace" .= workspace,
+      "default_provider" .= ("fake" :: Text),
+      "providers"
+        .= object
+          [ "fake"
+              .= object
+                [ "command" .= [executable, "--fake-plugin"],
+                  "options" .= object []
+                ]
+          ],
+      "effects" .= object [],
+      "plugins"
+        .= object
+          [ "segno.state"
+              .= object
+                [ "command" .= [executable, "--fake-plugin"],
+                  "options" .= object []
+                ]
+          ],
+      "instructions" .= ("" :: Text)
+    ]
+
+parseSegnoResult :: Value -> Parser (Text, Text, Text, Text, Maybe Text, Int)
+parseSegnoResult = withObject "Segno result" $ \fields -> do
+  api <- fields .: "api"
+  occurrenceIdentity <- fields .: "occurrence_id"
+  decision <- fields .: "decision"
+  (kind, transitionKind, revisionValue, output) <-
+    withObject "decision" (\decisionFields -> do
+      kind <- decisionFields .: "kind"
+      transition <- decisionFields .: "state"
+      (transitionKind, revisionValue) <-
+        withObject "state transition" (\stateFields -> (,) <$> stateFields .: "kind" <*> stateFields .:? "expected_revision") transition
+      output <- decisionFields .: "output"
+      pure (kind, transitionKind, revisionValue, output)) decision
+  pure (api, occurrenceIdentity, kind, transitionKind, revisionValue, output)
+
+temporaryFile :: FilePath -> String -> IO FilePath
+temporaryFile directory template = do
+  (path, handle) <- openBinaryTempFile directory template
+  hClose handle
+  pure path
+
+vacantTemporaryPath :: FilePath -> String -> IO FilePath
+vacantTemporaryPath directory template = do
+  path <- temporaryFile directory template
+  removeFile path
+  pure path
+
+withEnvironment :: [(String, String)] -> IO value -> IO value
+withEnvironment assignments action = bracket capture restore $ \_ -> do
+  mapM_ (uncurry setEnv) assignments
+  action
+  where
+    capture = mapM captureOne assignments
+    captureOne (name, _) = do
+      previous <- lookupEnv name
+      pure (name, previous)
+    restore = mapM_ $ \(name, previous) -> case previous of
+      Nothing -> unsetEnv name
+      Just value -> setEnv name value
+
+removeIfPresent :: FilePath -> IO ()
+removeIfPresent path = removeFile path `catch` (\(_ :: SomeException) -> pure ())
+
+showManifestResult :: Either SegnoError Value -> String
+showManifestResult (Left errorValue) = show errorValue
+showManifestResult (Right value) = show value
+
 testConfig :: FilePath -> FilePath -> RuntimeConfig
 testConfig workspace executable =
   RuntimeConfig
@@ -686,6 +915,26 @@ fakePlugin = do
       (left, right) <-
         parseFakeParams (withObject "add params" (.: "input")) params :: IO (Int, Int)
       succeed requestId (left + right)
+    "compare-and-set" -> do
+      (stateKey, expectedRevision, operationIdentity, occurrenceIdentity, fencingToken, fencingEpoch) <-
+        parseFakeParams
+          ( withObject "compare-and-set params" $ \objectValue ->
+              (,,,,,)
+                <$> objectValue .: "state_key"
+                <*> objectValue .:? "expected_revision"
+                <*> objectValue .: "operation_id"
+                <*> objectValue .: "occurrence_id"
+                <*> objectValue .: "fencing_token"
+                <*> objectValue .: "fencing_epoch"
+          )
+          params :: IO (Text, Maybe Text, Text, Text, Text, Int)
+      assertEqual "checkpoint state key" "window-count" stateKey
+      assertEqual "checkpoint expected revision" (Just "state-1") expectedRevision
+      assertEqual "checkpoint operation" "record-window" operationIdentity
+      assertEqual "checkpoint occurrence" "occ-minute-1" occurrenceIdentity
+      assertEqual "checkpoint fence" "fence-1" fencingToken
+      assertEqual "checkpoint fence epoch" 1 fencingEpoch
+      succeed requestId (object ["applied" .= True, "revision" .= ("checkpoint-1" :: Text)])
     _ ->
       emit $
         object

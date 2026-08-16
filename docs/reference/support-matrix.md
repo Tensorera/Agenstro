@@ -2,8 +2,8 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-08-15
-applies_to: "Clef 0.3.0.0 + Tactus 0.3.0"
+last_verified: 2026-08-16
+applies_to: "Clef/Segno 0.3.0.0 + Tactus 0.3.0"
 platforms: [windows, ubuntu]
 ---
 
@@ -29,7 +29,11 @@ successful call to a live provider account.
 | `tactus smoke` | Offline unless `--live` | Current gate | Current gate | default sends no model prompt; CI uses fakes; live native/account compatibility is opt-in evidence |
 | Topology-holes example | Four Haskell workflow stages + offline Rust oracle | Current gate | Current gate | real Tactus -> runghc -> Clef -> dispatch acceptance runs 010 -> 040 with parallel reviews and observer journals; the oracle verifies holes/Euler independently |
 | Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; fake Tactus only, no model credentials; packaged app requires external `tactus` |
-| Segno Flow | Frozen | Not gated | Not gated | source retained; scheduling and replay are outside `0.3` |
+| Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test all`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
+| Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
+| Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
+| Segno SQLite state/lifecycle | business and lifecycle databases below `.tactus/segno/state` | Current gate | Current gate | local tests cover cross-job occurrence identity, checkpoint scoping, stale fences, trigger-failure isolation, and unknown non-retry; single-node only |
+| Active-window plugin | Built-in Haskell plugin | Current gate | Structured unsupported result | Windows uses the Win32 package; CI type-checks and fake-tests minute scheduling but does not collect a developer's real foreground title |
 | Historical worker/daemon/cell paths | Legacy evidence only | Not gated | Not gated | not installable through current Tactus and not compatible state |
 
 ## CLI and network behavior
@@ -42,6 +46,19 @@ successful call to a live provider account.
 | `smoke` | Yes | Starts selected plugin executable | Only with `--live` for provider adapters |
 | `plugin-call` | Depends on method | Yes | Yes for provider/network plugins |
 | `generate` | No | Provider may edit the workspace | Yes |
+| `segno init/list/status/history` | Yes | Local layout and SQLite inspection | No |
+| `segno install` | No provider call | Runs the trusted task in describe mode through Tactus | Only if the task violates the describe contract with direct `IO` |
+| `segno once/driver` | Depends on installed tasks | Yes; executes each due Clef task through Tactus | Yes if a task invokes a provider/network plugin |
+
+## Timing and delivery contract
+
+| Control or outcome | Supported contract |
+| --- | --- |
+| Direct `tactus check/run --timeout-seconds` | 1,800-second default; `0` disables the direct Tactus deadline |
+| `segno install/once/driver --task-timeout-seconds` | 1,800-second default for each Tactus build/run phase; accepted range 1 through 604,800; `0` is rejected |
+| `segno driver --poll-seconds` | Positive finite maximum idle wait; default 1 second; it is neither the trigger interval nor a task deadline |
+| Occurrence delivery | At least once; tasks should deduplicate external effects with the occurrence idempotency key |
+| Ambiguous execution | `OutcomeUnknown` is terminal and not automatically retried; successful checkpoints remain durable and require explicit external reconciliation |
 
 ## Trust and capability boundaries
 
@@ -53,17 +70,27 @@ successful call to a live provider account.
   bounds improve reliability; they do not authenticate or sandbox code.
 - Tactus has no daemon, login/auth layer, credential broker, CAS/artifact
   tracker, checkpoint, or rollback.
+- Segno adds a local long-lived scheduling loop and business-state CAS. It is
+  not a network daemon, auth service, artifact store, workspace transaction, or
+  external-effect rollback mechanism.
 - `workspace.paths` is final-state evidence only. Direct `IO`, reads, transient
   writes, and concurrent processes can fall outside or blur its evidence.
 - Run journals can contain sensitive provider output and are not automatically
   redacted.
+- The active-window example is model/network-free, but window titles can expose
+  documents, URLs, and account names. They remain in local Tactus run evidence
+  and Segno SQLite history until the user manages those files.
 
 ## Development tool boundary
 
-The current runtime installation requires Rust plus Cabal/GHC. Motivo
-development additionally requires Node.js 22.12 or newer. Python is not a
-runtime dependency of Tactus or Motivo; it is used only if a third-party plugin
-chooses it or when MkDocs is built.
+The current runtime installation requires Rust plus Cabal/GHC. Segno is built
+and installed with Cabal. On Windows, the documented source install places
+both `tactus.exe` and `segno.exe` in `%USERPROFILE%\.cargo\bin`; GHCup normally
+provides GHC/Cabal through `C:\ghcup\bin`. The first Cabal build can fetch and
+compile dependencies for several minutes, while later checks reuse the Cabal
+store and build cache. Motivo development additionally requires Node.js 22.12
+or newer. Python is not a runtime dependency of Tactus, Segno, or Motivo; it is
+used only if a third-party plugin chooses it or when MkDocs is built.
 
 Rust gate commands must use a system-temporary `CARGO_TARGET_DIR`, and validation
 must finish with `cargo clean --target-dir <that-exact-path>` to avoid a large
@@ -71,7 +98,8 @@ repository-local build tree.
 
 ## Version combination
 
-The supported source combination is Clef `0.3.0.0` with Tactus `0.3.0`. There
-is no compatibility claim for mixing it with historical workers, daemon state,
-the old Motivo daemon/runtime ownership, or Segno scheduling state. See the
-[migration guide](../migrations/0.2-to-haskell-0.3.md) for side-by-side context.
+The supported source combination is Clef `0.3.0.0`, Segno `0.3.0.0`, and
+Tactus `0.3.0`. There is no compatibility claim for mixing it with historical
+workers, daemon state, the old Motivo daemon/runtime ownership, or the removed
+Python/Rust Segno registry and database. See the [migration
+guide](../migrations/0.2-to-haskell-0.3.md) for side-by-side context.

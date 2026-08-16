@@ -1,8 +1,8 @@
 ---
 title: Getting started with Agenstro 0.3
 status: alpha
-last_verified: 2026-08-15
-applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
+last_verified: 2026-08-16
+applies_to: "Clef/Segno Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 ---
 
 # Getting started with Agenstro 0.3
@@ -11,8 +11,9 @@ This guide installs the Rust Tactus CLI, initializes a disposable project,
 checks an offline Haskell workflow, and then shows the separate opt-in path for
 a real coding-agent provider.
 
-Motivo Studio is an optional visual client for the same Tactus workspace. Segno
-Flow remains frozen and is not needed for this path.
+Motivo Studio is an optional visual client for the same Tactus workspace.
+Segno is an optional Haskell persistent-task driver; the first one-shot path
+does not require it.
 
 ## Prerequisites
 
@@ -39,20 +40,41 @@ Tactus and its built-in adapters do not require Python. MkDocs uses Python only
 when building this documentation site, and an arbitrary third-party plugin may
 choose Python as its own implementation language.
 
-## Install Tactus and build Clef
+## Install or upgrade Tactus and Segno on Windows
 
-From the Agenstro checkout:
+GHCup normally exposes GHC and Cabal through `C:\ghcup\bin`; Rustup uses
+`%USERPROFILE%\.cargo\bin`. Put both on the current PowerShell `PATH`, then
+install both public commands into the Cargo directory:
 
 ```powershell
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
+Set-Location $repoRoot
+
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
-cabal build all
+cabal build all --enable-tests
+cabal install segno-flow:exe:segno `
+  --installdir $toolBin `
+  --overwrite-policy=always
+
+Get-Command tactus,segno -All
 tactus --version
+segno --version
+tactus check --help | Select-String -Pattern '--package'
 ```
 
-The expected CLI version is `0.3.0`. Installation produces one public
-executable, `tactus`; built-in provider/effect adapters are internal
-subcommands of that binary.
+Both CLIs report `0.3.0`. The same commands perform an upgrade: Cargo's
+`--force` and Cabal's `--overwrite-policy=always` replace the selected files.
+The `--package` help check distinguishes the current Tactus from an earlier
+binary that used the same version string but could not expose `segno-flow` to
+GHC. If `Get-Command -All` lists another copy first, fix `PATH` or open a new
+terminal before continuing.
+
+Tactus contains its provider/effect hosts. Segno is a separate Haskell command
+but executes each task through Tactus. The one-shot workflow below needs only
+Tactus; persistent tasks use both.
 
 ## Create a disposable project
 
@@ -84,6 +106,29 @@ The important distinction is:
 - `tactus` is the command;
 - `.tactus` is project-local state and configuration;
 - running `.tactus` by itself is not initialization.
+
+## Add Segno to an existing `.tactus` workspace
+
+If the project already contains `.tactus\tactus.toml`, keep that workspace and
+initialize only Segno's additions:
+
+```powershell
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$projectRoot = (Resolve-Path D:\work\my-existing-project).Path
+
+if (-not (Test-Path (Join-Path $projectRoot ".tactus\tactus.toml"))) {
+  throw "This folder is not initialized; run tactus init first"
+}
+
+tactus doctor --root $projectRoot
+segno init --root $projectRoot --sdk (Join-Path $repoRoot "segno-flow")
+segno list --root $projectRoot
+```
+
+`segno init` is idempotent. It registers the built-in Segno plugins, adds the
+local `segno-flow` package to `.tactus\cabal.project`, and creates
+`.tactus\segno`; it does not import an old Python/Rust Segno database. Continue
+with the [one-minute active-window task](segno.md#try-the-model-free-active-window-task).
 
 ## Inspect the initialized workspace
 
@@ -159,6 +204,20 @@ for `run`:
 tactus check .tactus\scripts\010_offline.hs
 tactus run --script .tactus\scripts\010_offline.hs
 ```
+
+On a new GHC/Cabal installation, the first `check` is a cold build. Cabal may
+download its package index and dependencies, populate the user-wide store, and
+compile Clef before GHC checks the script. Several minutes of compiler output
+is normal; later checks reuse the store and `dist-newstyle` cache. The default
+deadline is 1,800 seconds. On a slow machine or connection, use a larger finite
+budget such as:
+
+```powershell
+tactus check --timeout-seconds 7200 .tactus\scripts\010_offline.hs
+```
+
+For direct Tactus `check`/`run`, `--timeout-seconds 0` disables the deadline.
+Segno deliberately uses a different bounded option described below.
 
 ## Understand the initialized plugin configuration
 
@@ -294,6 +353,25 @@ atomically when supervision finishes. Both use `agenstro.trace/v1` envelopes.
 These files can contain prompts and provider output. Keep them local and treat
 them as diagnostic evidence, not a replay or rollback mechanism.
 
+## Understand timeout and persistence semantics
+
+Tactus and Segno expose two different timing controls:
+
+- `tactus check/run --timeout-seconds N` bounds each Cabal/GHC/runghc phase;
+  the default is 1,800 and `0` disables the deadline.
+- `segno install/once/driver --task-timeout-seconds N` bounds each Tactus
+  build/run phase used for a persistent task. The default is 1,800 and the
+  accepted range is 1 through 604,800; zero is rejected.
+- `segno driver --poll-seconds N` is only the maximum idle wait before another
+  poll. It neither changes an interval trigger nor extends task execution.
+
+A timed-out Segno task may already have completed an external action. The
+driver records `OutcomeUnknown` when it cannot validate the atomic task result
+and does not automatically retry that occurrence. This is compatible with the
+at-least-once delivery model: duplicate delivery remains possible around
+claims/crashes, so tasks should use occurrence idempotency keys, while an
+explicit ambiguous terminal outcome requires operator reconciliation.
+
 ## Network and trust summary
 
 | Command | Provider network call | Important behavior |
@@ -305,7 +383,14 @@ them as diagnostic evidence, not a replay or rollback mechanism.
 | `generate` | Yes | Provider may modify the workspace |
 | `run` | Depends on the program | Executes arbitrary trusted Haskell and plugins |
 | `plugin-call` | Depends on plugin/method | Directly executes the configured plugin |
+| `segno init`, `list`, `status`, `history` | No | Local config/SQLite operations |
+| `segno install` | No provider call by contract | Executes trusted Haskell in describe mode; Cabal may fetch packages |
+| `segno once`, `driver` | Depends on task | At-least-once task execution through Tactus |
 
-Agenstro `0.3` supplies no daemon, authentication layer, sandbox, CAS, artifact
-tracker, checkpoint, or rollback. Use a disposable workspace when you do not
-trust generated code or external plugins.
+Tactus supplies no network daemon, authentication layer, sandbox, CAS,
+artifact tracker, checkpoint, or rollback. The optional Segno driver adds
+local persistent scheduling and explicit business-state CAS/checkpoints, but
+does not make arbitrary Haskell, providers, or external effects transactional.
+Use a disposable workspace when you do not trust generated code or external
+plugins. Continue with [Segno persistent tasks](segno.md) only when a workflow
+must survive and trigger beyond one command invocation.

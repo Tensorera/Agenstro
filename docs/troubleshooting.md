@@ -1,8 +1,8 @@
 ---
 title: Agenstro 0.3 troubleshooting
 status: alpha
-last_verified: 2026-08-15
-applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
+last_verified: 2026-08-16
+applies_to: "Clef/Segno Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 ---
 
 # Agenstro 0.3 troubleshooting
@@ -10,8 +10,9 @@ applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 Start with the installed binary, workspace discovery, and typed diagnostics:
 
 ```powershell
-Get-Command tactus
+Get-Command tactus,segno -All
 tactus --version
+segno --version
 tactus doctor --root D:\path\to\project --json
 tactus list --root D:\path\to\project --json
 ```
@@ -21,19 +22,25 @@ there are no separate provider/effect host executables to locate.
 
 ## `tactus` is missing or an older command is selected
 
-Install the current source explicitly, then open a terminal whose Cargo bin
-directory is on `PATH`:
+Install the current source explicitly into Cargo's bin directory and verify
+the command surface, not only the version string:
 
 ```powershell
-Set-Location D:\src\Agenstro
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$env:PATH = "$toolBin;$env:PATH"
+Set-Location $repoRoot
 cargo install --path tactus-runtime --bin tactus --locked --force
-Get-Command tactus
+Get-Command tactus -All
 tactus --version
+tactus check --help | Select-String -Pattern '--package'
 ```
 
 If multiple results appear, remove the stale path from the current terminal or
 invoke the Cargo-installed executable by its full path. An old command surface
-that mentions workers, cells, notebooks, or a daemon is not Tactus Rust `0.3`.
+can also report `0.3.0`; a missing `check --package` option proves that the
+selected binary predates Segno package linking. A surface that mentions
+workers, cells, notebooks, or a daemon is also obsolete.
 
 ## `tactus init` cannot locate `clef-sdk`
 
@@ -60,8 +67,10 @@ ghc --print-libdir
 cabal --version
 ```
 
-On Windows, a GHCup installation commonly needs `C:\ghcup\bin` and
-`C:\cabal\bin` on `PATH`. Restart long-lived terminals after changing PATH.
+On Windows, a GHCup installation commonly needs `C:\ghcup\bin` on `PATH`.
+`cabal path` reports Cabal's configured install directory; the project guides
+avoid relying on it by installing `segno.exe` explicitly into
+`%USERPROFILE%\.cargo\bin`. Restart long-lived terminals after changing PATH.
 Clef requires a GHC whose bundled `base` satisfies the bounds in
 `clef-sdk/clef-sdk.cabal`.
 
@@ -130,9 +139,22 @@ cabal build --project-dir .tactus lib:clef-sdk
 ```
 
 Then inspect `.tactus/cabal.project`, the SDK path, network/proxy access to
-Hackage, and the selected GHC. `tactus check --keep-going` continues to later
-sources after a source-specific failure; it cannot make a failed Clef package
-build usable.
+Hackage, and the selected GHC. On a fresh Cabal store, downloading packages and
+compiling Clef can take several minutes. A Segno script additionally builds
+Segno, cron, SQLite bindings, and (on Windows) Win32 support. Prewarm it without
+executing the task and give the cold build a larger finite deadline:
+
+```powershell
+$projectRoot = (Resolve-Path D:\work\my-project).Path
+$script = Join-Path $projectRoot ".tactus\scripts\900_record_active_window.hs"
+tactus check --root $projectRoot --package segno-flow `
+  --timeout-seconds 7200 $script
+```
+
+Later checks reuse Cabal's store and build cache. Direct Tactus
+`--timeout-seconds 0` disables its deadline. `tactus check --keep-going`
+continues to later sources after a source-specific failure; it cannot make a
+failed Clef or Segno package build usable.
 
 ## Rust validation fills the repository
 
@@ -271,12 +293,19 @@ failure. Windows Job Objects contain the nested tree. On Unix, a process that
 deliberately creates a new session can escape process-group containment; do not
 treat this mechanism as a hostile-code sandbox.
 
-Most public invocation commands use `--timeout-seconds`; the default is 1,800
-seconds and `0` disables the deadline.
+Most direct Tactus invocation commands use `--timeout-seconds`; the default is
+1,800 seconds and `0` disables that deadline. Segno uses a deliberately bounded
+task option instead: `install`, `once`, and `driver` accept
+`--task-timeout-seconds` from 1 through 604,800, defaulting to 1,800 for each
+Tactus build/run phase. Zero is rejected. `driver --poll-seconds` is only its
+maximum idle wait and does not extend task execution or change a trigger's
+interval.
 
 Process termination is not remote rollback. A model service may have received
-or completed work before the local timeout. Inspect the journal and workspace
-before deciding whether a retry is safe.
+or completed work before the local timeout. For a Segno occurrence, an
+unverifiable terminal task result becomes `OutcomeUnknown` and is not retried
+automatically. Inspect the journal, workspace, state history, and external
+system before deciding whether a new action is safe.
 
 ## A run journal is missing, incomplete, or contains sensitive text
 
@@ -348,11 +377,95 @@ before the current file. `corrupt` means Rust rejected a complete trace record;
 Motivo does not guess around it. Run `tactus doctor` and preserve a redacted run
 ID when reporting the defect.
 
+## `segno` is missing or rejects the workspace
+
+Segno is a separate Cabal executable, while every scheduled Clef job still
+uses the installed `tactus` binary. Check both from the same terminal:
+
+```powershell
+$repoRoot = (Resolve-Path D:\src\Agenstro).Path
+$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
+$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
+Set-Location $repoRoot
+
+cabal install segno-flow:exe:segno `
+  --installdir $toolBin `
+  --overwrite-policy=always
+
+Get-Command tactus,segno -All
+tactus --version
+segno --version
+```
+
+Run `tactus init` before `segno init`. Segno deliberately operates only inside
+an initialized Tactus workspace and keeps its state below `.tactus/segno`. For
+an existing workspace, verify `.tactus\tactus.toml`, then run:
+
+```powershell
+$projectRoot = (Resolve-Path D:\work\my-project).Path
+tactus doctor --root $projectRoot
+segno init --root $projectRoot --sdk (Join-Path $repoRoot "segno-flow")
+```
+
+After moving either source checkout, rerun that idempotent Segno initialization
+with the new `--sdk` path and inspect `.tactus/cabal.project` plus the installed
+job's relative script path.
+
+## `segno once` finds no occurrence
+
+Start with the installed definitions and lifecycle evidence:
+
+```powershell
+segno list --root D:\path\to\project --json
+segno status --root D:\path\to\project --json
+segno history --root D:\path\to\project --limit 20 --json
+```
+
+An interval source uses its durable cursor, so the first `once` establishes a
+logical occurrence and later calls only produce times that are due. Cron is
+UTC-only in version one. A Haskell `filterTrigger` or state-aware `gate` may
+also turn a valid occurrence into `Ignore` without calling the handler body.
+
+For deterministic diagnosis, use the virtual-clock/fake-window test rather
+than repeatedly changing the system clock or waiting a real minute. Trigger
+plugins calculate occurrences and next wake times; only the Segno driver
+waits.
+
+## A Segno occurrence becomes `OutcomeUnknown`
+
+`OutcomeUnknown` is intentional when Tactus exits without a valid atomic task
+result or when the driver cannot prove whether external work completed. Segno
+does not automatically repeat that occurrence: at-least-once delivery is not
+permission to duplicate an ambiguous provider or filesystem effect.
+
+Inspect the corresponding Tactus run evidence, Segno history, business-state
+revision, and external system using the occurrence's idempotency key. Reconcile
+the outcome explicitly before deciding whether a new attempt is safe. A
+successful checkpoint remains durable even if a later workflow step failed.
+
+Segno 0.3 deliberately has no `resolve`, forced-retry, or forced-success
+mutation command yet. Leave the occurrence terminal while investigating; do
+not edit the private lifecycle SQLite database by hand. Recovery tooling that
+records an operator decision is a roadmap item.
+
+## The active-window plugin fails or records sensitive text
+
+The built-in real active-window implementation uses the Haskell Win32 package
+and is supported on Windows. Other platforms return a structured
+`unsupported_platform` failure. CI type-checks the example but does not invoke
+desktop capture, so it does not depend on whichever application is focused.
+
+Window titles can include document names, URLs, account names, or other private
+text. The call's terminal value enters local Tactus run evidence and the task
+checkpoints it into local SQLite history. The example makes no model/network
+call and must be installed explicitly. Do not commit or share `.tactus/runs`
+or `.tactus/segno/state` without reviewing them.
+
 ## Old Segno, worker, or daemon instructions fail
 
-Segno Flow, notebook/cell workers, daemon commands, persistent scheduling,
-artifact/CAS, and checkpoint restore are not part of the current runtime. The
-supported CLI is:
+The removed Python `segno-flow`, Rust `segnod`, ZIP package/import commands,
+notebook/cell workers, and their databases are not compatible with Haskell
+Segno `0.3`. Current public commands are:
 
 ```text
 tactus init
@@ -366,11 +479,18 @@ tactus smoke
 tactus plugin-call
 tactus studio inspect
 tactus studio events
+segno init
+segno install
+segno list
+segno once
+segno driver
+segno status
+segno history
 ```
 
 Use the [0.2 to Haskell 0.3 migration
 guide](migrations/0.2-to-haskell-0.3.md) only as side-by-side migration context;
-do not point the Rust runtime at old daemon state.
+do not point the Rust runtime or Haskell Segno at old daemon/scheduler state.
 
 ## Before reporting a defect
 

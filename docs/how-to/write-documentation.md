@@ -22,9 +22,9 @@ only inside an architecture page.
 
 1. Use one H1 that names the exact subject.
 2. Start with two sentences stating scope and audience.
-3. Use the canonical project names Clef SDK, Tactus Runtime, and
-   Studio.
-4. Define ambiguous terms in the [glossary](../reference/glossary.md).
+3. Use the canonical project names Clef, Tactus, Segno, and Motivo Studio.
+4. Define an ambiguous term at its canonical reference page and link to that
+   definition; do not create a second competing glossary entry.
 5. Give each fact one canonical page. Link to it instead of copying it.
 6. Put commands in a block that names the shell and state the working directory.
 7. Record defaults and unsupported cases in reference pages.
@@ -37,7 +37,8 @@ only inside an architecture page.
 
 When a public command, field, state transition, or ownership boundary changes:
 
-1. Update its reference page.
+1. Update its reference page, such as the [CLI reference](../reference/cli-v0.3.md)
+   or the relevant wire-protocol page.
 2. Update affected tutorial or how-to steps.
 3. Update an explanation only when the design or rationale changed.
 4. Update `mkdocs.yml` for every added, removed, or renamed page.

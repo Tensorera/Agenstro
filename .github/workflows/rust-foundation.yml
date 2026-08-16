@@ -1,4 +1,4 @@
-name: Retained Rust foundation and Segno
+name: Retained Rust foundation and Tactus
 
 on:
   pull_request:
@@ -11,7 +11,6 @@ on:
       - "fixtures/**"
       - "proto/**"
       - "rust-toolchain.toml"
-      - "segno-flow/rust/**"
       - "tactus-runtime/**"
   push:
     paths:
@@ -23,7 +22,6 @@ on:
       - "fixtures/**"
       - "proto/**"
       - "rust-toolchain.toml"
-      - "segno-flow/rust/**"
       - "tactus-runtime/**"
 
 permissions:
@@ -60,8 +58,8 @@ jobs:
       - name: Remove Rust build artifacts
         if: always()
         run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
-      # Clef has its own Haskell workflow. This job covers the current Rust
-      # Tactus kernel together with the retained foundation and Segno crates.
+      # Clef and Segno have their own Haskell workflow. This job covers the
+      # current Rust Tactus kernel together with the retained foundation.
 
   msrv:
     name: Rust 1.88 MSRV

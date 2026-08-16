@@ -8,24 +8,43 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PUBLISHED_FILES = (
     ROOT / "README.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / "SECURITY.md",
+    ROOT / "CONTRIBUTING.md",
     ROOT / "clef-sdk" / "README.md",
     ROOT / "tactus-runtime" / "README.md",
     ROOT / "motivo-studio" / "README.md",
     ROOT / "segno-flow" / "README.md",
     ROOT / "docs" / "index.md",
-    ROOT / "docs" / "alpha-cross-language-slice.md",
-    ROOT / "docs" / "how-to" / "install-source-alpha.md",
-    ROOT / "docs" / "how-to" / "operate-source-alpha.md",
-    ROOT / "docs" / "reference" / "index.md",
-    ROOT / "docs" / "reference" / "source-contracts.md",
+    ROOT / "docs" / "getting-started.md",
+    ROOT / "docs" / "architecture.md",
+    ROOT / "docs" / "segno.md",
+    ROOT / "docs" / "motivo-studio.md",
+    ROOT / "docs" / "troubleshooting.md",
+    ROOT / "docs" / "roadmap.md",
+    ROOT / "docs" / "reference" / "cli-v0.3.md",
+    ROOT / "docs" / "reference" / "plugin-protocol-v1.md",
+    ROOT / "docs" / "reference" / "segno-plugin-wire-v1.md",
+    ROOT / "docs" / "reference" / "studio-control-v1.md",
     ROOT / "docs" / "reference" / "support-matrix.md",
-    ROOT / "docs" / "reference" / "known-limitations.md",
-    ROOT / "docs" / "explanation" / "runtime-boundaries.md",
-    ROOT / "docs" / "adr" / "0001-versioned-rust-foundation.md",
-    ROOT / "docs" / "adr" / "0002-daemon-state-and-electron-boundaries.md",
-    ROOT / "docs" / "migrations" / "prototype-to-greenfield.md",
+    ROOT / "docs" / "adr" / "0003-haskell-dsl-and-local-plugins.md",
+    ROOT / "docs" / "adr" / "0004-haskell-segno-persistent-tasks.md",
+    ROOT / "docs" / "migrations" / "0.2-to-haskell-0.3.md",
+    ROOT / "docs" / "how-to" / "write-documentation.md",
 )
 LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
+
+
+def markdown_h1_count(text: str) -> int:
+    """Count ATX H1 headings while ignoring fenced code examples."""
+    in_fence = False
+    count = 0
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"^# [^#]", line):
+            count += 1
+    return count
 
 
 class DocumentationContractTests(unittest.TestCase):
@@ -33,25 +52,24 @@ class DocumentationContractTests(unittest.TestCase):
         for path in PUBLISHED_FILES:
             with self.subTest(path=path.relative_to(ROOT)):
                 text = path.read_text(encoding="utf-8")
-                self.assertEqual(len(re.findall(r"^# [^#]", text, re.MULTILINE)), 1)
+                self.assertEqual(markdown_h1_count(text), 1)
 
-    def test_public_names_and_alpha_boundary_are_explicit(self) -> None:
+    def test_current_implementation_and_boundaries_are_explicit(self) -> None:
         text = "\n".join(path.read_text(encoding="utf-8") for path in PUBLISHED_FILES)
-        for name in (
-            "clef-sdk",
-            "tactus-runtime",
-            "motivo-studio",
-            "segno-flow",
-            "clef_sdk",
-            "tactus_runtime",
-            "segno_flow",
-            "segno-flow-ui",
-        ):
+        for name in ("clef-sdk", "tactus-runtime", "motivo-studio", "segno-flow"):
             self.assertIn(name, text)
-        self.assertIsNone(re.search(r"\b(?:from|import)\s+agentro\b", text))
-        self.assertIn("authenticated gRPC", text)
-        self.assertIn("not implemented", text)
-        for removed_claim in ("tactus doctor", "segno-flow service start", "~/.segno-flow"):
+        for current_contract in (
+            "agenstro.plugin/v1",
+            "OutcomeUnknown",
+            "at least once",
+            "TypeScript",
+        ):
+            self.assertIn(current_contract, text)
+        for removed_claim in (
+            "segno-flow service start",
+            "segno-flow-ui",
+            "~/.segno-flow",
+        ):
             self.assertNotIn(removed_claim, text)
 
     def test_local_markdown_links_resolve(self) -> None:

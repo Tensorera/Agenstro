@@ -104,6 +104,10 @@ enum Command {
         /// Deadline for each Cabal/GHC process.
         #[arg(long, default_value_t = 1800)]
         timeout_seconds: u64,
+        /// Additional Cabal library packages exposed while checking. Clef is
+        /// always included. Repeat for more than one extension package.
+        #[arg(long = "package", value_parser = validate_haskell_package)]
+        packages: Vec<String>,
     },
     /// Run ordered Haskell workflow entry points.
     Run {
@@ -119,6 +123,10 @@ enum Command {
         /// Deadline for each Cabal/runghc process.
         #[arg(long, default_value_t = 1800)]
         timeout_seconds: u64,
+        /// Additional Cabal library packages exposed while running. Clef is
+        /// always included. Repeat for more than one extension package.
+        #[arg(long = "package", value_parser = validate_haskell_package)]
+        packages: Vec<String>,
         /// Arguments passed to every selected entry after `--`.
         #[arg(last = true)]
         arguments: Vec<String>,
@@ -285,14 +293,23 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             keep_going,
             root,
             timeout_seconds,
-        } => check(&root, &scripts, keep_going, timeout_seconds),
+            packages,
+        } => check(&root, &scripts, &packages, keep_going, timeout_seconds),
         Command::Run {
             scripts,
             keep_going,
             root,
             timeout_seconds,
+            packages,
             arguments,
-        } => run_scripts_command(&root, &scripts, &arguments, keep_going, timeout_seconds),
+        } => run_scripts_command(
+            &root,
+            &scripts,
+            &packages,
+            &arguments,
+            keep_going,
+            timeout_seconds,
+        ),
         Command::Generate {
             goal,
             provider,
@@ -474,6 +491,7 @@ fn runtime_json(start: &Path) -> Result<i32, CliError> {
 fn check(
     start: &Path,
     explicit: &[PathBuf],
+    additional_packages: &[String],
     keep_going: bool,
     timeout_seconds: u64,
 ) -> Result<i32, CliError> {
@@ -488,15 +506,17 @@ fn check(
     let tool_runtime = ToolRuntime::create(&workspace)?;
     let environment = &tool_runtime.environment;
     let project = workspace.control.display().to_string();
+    let packages = haskell_packages(additional_packages);
+    let mut build_command = vec![
+        "cabal".to_owned(),
+        "build".to_owned(),
+        "--project-dir".to_owned(),
+        project.clone(),
+    ];
+    build_command.extend(packages.iter().map(|package| format!("lib:{package}")));
     let build = execute_tool(
         &workspace,
-        vec![
-            "cabal".to_owned(),
-            "build".to_owned(),
-            "--project-dir".to_owned(),
-            project.clone(),
-            "lib:clef-sdk".to_owned(),
-        ],
+        build_command,
         environment,
         timeout_seconds,
         &cancellation,
@@ -507,21 +527,23 @@ fn check(
     let include = format!("-i{}", workspace.scripts_path.display());
     let mut first_failure = 0;
     for script in scripts {
+        let mut command = vec![
+            "cabal".to_owned(),
+            "exec".to_owned(),
+            "--project-dir".to_owned(),
+            project.clone(),
+            "--".to_owned(),
+            "ghc".to_owned(),
+            "-fno-code".to_owned(),
+        ];
+        for package in &packages {
+            command.push("-package".to_owned());
+            command.push(package.clone());
+        }
+        command.extend([include.clone(), script.display().to_string()]);
         let status = execute_tool(
             &workspace,
-            vec![
-                "cabal".to_owned(),
-                "exec".to_owned(),
-                "--project-dir".to_owned(),
-                project.clone(),
-                "--".to_owned(),
-                "ghc".to_owned(),
-                "-fno-code".to_owned(),
-                "-package".to_owned(),
-                "clef-sdk".to_owned(),
-                include.clone(),
-                script.display().to_string(),
-            ],
+            command,
             environment,
             timeout_seconds,
             &cancellation,
@@ -539,6 +561,7 @@ fn check(
 fn run_scripts_command(
     start: &Path,
     explicit: &[PathBuf],
+    additional_packages: &[String],
     arguments: &[String],
     keep_going: bool,
     timeout_seconds: u64,
@@ -554,15 +577,17 @@ fn run_scripts_command(
     let tool_runtime = ToolRuntime::create(&workspace)?;
     let environment = &tool_runtime.environment;
     let project = workspace.control.display().to_string();
+    let packages = haskell_packages(additional_packages);
+    let mut build_command = vec![
+        "cabal".to_owned(),
+        "build".to_owned(),
+        "--project-dir".to_owned(),
+        project.clone(),
+    ];
+    build_command.extend(packages.iter().map(|package| format!("lib:{package}")));
     let build = execute_tool(
         &workspace,
-        vec![
-            "cabal".to_owned(),
-            "build".to_owned(),
-            "--project-dir".to_owned(),
-            project.clone(),
-            "lib:clef-sdk".to_owned(),
-        ],
+        build_command,
         environment,
         timeout_seconds,
         &cancellation,
@@ -580,10 +605,13 @@ fn run_scripts_command(
             project.clone(),
             "--".to_owned(),
             "runghc".to_owned(),
-            "--ghc-arg=-package=clef-sdk".to_owned(),
-            format!("--ghc-arg={include}"),
-            script.display().to_string(),
         ];
+        command.extend(
+            packages
+                .iter()
+                .map(|package| format!("--ghc-arg=-package={package}")),
+        );
+        command.extend([format!("--ghc-arg={include}"), script.display().to_string()]);
         command.extend_from_slice(arguments);
         let status = execute_tool(
             &workspace,
@@ -1712,6 +1740,29 @@ fn install_cancellation() -> Result<CancellationToken, CliError> {
     Ok(cancellation)
 }
 
+fn validate_haskell_package(value: &str) -> Result<String, String> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if valid {
+        Ok(value.to_owned())
+    } else {
+        Err("package names must contain only ASCII letters, digits, '-', '_', or '.'".to_owned())
+    }
+}
+
+fn haskell_packages(additional: &[String]) -> Vec<String> {
+    let mut packages = vec!["clef-sdk".to_owned()];
+    for package in additional {
+        if !packages.contains(package) {
+            packages.push(package.clone());
+        }
+    }
+    packages
+}
+
 fn parse_params(value: &str) -> Result<Map<String, Value>, CliError> {
     let decoded = decode_json(value.as_bytes())
         .map_err(|error| CliError::InvalidArguments(format!("invalid --params JSON: {error}")))?;
@@ -1793,5 +1844,27 @@ mod tests {
         let error =
             parse_params(r#"{"region":{"holes":1,"holes":2}}"#).expect_err("duplicate params");
         assert!(error.to_string().contains("duplicate object key"));
+    }
+
+    #[test]
+    fn extension_packages_keep_clef_and_stable_order() {
+        assert_eq!(
+            haskell_packages(&[
+                "segno-flow".to_owned(),
+                "clef-sdk".to_owned(),
+                "segno-flow".to_owned(),
+            ]),
+            vec!["clef-sdk".to_owned(), "segno-flow".to_owned()]
+        );
+    }
+
+    #[test]
+    fn package_names_are_bounded_and_cannot_be_ghc_arguments() {
+        assert_eq!(
+            validate_haskell_package("segno-flow"),
+            Ok("segno-flow".to_owned())
+        );
+        assert!(validate_haskell_package("-package=evil").is_err());
+        assert!(validate_haskell_package("package with spaces").is_err());
     }
 }
