@@ -49,7 +49,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-tactus-target
+      CARGO_TARGET_DIR: target/ci-tactus
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -86,7 +86,7 @@ jobs:
             ghc: "9.14.1"
             cabal: "3.18.1.0"
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-tactus-e2e-target
+      CARGO_TARGET_DIR: target/ci-tactus-e2e
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
