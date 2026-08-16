@@ -11,7 +11,7 @@ They are not part of the Haskell/Tactus `0.3` release gate and are not expected
 to run from the current repository root. Current validation lives in:
 
 - `clef-sdk/haskell/test/`;
-- `tactus-runtime/tests/`;
+- `tactus-runtime/tests-rust/`;
 - `.github/workflows/haskell-tactus.yml`; and
 - the native tests for the retained Rust foundation and Segno.
 

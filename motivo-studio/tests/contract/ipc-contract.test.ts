@@ -1,63 +1,70 @@
 import { describe, expect, it } from "vitest";
-import { LIMITS } from "../../src/shared/contracts";
 import {
-  filePageInputSchema,
-  fileSaveInputSchema,
-  runSubscribeRequestSchema,
-  terminalCreateInputSchema,
-  terminalWriteInputSchema,
-} from "../../src/shared/ipc";
+  actionRequestSchema,
+  decimalStringSchema,
+  LIMITS,
+  studioSnapshotSchema,
+} from "../../src/shared/contracts";
+import { runEventsInputSchema } from "../../src/shared/ipc";
 
-describe("bounded IPC contracts", () => {
-  it("rejects unknown keys and oversized pages", () => {
-    expect(() =>
-      filePageInputSchema.parse({
-        workspaceId: "workspace-1",
-        parentId: "entry-root",
-        pageSize: LIMITS.filePage + 1,
-      }),
-    ).toThrow();
-    expect(() =>
-      runSubscribeRequestSchema.parse({
-        runId: "run-1",
-        afterSequence: "0",
-        channel: "arbitrary:invoke",
-      }),
-    ).toThrow();
+describe("bounded Motivo IPC contracts", () => {
+  it("keeps JavaScript-unsafe counters as canonical decimal text", () => {
+    expect(decimalStringSchema.parse("18446744073709551615")).toBe("18446744073709551615");
+    for (const invalid of ["", "01", "-1", "1.0", " 1", "18446744073709551616"]) {
+      expect(() => decimalStringSchema.parse(invalid)).toThrow();
+    }
   });
 
-  it("applies UTF-8 byte limits instead of JavaScript character counts", () => {
-    const oversized = "\u754c".repeat(Math.floor(LIMITS.terminalInputBytes / 3) + 1);
+  it("rejects unknown action authority and oversized generation goals", () => {
+    expect(() => actionRequestSchema.parse({ kind: "run", root: "C:\\secrets" })).toThrow();
     expect(() =>
-      terminalWriteInputSchema.parse({ terminalId: "terminal-1", data: oversized }),
+      actionRequestSchema.parse({
+        kind: "generate",
+        goal: "界".repeat(Math.floor(LIMITS.generationGoalBytes / 3) + 1),
+      }),
     ).toThrow();
     expect(() =>
-      fileSaveInputSchema.parse({
-        requestId: "d7ef7a0c-63c6-4f33-8312-8a0c463f675d",
-        workspaceId: "workspace-1",
-        entryId: "entry-1",
-        expectedRevision: "revision-1",
-        content: "ok",
+      actionRequestSchema.parse({
+        kind: "smoke",
+        targets: [{ namespace: "provider", name: "codex" }],
+        live: false,
       }),
     ).not.toThrow();
   });
 
-  it("allows only declared shell profiles and bounded terminal geometry", () => {
+  it("accepts only bounded opaque event-page requests", () => {
     expect(() =>
-      terminalCreateInputSchema.parse({
-        workspaceId: "workspace-1",
-        profileId: "cmd-with-arbitrary-args",
-        cols: 80,
-        rows: 24,
-      }),
+      runEventsInputSchema.parse({ runId: "../events.jsonl", after: "0", limit: 10 }),
     ).toThrow();
     expect(() =>
-      terminalCreateInputSchema.parse({
-        workspaceId: "workspace-1",
-        profileId: "powershell",
-        cols: 501,
-        rows: 24,
+      runEventsInputSchema.parse({
+        runId: "run-123-42-0",
+        after: "0",
+        limit: LIMITS.eventPage + 1,
+      }),
+    ).toThrow();
+  });
+
+  it("does not admit an absolute workspace path into the Studio snapshot", () => {
+    const valid = snapshot();
+    expect(studioSnapshotSchema.parse(valid).workspace.name).toBe("sample");
+    expect(() =>
+      studioSnapshotSchema.parse({
+        ...valid,
+        workspace: { name: "sample", root: "D:\\private\\sample" },
       }),
     ).toThrow();
   });
 });
+
+function snapshot(): Record<string, unknown> {
+  return {
+    api: "agenstro.studio/v1",
+    generatedAtUnixMs: "1770000000000",
+    workspace: { name: "sample" },
+    health: { ok: true, checks: [] },
+    scripts: [],
+    registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
+    runs: [],
+  };
+}

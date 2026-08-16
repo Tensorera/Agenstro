@@ -1,141 +1,153 @@
 # Agenstro
 
-Agenstro is an experimental, Haskell-first framework for dynamic coding-agent
-workflows. Its core idea is deliberately small: an agent writes ordinary
-Haskell programs, GHC checks the typed connections between workflow steps, and
-replaceable local plugins perform provider calls and observable effects.
+Agenstro is an experimental framework for dynamic coding-agent workflows. An
+agent writes ordinary Haskell programs, GHC checks the typed connections
+between workflow steps, and trusted local plugins perform provider calls and
+observable effects. The core deliberately stays small; policy belongs at the
+plugin boundary.
 
-The current release line is `0.3` and is an alpha. The supported path is the
-Clef Haskell EDSL plus the Tactus Python CLI. The superseded Clef/Tactus Rust
-product cores have been removed from the current tree; Motivo Studio, Segno
-Flow, the shared Rust/Protobuf foundation, and Python archives remain as
-migration material outside the `0.3` release gate.
+The current source-alpha line is `0.3`:
 
-| Surface | Version | Role in `0.3` |
+| Surface | Version | Role |
 | --- | --- | --- |
-| [`clef-sdk`](clef-sdk/) | Cabal `0.3.0.0` | Typed Haskell workflow EDSL |
-| [`tactus-runtime`](tactus-runtime/) | Python `0.3.0` | Workspace setup, script generation, checking, execution, diagnostics, and plugin smoke probes |
-| Local plugins | `agenstro.plugin/v1` | One-shot JSONL adapters for Codex, Claude Code, OpenCode, and `workspace.paths` |
-| [`motivo-studio`](motivo-studio/) | frozen | Legacy visual client; not a release gate |
-| [`segno-flow`](segno-flow/) | frozen | Legacy scheduler/replay exploration; not a release gate |
+| [`clef-sdk`](clef-sdk/) | Haskell/Cabal `0.3.0.0` | Typed workflow EDSL and open plugin calls |
+| [`tactus-runtime`](tactus-runtime/) | Rust `0.3.0` | Workspace, process supervision, event routing, run journals, and CLI |
+| Local plugins | `agenstro.plugin/v1` | One-shot JSONL processes in any implementation language |
+| [`motivo-studio`](motivo-studio/) | TypeScript/Electron `0.3.0` | Visual Tactus workspace, plugin, action, and trace projection |
+| [`segno-flow`](segno-flow/) | frozen | Retained scheduling/replay exploration; not a `0.3` release gate |
 
-## What the workflow model does
+## The small core
 
-Clef exposes a small set of typed building blocks:
+Clef exposes a conventional Haskell API:
 
-- `Workflow a` provides normal sequential `do` notation.
-- `Task input output` makes the value flowing into and out of a provider call
-  visible to GHC.
-- `Operation output` represents a dynamically configured effect operation.
+- `Workflow a` uses normal sequential `do` notation.
+- `Task input output` gives provider calls statically checked inputs and
+  outputs.
+- `Operation output` represents a configured effect operation.
+- `Plugin input output`, `jsonPlugin`, and `rawPlugin` open the same typed
+  boundary to arbitrary plugins.
 - `parallel` is the explicit concurrency boundary.
-- `require` and `requireBecause` stop a workflow when a typed predicate fails.
-- `attempt` catches workflow failures without swallowing asynchronous
-  cancellation.
+- `require`, `requireBecause`, and `attempt` express typed workflow control.
+- `EventSink` receives provider/plugin events as each complete JSONL frame
+  arrives; events do not pollute the workflow's typed return value.
 
-Provider names, models, reasoning effort, command-line flags, credentials, and
-effect policy are intentionally not closed Haskell enums. They remain open
-runtime configuration so that an adapter can evolve independently. Typed
-wrappers can be added at the edge without making the core a provider-specific
-framework.
+Provider names, models, reasoning effort, flags, and plugin-specific options are
+open runtime values, not closed Haskell enumerations. GHC checks value wiring;
+it does not pretend to statically authorize an external agent.
 
-## Try it in a project
+Tactus is the typed Rust execution kernel around Clef. It validates
+`.tactus/tactus.toml`, prepares Clef's runtime JSON, launches each plugin as a
+one-shot process group, routes events incrementally, and writes factual
+`agenstro.trace/v1` journals below `.tactus/runs/`. It is not a daemon and does
+not provide authentication, a credential broker, CAS/artifact storage,
+checkpoint restore, or rollback.
 
-The command is `tactus`; `.tactus` is the project-local directory it creates.
-Typing `.tactus` by itself does not initialize anything.
+Motivo Studio is a thin TypeScript + React desktop client over that Rust
+kernel. Electron main invokes the installed `tactus` executable with argv
+arrays; the sandboxed renderer receives only Zod-validated, redacted DTOs. It
+does not parse runtime TOML, read journals directly, start a daemon, or expose a
+general shell.
 
-### 1. Install the toolchain
+## Install from this checkout
 
-You need:
+Install Rust with `rustup` and Haskell with GHCup. Clef currently declares
+`base >=4.20 && <4.23`; use a GHC in that range and a matching Cabal. At least
+one native coding-agent CLI (`codex`, `claude`, or `opencode`) is needed only
+for the corresponding live provider call.
 
-- Python `3.12`
-- GHC `9.10` through `9.14` and Cabal (GHCup is the easiest installer)
-- at least one supported coding-agent CLI: `codex`, `claude`, or `opencode`
-- that provider's normal local login or credentials
-
-From this repository on PowerShell:
+From the repository root:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".\tactus-runtime"
-
+cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
 cabal build all
 tactus --version
 ```
 
-Keep the virtual environment active when using `tactus`. For a developer
-installation with the test and lint tools, install
-`-e ".\tactus-runtime[dev]"` instead.
+The current Rust Tactus path has no Python runtime dependency. A third-party
+plugin may still be implemented in Python, TypeScript, C#, Rust, Haskell, or any
+other language that can obey the JSONL process contract.
 
-### 2. Initialize the target project
+## Try it in a project
 
-Change to the project the agent will work on and point Tactus at this checkout's
-Clef package:
+The executable is `tactus`; `.tactus` is the directory it creates. Typing
+`.tactus` by itself does not run initialization.
 
 ```powershell
 Set-Location D:\work\my-project
 tactus init --sdk D:\src\agenstro\clef-sdk
+tactus list
 tactus doctor
 tactus smoke
 ```
 
-`init` is idempotent: it creates missing files but does not replace existing
-ones. It produces:
+`init` is idempotent: it creates missing files and preserves existing content.
 
 ```text
 .tactus/
-  tactus.toml       # provider/effect commands and open options
-  cabal.project     # points Cabal at clef-sdk
-  PROMPT.md         # instructions injected into generation requests
-  scripts/          # ordinary .hs and .lhs workflow programs
+  tactus.toml       typed provider/effect/plugin configuration
+  cabal.project     local link to clef-sdk
+  PROMPT.md         instructions injected into generation requests
+  scripts/          ordinary .hs and .lhs workflow programs
+  runs/             append-only event journals and terminal summaries
 ```
 
-On Windows installations that still use a legacy console code page, set these
-before invoking an older Tactus build if Chinese text or emoji causes a UTF-8
-transport error:
+Ask a provider to create a multi-step workflow, inspect it, type-check it, and
+then run it:
 
 ```powershell
-$env:PYTHONUTF8 = "1"
-$env:PYTHONIOENCODING = "utf-8"
-```
-
-The `0.3` reference hosts force UTF-8 at their JSONL boundary; the variables
-remain a useful compatibility fallback for older editable installations and
-third-party Python plugins.
-
-### 3. Generate, inspect, check, and run
-
-```powershell
-tactus generate --provider codex "Inspect this project and create a typed workflow that implements and reviews the requested change."
+tactus generate --provider codex "Create a typed multi-step workflow for this project."
 tactus list
 tactus check
 tactus run
 ```
 
-Generation asks the selected coding agent to write one or more programs under
-`.tactus/scripts/`. Runnable entries use names such as `010_plan.hs`,
-`020_implement.hs`, and `030_review.hs`; Tactus executes them in numeric order.
-Other Haskell files are helper modules and are never run implicitly.
-
-`generate` does not execute the generated scripts. Read them first, then use
-`check` for Cabal/GHC static checking and `run` for execution. An explicit
-script may be selected with, for example:
+Runnable entries use names such as `010_contract.hs`, `020_implement.hs`, and
+`030_review.hs`; Tactus runs them in numeric/path order. Other Haskell files are
+helpers and are never run implicitly. Select files explicitly when needed:
 
 ```powershell
 tactus check .tactus\scripts\020_implement.hs
-tactus run .tactus\scripts\020_implement.hs
+tactus run --script .tactus\scripts\020_implement.hs -- --workflow-argument
 ```
 
-These programs and plugins are trusted local code. They inherit the current
-working directory, environment, provider credentials, and terminal access.
-This alpha does not provide an authorization boundary, rollback, or a sandbox.
+`generate` calls a real provider and may edit the workspace. `check` only asks
+Cabal/GHC to compile-check sources. `run` executes ordinary trusted Haskell and
+can make further provider calls or arbitrary `IO` actions. Review generated
+scripts before running them.
 
-## Configure providers and effects
+For a deterministic four-stage example, see
+[`examples/topology-holes`](examples/topology-holes/). It progresses from an
+ASCII-grid parser, through component and hole counting, to a reviewed CLI. Its
+checked-in Rust oracle uses a temporary Cargo target directory and cleans it
+after the test.
 
-`tactus init` writes `.tactus/tactus.toml`. The default provider can be changed,
-and model/effort values remain open strings:
+## Visualize a Tactus workspace
+
+Motivo Studio requires Node.js 22.12 or newer and the installed `tactus`
+executable above:
+
+```powershell
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio start
+```
+
+Open an initialized project, or choose **Initialize folder** in the application.
+The Overview, Workflow, Plugins, and Runs views project Tactus health, ordered
+Haskell entries, registry availability, bounded action output, and factual
+trace events. Generate, Check, Run, and offline Smoke remain Tactus commands;
+live Smoke is a separate explicit action that may contact or bill a provider.
+
+Studio uses the versioned `tactus studio inspect` and `tactus studio events`
+control queries. They redact command arrays, options, prompt text, and absolute
+script paths. Motivo is not a second workflow runtime, editor, terminal,
+scheduler, replay engine, or credential manager.
+
+## Configure open plugins
+
+`tactus init` writes a typed TOML configuration. The built-ins use subcommands
+of the installed `tactus` binary, so there are no separate provider/effect host
+executables to install:
 
 ```toml
 api = "clef.runtime/v1"
@@ -143,109 +155,150 @@ default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
 
 [providers.codex]
-command = ["tactus-provider-host", "codex"]
-# model = "provider-specific-model-id"
+command = ["tactus", "provider-host", "codex"]
+model = "provider-specific-model-id"
 effort = "high"
 
 [providers.codex.options]
 timeout_seconds = 900
 
 [providers."claude-code"]
-command = ["tactus-provider-host", "claude-code"]
+command = ["tactus", "provider-host", "claude-code"]
 
 [providers.opencode]
-command = ["tactus-provider-host", "opencode"]
+command = ["tactus", "provider-host", "opencode"]
 
 [effects."workspace.paths"]
-command = ["tactus-effect-host", "workspace-paths"]
+command = ["tactus", "effect-host", "workspace-paths"]
 observe_invocations = true
+
+[plugins.calculator]
+command = ["calculator-plugin", "--jsonl"]
+
+[plugins.calculator.options]
+precision = 12
 ```
 
-All command values are argument arrays and are executed without shell parsing.
-Adapters may accept open `options`, including `extra_args` and `extra_env`.
-Run `tactus smoke` for executable/version checks and use `tactus smoke
-codex --live` only when you intentionally want a real, billable provider
-request.
+Provider `model`, `effort`, OpenCode `variant`, and nested `options` remain open
+extension points. Commands are argv arrays and are started without a shell.
+Use `plugin-call` to exercise any registry directly:
 
-The built-in adapters request the most permissive mode their provider exposes.
-Codex and Claude Code have explicit dangerous bypass flags. OpenCode's `--auto`
-plus inline permission configuration cannot override every explicit deny or
-managed policy, so Agenstro does not claim an absolute bypass for OpenCode.
-
-## Plugin boundary
-
-Every provider or effect call launches one process, writes one
-`agenstro.plugin/v1` request to standard input, and reads JSONL events followed
-by exactly one correlated terminal result. A minimal request is:
-
-```json
-{"api":"agenstro.plugin/v1","id":"clef-1","method":"invoke","params":{}}
+```powershell
+tactus plugin-call calculator add --namespace plugin --params '{"left":19,"right":23}'
+tactus plugin-call workspace.paths describe --namespace effect
 ```
 
-This boundary is language-neutral. A plugin may be written in Haskell, Python,
-Rust, TypeScript, C#, or any language capable of reading and writing JSONL.
-Provider-specific output is normalized by its adapter; the Haskell core only
-knows about the generic protocol and typed wrapper chosen by the workflow.
+`tactus smoke` performs offline executable/version probes by default. Add
+`--live` only when you intend to make a real provider request:
 
-The included `workspace.paths` effect observes before/after path metadata and
-content hashes. It does not capture arbitrary reads, preserve file contents,
-attribute concurrent external mutations with certainty, or roll changes back.
+```powershell
+tactus smoke provider:codex
+tactus smoke provider:codex --live
+```
+
+## Provider trust model
+
+This alpha intentionally treats workflows and plugins as trusted local code.
+They inherit the caller's workspace, environment, credentials, network, and
+user permissions. There is no Tactus login or authorization layer.
+
+The bundled adapters request the most permissive non-interactive mode exposed
+by each native CLI:
+
+- Codex uses `--dangerously-bypass-approvals-and-sandbox`.
+- Claude Code uses `--dangerously-skip-permissions`.
+- OpenCode uses `--auto` plus an inline `permission=allow` configuration.
+
+OpenCode is not equivalent to the first two: an explicit deny or managed policy
+can still win, so its smoke/description output reports that full bypass is not
+provable. Native provider login, pricing, model availability, and organization
+policy remain the provider CLI's responsibility.
+
+## Streaming and evidence
+
+Every plugin call writes one UTF-8 `agenstro.plugin/v1` request to stdin, closes
+stdin, then reads zero or more correlated event lines and exactly one terminal
+result. Tactus validates and forwards complete frames incrementally with bounded
+transport queues and places the child in a Unix process group or Windows Job
+Object. Deadline, cancellation, and protocol failure terminate the owned
+group. Windows Job Objects contain the nested process tree; on Unix, a process
+that deliberately creates a new session can escape process-group containment,
+so plugins remain trusted local code.
+
+Each supervised call records flushed `events.jsonl` entries and an atomically
+published `summary.json` in a unique `.tactus/runs/<run-id>/` directory. These
+records use `agenstro.trace/v1`. They are local factual evidence, may contain
+provider output, and are not a deterministic replay format or rollback log.
+
+The included `workspace.paths` effect records path kind, size, and SHA-256
+changes across an invocation. It reports final added, modified, deleted, and
+type-changed paths under bounded path/byte/time budgets, excluding common build
+trees such as `target`, `node_modules`, `build`, and `dist-newstyle`. It does not
+retain file contents, observe reads/transient writes, prove which process made
+a concurrent change, publish artifacts, or restore the workspace.
 
 ## Repository map
 
 ```text
-clef-sdk/haskell/       current typed EDSL and tests
-tactus-runtime/         current workspace CLI and reference plugin hosts
-docs/                   current documentation and migration guidance
-archive/                frozen 0.2 Python/Tactus source snapshots
-crates/, proto/         frozen 0.2 Rust/protobuf foundation
-motivo-studio/          frozen visual client
+clef-sdk/haskell/       current Haskell EDSL and contract tests
+tactus-runtime/src/     current Rust runtime, CLI, adapters, and journal
+examples/topology-holes multi-step workflow plus deterministic oracle
+docs/                   current docs and selected migration material
+archive/                frozen historical source snapshots
+crates/, proto/         retained legacy foundation code, outside the 0.3 gate
+motivo-studio/          current TypeScript/React Tactus visualizer
 segno-flow/             frozen scheduling/replay exploration
-PelicanRide/, Test2/    retained integration and reproduction cases
 ```
 
-Generated builds, runtime state, private design notes under `secretdoc/`, and
-internal model transcripts are deliberately excluded from Git.
+Private design notes under `secretdoc/`, `.tactus/` target-project state, model
+transcripts, and generated build directories do not belong in Git.
 
-## Verify the release gate
+## Verify without growing the workspace
 
-From the repository root:
+Keep Rust artifacts in a unique system temporary directory and clean it even if
+a command fails:
 
 ```powershell
+$targetDir = Join-Path $env:TEMP ("agenstro-target-" + [guid]::NewGuid().ToString("N"))
+$env:CARGO_TARGET_DIR = $targetDir
+$env:CARGO_INCREMENTAL = "0"
+$env:CARGO_PROFILE_DEV_DEBUG = "0"
+$env:CARGO_PROFILE_TEST_DEBUG = "0"
+try {
+  cargo fmt --all --check
+  cargo check -p tactus-runtime --all-targets --locked
+  cargo test -p tactus-runtime --locked
+  cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
+} finally {
+  cargo clean --target-dir $targetDir
+  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
+}
+
 cabal build all --enable-tests
 cabal test all --test-show-details=direct
 
-python -m pip install -e ".\tactus-runtime[dev]"
-python -m pytest tactus-runtime/tests
-python -m ruff check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-python -m ruff format --check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-python -m pyright -p tactus-runtime/pyproject.toml
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio run format:check
+npm --prefix motivo-studio run lint
+npm --prefix motivo-studio run typecheck
+npm --prefix motivo-studio test
+npm --prefix motivo-studio run package
 
-python -m pip install "mkdocs>=1.6,<2"
 python -m mkdocs build --strict
 ```
 
-The automated Haskell and Python tests use fake local plugins/provider CLIs and
-do not make authenticated model requests. Dependency installation can still
-contact Hackage or PyPI.
+The Rust, Haskell, and Motivo tests use local fakes and make no authenticated
+provider request. Electron packaging is unsigned and platform-local. The final
+MkDocs command uses Python only as the documentation tool, not as part of
+Tactus.
 
-## Current limitations
-
-- This is a source alpha, not a stable package release.
-- Plugin output is currently collected per process; a long provider call may
-  appear quiet until it exits.
-- Arbitrary `liftIO` is allowed and cannot be observed or replayed reliably.
-- Path observation reports workspace deltas, not a security audit trail.
-- Motivo Studio and Segno Flow are intentionally frozen while the Haskell/Tactus
-  contract settles.
-- Reliable replay is limited to future plugin-mediated traces; arbitrary
-  Haskell IO cannot be replayed deterministically.
-
-Start with the [documentation home](docs/index.md), [getting-started
-guide](docs/getting-started.md), [architecture overview](docs/architecture.md),
-[plugin protocol](docs/reference/plugin-protocol-v1.md), [support
-matrix](docs/reference/support-matrix.md), and [migration
-guide](docs/migrations/0.2-to-haskell-0.3.md).
+Start with the [getting-started guide](docs/getting-started.md), [architecture
+overview](docs/architecture.md), [plugin protocol](docs/reference/plugin-protocol-v1.md),
+[support matrix](docs/reference/support-matrix.md), and [troubleshooting
+guide](docs/troubleshooting.md).
 
 This repository is currently private. No public release or additional license
 grant is implied by access to this alpha checkout.

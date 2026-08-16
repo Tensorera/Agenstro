@@ -1,33 +1,54 @@
-# Agenstro 0.3 Haskell-first Documentation
+# Agenstro 0.3 Documentation
 
-This site describes the current `0.3` source release path: Clef is a typed
-Haskell EDSL, and Tactus is the Python 3.12 project-local CLI that prepares,
-checks, and runs ordinary Haskell workflow programs.
+This site describes the current `0.3` source path: Clef is a typed Haskell
+EDSL, and Tactus is the Rust execution kernel that initializes projects,
+supervises plugins and Haskell programs, streams events, and records factual
+run journals.
 
 ## Current release contract
 
 | Surface | Contract |
 | --- | --- |
 | Clef | Cabal package `0.3.0.0`; GHC2021; `base >=4.20 && <4.23` |
-| Tactus | Python package `0.3.0`; `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, and `smoke` |
-| Providers | Replaceable one-shot JSONL plugins for Codex, Claude Code, and OpenCode |
+| Tactus | Rust crate/binary `0.3.0`; `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
+| Plugins | Replaceable one-shot JSONL processes; built-in adapters cover Codex, Claude Code, OpenCode, and `workspace.paths` |
 | Effect | `workspace.paths` observes path snapshots and differences; it does not sandbox or roll back changes |
-| Platforms | Windows and Ubuntu are required jobs in the Haskell/Tactus CI matrix |
+| Motivo Studio | TypeScript + React + Electron `0.3.0`; redacted visual projection over versioned Tactus control queries |
+| Platforms | Windows and Ubuntu are required jobs for Tactus, Clef integration, and Motivo Studio |
 
 From the repository root, the source gates are:
 
 ```powershell
-cabal build all
+cabal build all --enable-tests
 cabal test all --test-show-details=direct
 
-python -m pip install -e "./tactus-runtime[dev]"
-python -m pytest tactus-runtime/tests
-python -m ruff check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-python -m ruff format --check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-python -m pyright -p tactus-runtime/pyproject.toml
+$target = Join-Path $env:TEMP ("agenstro-tactus-" + [guid]::NewGuid().ToString("N"))
+$env:CARGO_TARGET_DIR = $target
+$env:CARGO_INCREMENTAL = "0"
+$env:CARGO_PROFILE_DEV_DEBUG = "0"
+$env:CARGO_PROFILE_TEST_DEBUG = "0"
+try {
+  cargo check -p tactus-runtime --all-targets --locked
+  cargo test -p tactus-runtime --locked
+  cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
+} finally {
+  cargo clean --target-dir $target
+  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
+}
+
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio run format:check
+npm --prefix motivo-studio run lint
+npm --prefix motivo-studio run typecheck
+npm --prefix motivo-studio test
+npm --prefix motivo-studio run package
 ```
 
-Those tests use local fakes and do not contact a model provider.
+Those tests use local fakes and do not contact a model provider. Motivo
+packaging produces an unsigned application for the current platform.
 
 ## Tactus safety boundary
 
@@ -49,6 +70,7 @@ explicit deny or managed configuration.
 | --- | --- |
 | Install Tactus and run the offline path | [Getting started](getting-started.md) |
 | Understand ownership and execution flow | [Architecture](architecture.md) |
+| Visualize an initialized workspace | [Motivo Studio](motivo-studio.md) |
 | Check current platform and component status | [Support matrix](reference/support-matrix.md) |
 | Inspect the provider/effect wire contract | [Local plugin protocol v1](reference/plugin-protocol-v1.md) |
 | Diagnose toolchain, encoding, or plugin failures | [Troubleshooting](troubleshooting.md) |
@@ -56,7 +78,7 @@ explicit deny or managed configuration.
 | Understand the Haskell and trusted-plugin decision | [ADR-0003](adr/0003-haskell-dsl-and-local-plugins.md) |
 | Move a `0.2` workspace to the new path | [0.2 to Haskell 0.3 migration](migrations/0.2-to-haskell-0.3.md) |
 
-Motivo Studio and Segno Flow are frozen for this release. The Clef/Tactus Rust
-product cores have been removed from the current tree and remain available at
-Git commit `c679f45`; Python archives, the shared foundation, and historical
-documentation remain as legacy evidence outside current release claims.
+Motivo Studio is current but deliberately thin: it invokes Tactus and never
+becomes a second runtime. Segno Flow remains frozen. Superseded Clef and Tactus
+implementations remain available through Git history and selected archives;
+they are not an alternate current runtime.

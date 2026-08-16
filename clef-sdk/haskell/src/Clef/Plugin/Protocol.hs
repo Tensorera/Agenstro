@@ -2,8 +2,13 @@
 
 module Clef.Plugin.Protocol
   ( PluginRequest (..),
+    PluginFailure (..),
     PluginTerminal (..),
     ParsedPluginOutput (..),
+    PluginOutputParser,
+    initialPluginOutputParser,
+    parsePluginFrame,
+    finishPluginOutput,
     decodeStrictJSON,
     encodePluginRequest,
     parsePluginOutput,
@@ -11,13 +16,15 @@ module Clef.Plugin.Protocol
 where
 
 import Data.Aeson
-  ( FromJSON,
+  ( FromJSON (parseJSON),
+    Object,
     ToJSON (toJSON),
     Value (Object),
     eitherDecodeStrict',
     encode,
     object,
     (.:),
+    (.:?),
     (.=),
   )
 import Data.Aeson.Decoding.ByteString (bsToTokens)
@@ -32,24 +39,50 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Set as Set
 import Data.Scientific (Scientific, toRealFloat)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import Clef.Error (WorkflowError (..))
 
 data PluginRequest = PluginRequest
   { pluginRequestId :: Text,
     pluginRequestMethod :: Text,
-    pluginRequestParams :: Value
+    pluginRequestParams :: Object
   }
   deriving (Eq, Show)
 
+-- | Stable failure envelope shared by Clef and the Rust Tactus runtime.
+-- Plugin-specific evidence remains open in 'pluginFailureDetails'.
+data PluginFailure = PluginFailure
+  { pluginFailureCode :: Text,
+    pluginFailureMessage :: Text,
+    pluginFailureDetails :: Maybe Value
+  }
+  deriving (Eq, Show)
+
+instance FromJSON PluginFailure where
+  parseJSON value = do
+    objectValue <- parseJSON value
+    PluginFailure
+      <$> objectValue .: "code"
+      <*> objectValue .: "message"
+      <*> objectValue .:? "details"
+
+instance ToJSON PluginFailure where
+  toJSON failure =
+    object $
+      [ "code" .= pluginFailureCode failure,
+        "message" .= pluginFailureMessage failure
+      ]
+        <> maybe [] (\details -> ["details" .= details]) (pluginFailureDetails failure)
+
 data PluginTerminal
   = PluginSucceeded Value
-  | PluginFailed Value
+  | PluginFailed PluginFailure
   deriving (Eq, Show)
 
 data ParsedPluginOutput = ParsedPluginOutput
@@ -57,6 +90,19 @@ data ParsedPluginOutput = ParsedPluginOutput
     pluginOutputTerminal :: PluginTerminal
   }
   deriving (Eq, Show)
+
+-- | Incremental state for one plugin stdout stream.  It is deliberately
+-- abstract: callers may feed complete LF-delimited frames as bytes, while
+-- preserving UTF-8 sequences split across arbitrary process read chunks.
+data PluginOutputParser = PluginOutputParser
+  { parserLineNumber :: Int,
+    parserEventsReversed :: [Value],
+    parserTerminal :: Maybe PluginTerminal
+  }
+  deriving (Eq, Show)
+
+initialPluginOutputParser :: PluginOutputParser
+initialPluginOutputParser = PluginOutputParser 1 [] Nothing
 
 instance ToJSON PluginRequest where
   toJSON request =
@@ -71,93 +117,143 @@ encodePluginRequest :: PluginRequest -> LazyByteString.ByteString
 encodePluginRequest = encode
 
 parsePluginOutput :: Text -> Text -> Text -> Either WorkflowError ParsedPluginOutput
-parsePluginOutput pluginName expectedId output =
-  go 1 [] Nothing (Text.lines output)
+parsePluginOutput pluginName expectedId output = do
+  parser <- foldFrames initialPluginOutputParser frames
+  finishPluginOutput pluginName parser
   where
-    protocolFailure :: Text -> Either WorkflowError a
-    protocolFailure = Left . PluginProtocolFailed pluginName
+    encoded = encodeUtf8 output
+    splitFrames = ByteString.split 10 encoded
+    frames = case reverse splitFrames of
+      [] -> []
+      empty : remaining | ByteString.null empty -> reverse remaining
+      _ -> splitFrames
 
-    go :: Int -> [Value] -> Maybe PluginTerminal -> [Text] -> Either WorkflowError ParsedPluginOutput
-    go _ _ Nothing [] = protocolFailure "missing terminal result"
-    go _ events (Just terminal) [] = Right (ParsedPluginOutput (reverse events) terminal)
-    go lineNumber _ (Just _) (_ : _) =
+    foldFrames parser [] = Right parser
+    foldFrames parser (frame : remaining) = do
+      (next, _) <- parsePluginFrame pluginName expectedId parser frame
+      foldFrames next remaining
+
+-- | Validate one complete JSONL frame.  Event frames are returned immediately
+-- so the runtime can publish them before the terminal result arrives.
+parsePluginFrame :: Text -> Text -> PluginOutputParser -> ByteString -> Either WorkflowError (PluginOutputParser, Maybe Value)
+parsePluginFrame pluginName expectedId parser encodedLine
+  | ByteString.null encodedLine = protocolFailure $ "empty JSONL frame at line " <> renderLine lineNumber
+  | Just _ <- parserTerminal parser =
       protocolFailure $ "received data after the terminal result at line " <> renderLine lineNumber
-    go lineNumber events Nothing (line : remainingLines)
-      | Text.null line = protocolFailure $ "empty JSONL frame at line " <> renderLine lineNumber
-      | otherwise = do
-          frame <- case decodeUniqueJSON (encodeUtf8 line) of
+  | otherwise = do
+      case decodeUtf8' encodedLine of
+        Left exception ->
+          protocolFailure $
+            "stdout was not valid UTF-8 at line " <> renderLine lineNumber <> ": " <> Text.pack (show exception)
+        Right _ -> pure ()
+      frame <- case decodeUniqueJSON encodedLine of
+        Left message ->
+          protocolFailure $
+            "invalid JSON at line " <> renderLine lineNumber <> ": " <> Text.pack message
+        Right value -> Right value
+      (frameType, frameId) <- case frame of
+        Object objectValue ->
+          case parseEither (\value -> (,) <$> value .: "type" <*> value .: "id") objectValue of
             Left message ->
               protocolFailure $
-                "invalid JSON at line " <> renderLine lineNumber <> ": " <> Text.pack message
-            Right value -> Right value
-          (frameType, frameId) <- case frame of
-            Object objectValue ->
-              case parseEither (\value -> (,) <$> value .: "type" <*> value .: "id") objectValue of
-                Left message ->
-                  protocolFailure $
-                    "invalid frame at line " <> renderLine lineNumber <> ": " <> Text.pack message
-                Right fields -> Right fields
-            _ -> protocolFailure $ "frame at line " <> renderLine lineNumber <> " must be an object"
-          if frameId /= expectedId
-            then
-              protocolFailure $
-                "correlation id mismatch at line "
-                  <> renderLine lineNumber
-                  <> ": expected '"
-                  <> expectedId
-                  <> "' but received '"
-                  <> frameId
-                  <> "'"
-            else case (frameType :: Text) of
-              "event" -> do
-                case frame of
-                  Object objectValue -> case KeyMap.lookup "event" objectValue of
-                    Just (Object _) -> pure ()
-                    _ ->
+                "invalid frame at line " <> renderLine lineNumber <> ": " <> Text.pack message
+            Right fields -> Right fields
+        _ -> protocolFailure $ "frame at line " <> renderLine lineNumber <> " must be an object"
+      if frameId /= expectedId
+        then
+          protocolFailure $
+            "correlation id mismatch at line "
+              <> renderLine lineNumber
+              <> ": expected '"
+              <> expectedId
+              <> "' but received '"
+              <> frameId
+              <> "'"
+        else case (frameType :: Text) of
+          "event" -> do
+            case frame of
+              Object objectValue -> case KeyMap.lookup "event" objectValue of
+                Just (Object eventObject) ->
+                  case (parseEither (.: "type") eventObject :: Either String Text) of
+                    Left message ->
                       protocolFailure $
                         "event frame at line "
                           <> renderLine lineNumber
-                          <> " must contain an event object"
-                  _ -> protocolFailure "event frame must be an object"
-                go (lineNumber + 1) (frame : events) Nothing remainingLines
-              "result" -> do
-                terminal <- parseTerminal lineNumber frame
-                go (lineNumber + 1) events (Just terminal) remainingLines
-              other ->
-                protocolFailure $
-                  "unknown frame type '" <> other <> "' at line " <> renderLine lineNumber
+                          <> " has an invalid event subtype: "
+                          <> Text.pack message
+                    Right _ -> pure ()
+                _ ->
+                  protocolFailure $
+                    "event frame at line "
+                      <> renderLine lineNumber
+                      <> " must contain an event object"
+              _ -> protocolFailure "event frame must be an object"
+            pure
+              ( parser
+                  { parserLineNumber = lineNumber + 1,
+                    parserEventsReversed = frame : parserEventsReversed parser
+                  },
+                Just frame
+              )
+          "result" -> do
+            terminal <- parseTerminal pluginName lineNumber frame
+            pure (parser {parserLineNumber = lineNumber + 1, parserTerminal = Just terminal}, Nothing)
+          other ->
+            protocolFailure $
+              "unknown frame type '" <> other <> "' at line " <> renderLine lineNumber
+  where
+    lineNumber = parserLineNumber parser
+    protocolFailure = Left . PluginProtocolFailed pluginName
 
-    parseTerminal :: Int -> Value -> Either WorkflowError PluginTerminal
-    parseTerminal lineNumber (Object objectValue) = do
-      ok <- case parseEither (.: "ok") objectValue of
-        Left message ->
-          protocolFailure $
-            "invalid terminal result at line " <> renderLine lineNumber <> ": " <> Text.pack message
-        Right result -> Right result
-      let hasValue = KeyMap.member "value" objectValue
-          hasError = KeyMap.member "error" objectValue
-      case (ok, hasValue, hasError) of
-        (True, True, False) ->
-          maybe
-            (protocolFailure "terminal result lost its value field")
-            (Right . PluginSucceeded)
-            (KeyMap.lookup "value" objectValue)
-        (False, False, True) ->
-          maybe
-            (protocolFailure "terminal result lost its error field")
-            (Right . PluginFailed)
-            (KeyMap.lookup "error" objectValue)
-        (True, _, _) ->
-          protocolFailure $
-            "successful terminal result at line " <> renderLine lineNumber <> " must contain value and no error"
-        (False, _, _) ->
-          protocolFailure $
-            "failed terminal result at line " <> renderLine lineNumber <> " must contain error and no value"
-    parseTerminal lineNumber _ =
-      protocolFailure $ "terminal result at line " <> renderLine lineNumber <> " must be an object"
+-- | Complete an incremental stream.  Exactly one terminal result is required.
+finishPluginOutput :: Text -> PluginOutputParser -> Either WorkflowError ParsedPluginOutput
+finishPluginOutput pluginName parser = case parserTerminal parser of
+  Nothing -> Left (PluginProtocolFailed pluginName "missing terminal result")
+  Just terminal -> Right (ParsedPluginOutput (reverse (parserEventsReversed parser)) terminal)
 
-    renderLine :: Int -> Text
-    renderLine = Text.pack . show
+parseTerminal :: Text -> Int -> Value -> Either WorkflowError PluginTerminal
+parseTerminal pluginName lineNumber (Object objectValue) = do
+  ok <- case parseEither (.: "ok") objectValue of
+    Left message ->
+      protocolFailure $
+        "invalid terminal result at line " <> renderLine lineNumber <> ": " <> Text.pack message
+    Right result -> Right result
+  let hasValue = KeyMap.member "value" objectValue
+      hasError = KeyMap.member "error" objectValue
+  case (ok, hasValue, hasError) of
+    (True, True, False) ->
+      maybe
+        (protocolFailure "terminal result lost its value field")
+        (Right . PluginSucceeded)
+        (KeyMap.lookup "value" objectValue)
+    (False, False, True) ->
+      maybe
+        (protocolFailure "terminal result lost its error field")
+        (\failure ->
+          case parseEither parseJSON failure of
+            Left message ->
+              protocolFailure $
+                "failed terminal result at line "
+                  <> renderLine lineNumber
+                  <> " has an invalid error object: "
+                  <> Text.pack message
+            Right structured -> Right (PluginFailed structured)
+        )
+        (KeyMap.lookup "error" objectValue)
+    (True, _, _) ->
+      protocolFailure $
+        "successful terminal result at line " <> renderLine lineNumber <> " must contain value and no error"
+    (False, _, _) ->
+      protocolFailure $
+        "failed terminal result at line " <> renderLine lineNumber <> " must contain error and no value"
+  where
+    protocolFailure = Left . PluginProtocolFailed pluginName
+parseTerminal pluginName lineNumber _ =
+  Left . PluginProtocolFailed pluginName $
+    "terminal result at line " <> renderLine lineNumber <> " must be an object"
+
+renderLine :: Int -> Text
+renderLine = Text.pack . show
 
 decodeUniqueJSON :: ByteString -> Either String Value
 decodeUniqueJSON = decodeStrictJSON
@@ -191,7 +287,10 @@ validateRecord _ (TkRecordEnd continuation) = Right continuation
 validateRecord _ (TkRecordErr message) = Left message
 
 finiteJSONNumber :: Number -> Bool
-finiteJSONNumber (NumInteger _) = True
+-- Match serde_json's lossless integer domain used by the Rust runtime.  A
+-- larger integer must not silently cross the boundary through an f64.
+finiteJSONNumber (NumInteger value) =
+  value >= -9223372036854775808 && value <= 18446744073709551615
 finiteJSONNumber (NumDecimal value) = finiteScientific value
 finiteJSONNumber (NumScientific value) = finiteScientific value
 

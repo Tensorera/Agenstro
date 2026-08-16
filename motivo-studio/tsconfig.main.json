@@ -7,11 +7,8 @@
   "include": [
     "src/main.ts",
     "src/preload.ts",
-    "src/pty-host.ts",
     "src/shared/**/*.ts",
     "src/main/**/*.ts",
-    "src/preload/**/*.ts",
-    "src/pty/**/*.ts",
-    "src/generated/**/*.ts"
+    "src/preload/**/*.ts"
   ]
 }

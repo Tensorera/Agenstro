@@ -2,8 +2,9 @@
 
 Clef `0.3.0.0` is a small, typed Haskell EDSL for dynamic coding-agent
 workflows. A workflow is an ordinary Haskell program: GHC checks the values
-passed between `Task input output` and the results returned by `Operation
-output`. Runtime provider and effect availability stays dynamic.
+passed between `Task input output`, `Operation output`, and arbitrary `Plugin
+input output` calls. Runtime provider, effect, and plugin availability stays
+dynamic.
 
 The Haskell implementation under `haskell/` is authoritative for new
 development. The Python `0.2` package has moved to
@@ -41,6 +42,15 @@ guide](https://cabal.readthedocs.io/en/stable/cabal-project-description-file.htm
 `task` constructor accepts any `Text -> Either Text output` decoder while still
 keeping the task's input and output wiring visible to GHC.
 
+`jsonPlugin name method` creates a general `ToJSON input => FromJSON output`
+boundary and `rawPlugin` is the explicit `Value -> Value` escape hatch. Calls
+remain ordinary typed workflow steps:
+
+```haskell
+let add = jsonPlugin "calculator" "add" :: Plugin (Int, Int) Int
+answer <- call add (19, 23)
+```
+
 `attempt` catches only `WorkflowError` inside the EDSL, allowing typed fallback
 or post-failure effect calls without swallowing cancellation. For callers that
 need evidence after failure, `runTactusWithRecords` returns the workflow outcome
@@ -72,9 +82,20 @@ JSON with this schema:
       "observe_invocations": true
     }
   },
+  "plugins": {
+    "calculator": {
+      "command": ["calculator-plugin"],
+      "options": {}
+    }
+  },
   "instructions": "Instructions prepended to every provider prompt."
 }
 ```
+
+`plugins` is optional and defaults to `{}` for older runtime configurations.
+It is an independent, open registry: general plugins do not pretend to be
+providers or effects. Clef adds runtime-owned `workspace` and `options` fields
+to each general plugin request just as it does for effect calls.
 
 Commands are argument arrays and are executed directly, never through a shell.
 They run with the configured workspace as their current directory and inherit
@@ -83,8 +104,9 @@ effort mapping, and credentials belong to provider adapters, not the EDSL.
 
 ## Plugin boundary
 
-Each provider or effect call starts one subprocess, writes one JSONL request,
-and waits for it to exit. The request is:
+Each provider, effect, or general plugin call starts one subprocess and writes
+one JSONL request. Stdout is decoded incrementally by LF while stdin and stderr
+are drained concurrently. The request is:
 
 ```json
 {"api":"agenstro.plugin/v1","id":"clef-1","method":"invoke","params":{}}
@@ -113,8 +135,19 @@ or:
 Clef rejects malformed JSON, correlation mismatches, missing or repeated
 terminal results, data after a terminal result, and non-zero exits that do not
 accompany a valid structured failure.
-Plugin events and stderr diagnostics are retained as runtime records and echoed
-to stderr. A valid structured `ok:false` result remains a plugin-reported
+Plugin events are retained as runtime records and delivered to `EventSink` as
+soon as each complete line arrives, before the terminal result when applicable;
+they are not part of `Workflow`'s return type. `newRuntime` keeps the default
+stderr projection, while `newRuntimeWithSink config (EventSink handler)` installs
+a caller-defined projection without losing in-memory records. Clef serializes
+the handler on a bounded worker queue and boundedly flushes it at the
+`runWorkflow` boundary; a blocked or failed sink is reported as
+`RuntimeSinkFailed` without changing a known plugin failure into
+`outcome_unknown`. Typed general-plugin terminal values
+are retained as `PluginValueRecord` before
+decoding, so evidence survives a result-schema error. Stderr
+diagnostics are drained concurrently and recorded after process completion. A
+valid structured `ok:false` result remains a plugin-reported
 failure even when an adapter also exits non-zero. Provider values and effect
 evidence have distinct record types.
 

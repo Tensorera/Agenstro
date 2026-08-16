@@ -4,6 +4,7 @@ module Clef.Runtime.Config
   ( RuntimeConfig (..),
     ProviderConfig (..),
     EffectConfig (..),
+    PluginConfig (..),
     decodeRuntimeConfig,
     loadRuntimeConfig,
     loadRuntimeConfigFromEnv,
@@ -36,6 +37,7 @@ data RuntimeConfig = RuntimeConfig
     runtimeDefaultProvider :: Text,
     runtimeProviders :: Map Text ProviderConfig,
     runtimeEffects :: Map Text EffectConfig,
+    runtimePlugins :: Map Text PluginConfig,
     runtimeInstructions :: Text
   }
   deriving (Eq, Show)
@@ -55,6 +57,14 @@ data EffectConfig = EffectConfig
   }
   deriving (Eq, Show)
 
+-- | Configuration for an open, application-defined plugin.  Clef assigns no
+-- provider or effect semantics to entries in this registry.
+data PluginConfig = PluginConfig
+  { pluginCommand :: [Text],
+    pluginOptions :: Object
+  }
+  deriving (Eq, Show)
+
 instance FromJSON RuntimeConfig where
   parseJSON = withObject "Clef runtime configuration" $ \objectValue -> do
     api <- objectValue .: "api"
@@ -64,6 +74,7 @@ instance FromJSON RuntimeConfig where
     defaultProvider <- objectValue .: "default_provider"
     providers <- objectValue .: "providers"
     effects <- objectValue .: "effects"
+    plugins <- objectValue .:? "plugins" .!= Map.empty
     instructions <- objectValue .: "instructions"
     when (Text.null defaultProvider) $ fail "default_provider must not be empty"
     unless (Map.member defaultProvider providers) $
@@ -75,6 +86,7 @@ instance FromJSON RuntimeConfig where
           runtimeDefaultProvider = defaultProvider,
           runtimeProviders = providers,
           runtimeEffects = effects,
+          runtimePlugins = plugins,
           runtimeInstructions = instructions
         }
 
@@ -96,6 +108,14 @@ instance FromJSON EffectConfig where
       <$> pure command
       <*> objectValue .:? "options" .!= mempty
       <*> objectValue .:? "observe_invocations" .!= False
+
+instance FromJSON PluginConfig where
+  parseJSON = withObject "plugin configuration" $ \objectValue -> do
+    command <- objectValue .: "command"
+    when (null command) $ fail "plugin command must contain an executable"
+    PluginConfig
+      <$> pure command
+      <*> objectValue .:? "options" .!= mempty
 
 decodeRuntimeConfig :: ByteString.ByteString -> Either WorkflowError RuntimeConfig
 decodeRuntimeConfig bytes =

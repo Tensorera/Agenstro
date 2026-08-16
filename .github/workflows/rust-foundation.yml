@@ -12,6 +12,7 @@ on:
       - "proto/**"
       - "rust-toolchain.toml"
       - "segno-flow/rust/**"
+      - "tactus-runtime/**"
   push:
     paths:
       - ".github/workflows/rust-foundation.yml"
@@ -23,6 +24,7 @@ on:
       - "proto/**"
       - "rust-toolchain.toml"
       - "segno-flow/rust/**"
+      - "tactus-runtime/**"
 
 permissions:
   contents: read
@@ -31,6 +33,11 @@ jobs:
   rust:
     name: Rust stable (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-rust-target
     strategy:
       fail-fast: false
       matrix:
@@ -50,12 +57,20 @@ jobs:
         run: cargo +stable test --workspace --all-features --locked
       - name: Build documentation
         run: cargo +stable doc --workspace --all-features --no-deps --locked --document-private-items
-      # Clef and Tactus have their own Haskell/Python workflow. This job covers
-      # only the retained shared Rust crates and Segno implementation.
+      - name: Remove Rust build artifacts
+        if: always()
+        run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
+      # Clef has its own Haskell workflow. This job covers the current Rust
+      # Tactus kernel together with the retained foundation and Segno crates.
 
   msrv:
     name: Rust 1.88 MSRV
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-msrv-target
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -65,6 +80,9 @@ jobs:
         run: cargo +1.88.0 check --workspace --all-targets --all-features --locked
       - name: Test workspace at MSRV
         run: cargo +1.88.0 test --workspace --all-features --locked
+      - name: Remove Rust build artifacts
+        if: always()
+        run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
 
   proto:
     name: Protobuf lint

@@ -1,5 +1,5 @@
-site_name: Agenstro 0.3 Haskell-first Alpha
-site_description: Evidence-based documentation for the Clef and Tactus 0.3 path
+site_name: Agenstro 0.3 Haskell + Rust Alpha
+site_description: Clef Haskell DSL and Tactus Rust runtime documentation
 repo_name: Tensorera/agenstro
 repo_url: https://github.com/Tensorera/agenstro
 docs_dir: docs
@@ -15,9 +15,9 @@ markdown_extensions:
   - toc:
       permalink: true
 
-# Historical 0.2 architecture pages remain in Git; some describe the removed
-# Clef/Tactus Rust product cores. Only the Haskell-first 0.3 release surface is
-# published in this site. Motivo and Segno source remains frozen.
+# Historical architecture pages remain in Git and describe superseded runtime
+# ownership. The published 0.3 surface is Clef Haskell, Tactus Rust, and the
+# thin Motivo Studio projection. Segno Flow remains frozen.
 exclude_docs: |
   adr/0001-versioned-rust-foundation.md
   adr/0002-daemon-state-and-electron-boundaries.md
@@ -51,8 +51,10 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Architecture: architecture.md
+  - Motivo Studio: motivo-studio.md
   - Reference:
       - Local plugin protocol v1: reference/plugin-protocol-v1.md
+      - Studio control API v1: reference/studio-control-v1.md
       - Support matrix: reference/support-matrix.md
   - Operations:
       - Troubleshooting: troubleshooting.md

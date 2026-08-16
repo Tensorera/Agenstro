@@ -6,16 +6,20 @@ module Clef.Workflow
   ( Workflow,
     Task,
     Operation,
+    Plugin,
     ProviderRef (..),
     providerRef,
     task,
     textTask,
     jsonTask,
     operation,
+    jsonPlugin,
+    rawPlugin,
     decodeTaskResult,
     invoke,
     invokeWith,
     perform,
+    call,
     parallel,
     parallelAll,
     require,
@@ -31,7 +35,9 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Exception
-  ( SomeException,
+  ( AsyncException,
+    SomeException,
+    fromException,
     mask,
     throwIO,
     try,
@@ -59,6 +65,7 @@ import Clef.Runtime
     Runtime,
     RuntimeRecord (..),
     callPlugin,
+    flushRuntimeSink,
     freshRuntimeId,
     newRuntime,
     readRuntimeRecords,
@@ -98,6 +105,16 @@ data Operation output = Operation
     internalEffectMethod :: Text,
     internalEffectParams :: Value,
     internalDecodeOperation :: Value -> Either Text output
+  }
+
+-- | An open plugin method with a statically typed request and result.  Plugin
+-- availability remains dynamic and is resolved from the runtime's independent
+-- @plugins@ registry.
+data Plugin input output = Plugin
+  { internalPluginName :: Text,
+    internalPluginMethod :: Text,
+    internalEncodePluginInput :: input -> Value,
+    internalDecodePluginOutput :: Value -> Either Text output
   }
 
 -- | A provider name plus open-ended per-invocation overrides.  Model, effort,
@@ -147,6 +164,31 @@ operation effectName method params =
           Right result -> Right result
     }
 
+-- | Define a typed JSON plugin method.  GHC checks the input/output wiring;
+-- Aeson validates the dynamic result at the plugin boundary.
+jsonPlugin :: (ToJSON input, FromJSON output) => Text -> Text -> Plugin input output
+jsonPlugin pluginName method =
+  Plugin
+    { internalPluginName = pluginName,
+      internalPluginMethod = method,
+      internalEncodePluginInput = toJSON,
+      internalDecodePluginOutput = \value ->
+        case parseEither parseJSON value of
+          Left message -> Left (Text.pack message)
+          Right result -> Right result
+    }
+
+-- | Fully open JSON escape hatch for plugins whose schema is intentionally
+-- dynamic.
+rawPlugin :: Text -> Text -> Plugin Value Value
+rawPlugin pluginName method =
+  Plugin
+    { internalPluginName = pluginName,
+      internalPluginMethod = method,
+      internalEncodePluginInput = id,
+      internalDecodePluginOutput = Right
+    }
+
 decodeTaskResult :: Task input output -> Text -> Either WorkflowError output
 decodeTaskResult selectedTask text =
   case internalDecodeTask selectedTask text of
@@ -170,16 +212,11 @@ perform selectedOperation = Workflow $ \runtime -> do
   effectConfig <- case Map.lookup effectName (Config.runtimeEffects config) of
     Nothing -> throwIO (UnknownEffect effectName)
     Just found -> pure found
-  let commonParams =
-        KeyMap.fromList
-          [ ("workspace", toJSON (Config.runtimeWorkspace config)),
-            ("options", Object (Config.effectOptions effectConfig))
-          ]
-      -- Runtime-owned workspace/options win on key collisions.  Operation
-      -- fields otherwise stay top-level for cross-language effect plugins.
-      pluginParams = case internalEffectParams selectedOperation of
-        Object operationFields -> Object (KeyMap.union commonParams operationFields)
-        other -> Object (KeyMap.insert "input" other commonParams)
+  let pluginParams =
+        augmentPluginParams
+          (Config.runtimeWorkspace config)
+          (Config.effectOptions effectConfig)
+          (internalEffectParams selectedOperation)
   pluginResult <-
     callPlugin
       runtime
@@ -193,6 +230,49 @@ perform selectedOperation = Workflow $ \runtime -> do
   case internalDecodeOperation selectedOperation (pluginCallValue pluginResult) of
     Left message -> throwIO (OperationDecodeFailed effectName method message)
     Right value -> pure value
+
+-- | Invoke an arbitrary configured plugin.  Streaming events are delivered to
+-- the runtime sink as a side channel; only the typed terminal result enters
+-- the workflow value graph.
+call :: Plugin input output -> input -> Workflow output
+call selectedPlugin input = Workflow $ \runtime -> do
+  let config = runtimeConfig runtime
+      pluginName = internalPluginName selectedPlugin
+      method = internalPluginMethod selectedPlugin
+  pluginConfig <- case Map.lookup pluginName (Config.runtimePlugins config) of
+    Nothing -> throwIO (UnknownPlugin pluginName)
+    Just found -> pure found
+  let params =
+        augmentPluginParams
+          (Config.runtimeWorkspace config)
+          (Config.pluginOptions pluginConfig)
+          (internalEncodePluginInput selectedPlugin input)
+  result <-
+    callPlugin
+      runtime
+      ("plugin:" <> pluginName)
+      (Config.pluginCommand pluginConfig)
+      method
+      params
+  recordRuntime
+    runtime
+    (PluginValueRecord (pluginCallId result) pluginName method (pluginCallValue result))
+  case internalDecodePluginOutput selectedPlugin (pluginCallValue result) of
+    Left message -> throwIO (PluginDecodeFailed pluginName method message)
+    Right value -> pure value
+
+augmentPluginParams :: FilePath -> Object -> Value -> Object
+augmentPluginParams workspace options input =
+  let commonParams =
+        KeyMap.fromList
+          [ ("workspace", toJSON workspace),
+            ("options", Object options)
+          ]
+   in case input of
+        -- Runtime-owned workspace/options win on key collisions.  User fields
+        -- otherwise stay top-level for simple cross-language plugins.
+        Object inputFields -> KeyMap.union commonParams inputFields
+        other -> KeyMap.insert "input" other commonParams
 
 parallel :: Workflow left -> Workflow right -> Workflow (left, right)
 parallel leftWorkflow rightWorkflow = Workflow $ \runtime ->
@@ -223,8 +303,24 @@ liftIO action = Workflow $ \_ -> action
 attempt :: Workflow value -> Workflow (Either WorkflowError value)
 attempt workflow = Workflow $ \runtime -> try (executeWorkflow workflow runtime)
 
-runWorkflow :: Runtime -> Workflow value -> IO value
-runWorkflow runtime workflow = executeWorkflow workflow runtime
+-- | Run a workflow and boundedly flush its orthogonal record projection before
+-- returning.  A known workflow/plugin failure remains authoritative if the
+-- sink also fails; sink failure only replaces an otherwise successful result.
+-- Asynchronous cancellation is rethrown immediately.
+runWorkflow :: forall value. Runtime -> Workflow value -> IO value
+runWorkflow runtime workflow = do
+  outcome <- try (executeWorkflow workflow runtime) :: IO (Either SomeException value)
+  case outcome of
+    Left exception -> case fromException exception :: Maybe AsyncException of
+      Just _ -> throwIO exception
+      Nothing -> do
+        _ <- flushRuntimeSink runtime
+        throwIO exception
+    Right value -> do
+      sinkOutcome <- flushRuntimeSink runtime
+      case sinkOutcome of
+        Left message -> throwIO (RuntimeSinkFailed message)
+        Right () -> pure value
 
 runTactus :: Workflow value -> IO value
 runTactus workflow = do
@@ -256,7 +352,7 @@ invokeTask runtime selectedProvider selectedTask input = do
       effort = providerRefEffort selectedProvider <|> Config.providerEffort providerConfig
       options = KeyMap.union (providerRefOptions selectedProvider) (Config.providerOptions providerConfig)
       params =
-        Object . KeyMap.fromList . catMaybes $
+        KeyMap.fromList . catMaybes $
           [ Just ("task", toJSON (internalTaskName selectedTask)),
             Just ("prompt", toJSON prompt),
             Just ("workspace", toJSON (Config.runtimeWorkspace config)),
@@ -337,7 +433,7 @@ beginObservers runtime invocationId invocationContext = go [] configuredObserver
               ("effect:" <> effectName)
               (Config.effectCommand effectConfig)
               "observe.begin"
-              ( object
+              ( KeyMap.fromList
                   [ "workspace" .= Config.runtimeWorkspace config,
                     "options" .= Object (Config.effectOptions effectConfig),
                     "invocation" .= invocationId,
@@ -384,7 +480,7 @@ endObservers runtime invocationId invocationContext outcome activeObservers = do
             ("effect:" <> effectName)
             (Config.effectCommand effectConfig)
             "observe.end"
-            ( object
+            ( KeyMap.fromList
                 [ "workspace" .= Config.runtimeWorkspace config,
                   "options" .= Object (Config.effectOptions effectConfig),
                   "invocation" .= invocationId,

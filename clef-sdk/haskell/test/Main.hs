@@ -11,8 +11,8 @@ import Clef.Plugin.Protocol
     PluginTerminal (..),
     parsePluginOutput,
   )
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
 import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (forM, unless)
 import Data.Aeson
@@ -35,6 +35,7 @@ import qualified Data.Map.Strict as Map
 import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import System.Directory (getCurrentDirectory)
 import System.Environment (getArgs, getExecutablePath)
 import System.Exit (exitFailure)
@@ -51,6 +52,7 @@ main = do
     ["--fake-reported-exit"] -> fakeReportedExit
     ["--fake-outcome-unknown"] -> fakeOutcomeUnknown
     ["--fake-backpressure"] -> fakeBackpressure
+    ["--fake-stream"] -> fakeStream
     ["--fake-block"] -> fakeBlock
     ["--fake-block-end"] -> fakeBlockEnd
     _ -> runTests
@@ -67,6 +69,10 @@ runTests = do
           ("JSONL terminal protocol", testProtocolRules),
           ("plugin process exit is checked", testPluginExit workspace executable),
           ("plugin pipes drain concurrently", testPluginPipeBackpressure workspace executable),
+          ("plugin events stream before terminal across UTF-8 chunks", testPluginEventStreaming workspace executable),
+          ("blocked event sinks fail boundedly without hiding plugin outcome", testBlockedEventSink workspace executable),
+          ("runWorkflow flushes the final typed value projection", testFinalSinkProjection workspace executable),
+          ("generic plugin call is statically typed", testGenericPlugin workspace executable),
           ("invoke records provider value and observer evidence separately", testInvokeAndObserve workspace executable),
           ("observer begin cancellation cleans up earlier observers", testObserverBeginCancellation workspace executable),
           ("observer end cancellation does not skip remaining observers", testObserverEndCancellation workspace executable),
@@ -173,8 +179,19 @@ testRuntimeConfig executable workspace = do
                       ]
                 ],
             "effects" .= object [],
+            "plugins"
+              .= object
+                [ "generic"
+                    .= object
+                      [ "command" .= [executable, "--fake-plugin"],
+                        "options" .= object ["mode" .= ("test" :: Text)]
+                      ]
+                ],
             "instructions" .= ("system instructions" :: Text)
           ]
+      legacyWithoutPlugins = case valid of
+        Object fields -> Object (KeyMap.delete "plugins" fields)
+        _ -> valid
       invalidRelativeWorkspace =
         object
           [ "api" .= ("clef.runtime/v1" :: Text),
@@ -189,6 +206,10 @@ testRuntimeConfig executable workspace = do
     Right config -> do
       assertEqual "runtime api" "clef.runtime/v1" (runtimeApi config)
       assertEqual "default provider" "fake" (runtimeDefaultProvider config)
+      assertEqual "generic plugin registry" True (Map.member "generic" (runtimePlugins config))
+  case decodeRuntimeConfig (strictEncode legacyWithoutPlugins) of
+    Right config -> assertEqual "legacy config defaults plugins" Map.empty (runtimePlugins config)
+    Left workflowError -> failTest $ "legacy config without plugins failed: " <> show workflowError
   case decodeRuntimeConfig (strictEncode invalidRelativeWorkspace) of
     Left (RuntimeConfigError _) -> pure ()
     other -> failTest $ "relative workspace should fail, received " <> show other
@@ -209,9 +230,7 @@ testProtocolRules = do
     Right (ParsedPluginOutput [_, _] (PluginSucceeded Null)) -> pure ()
     other -> failTest $ "valid event/result stream failed: " <> show other
   let numericSuccess =
-        "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":[1.7976931348623157e308,5e-324,-0.0,"
-          <> Text.replicate 400 "9"
-          <> "]}"
+        "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":[1.7976931348623157e308,5e-324,-0.0,18446744073709551615,-9223372036854775808]}"
   case parsePluginOutput "fake" "req-1" numericSuccess of
     Right (ParsedPluginOutput [] (PluginSucceeded _)) -> pure ()
     other -> failTest $ "boundary JSON numbers should succeed, received " <> show other
@@ -231,11 +250,25 @@ testProtocolRules = do
         ("{\"type\":\"event\",\"id\":\"req-1\"}\n" <> success)
     )
   assertProtocolFailure
+    "event subtype must be a string"
+    ( parsePluginOutput
+        "fake"
+        "req-1"
+        ("{\"type\":\"event\",\"id\":\"req-1\",\"event\":{\"type\":42}}\n" <> success)
+    )
+  assertProtocolFailure
     "value/error exclusivity"
     ( parsePluginOutput
         "fake"
         "req-1"
         "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":null,\"error\":{}}"
+    )
+  assertProtocolFailure
+    "failure envelope requires code and message"
+    ( parsePluginOutput
+        "fake"
+        "req-1"
+        "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":false,\"error\":{\"code\":\"broken\"}}"
     )
   assertProtocolFailure
     "duplicate JSON object key"
@@ -258,26 +291,44 @@ testProtocolRules = do
         "req-1"
         "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":1e-999}"
     )
+  assertProtocolFailure
+    "positive integer outside the shared wire domain"
+    ( parsePluginOutput
+        "fake"
+        "req-1"
+        "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":18446744073709551616}"
+    )
+  assertProtocolFailure
+    "negative integer outside the shared wire domain"
+    ( parsePluginOutput
+        "fake"
+        "req-1"
+        "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":-9223372036854775809}"
+    )
 
 testPluginExit :: FilePath -> FilePath -> IO ()
 testPluginExit workspace executable = do
   runtime <- newRuntime (testConfig workspace executable)
   assertWorkflowError
-    "exit failure"
-    (\case PluginProcessFailed "bad-exit" _ -> True; _ -> False)
-    (callPlugin runtime "bad-exit" [Text.pack executable, "--fake-exit"] "probe" Null)
+    "post-spawn failure of any plugin method is outcome unknown"
+    (\case PluginOutcomeUnknown "bad-exit" "probe" _ -> True; _ -> False)
+    (callPlugin runtime "bad-exit" [Text.pack executable, "--fake-exit"] "probe" mempty)
   assertWorkflowError
     "reported failure wins over non-zero exit"
     (\case PluginReportedFailure "reported-exit" "probe" _ -> True; _ -> False)
-    (callPlugin runtime "reported-exit" [Text.pack executable, "--fake-reported-exit"] "probe" Null)
+    (callPlugin runtime "reported-exit" [Text.pack executable, "--fake-reported-exit"] "probe" mempty)
   assertWorkflowError
     "invoke transport failure is outcome unknown"
     (\case PluginOutcomeUnknown "bad-invoke" "invoke" _ -> True; _ -> False)
-    (callPlugin runtime "bad-invoke" [Text.pack executable, "--fake-exit"] "invoke" Null)
+    (callPlugin runtime "bad-invoke" [Text.pack executable, "--fake-exit"] "invoke" mempty)
   assertWorkflowError
-    "reported outcome unknown retains its classification"
-    (\case PluginOutcomeUnknown "reported-unknown" "invoke" message -> "timeout" `Text.isInfixOf` message; _ -> False)
-    (callPlugin runtime "reported-unknown" [Text.pack executable, "--fake-outcome-unknown"] "invoke" Null)
+    "reported outcome unknown retains its classification for a generic method"
+    (\case PluginOutcomeUnknown "reported-unknown" "compute" message -> "timeout" `Text.isInfixOf` message; _ -> False)
+    (callPlugin runtime "reported-unknown" [Text.pack executable, "--fake-outcome-unknown"] "compute" mempty)
+  assertWorkflowError
+    "empty plugin method"
+    (\case PluginProtocolFailed "empty-method" _ -> True; _ -> False)
+    (callPlugin runtime "empty-method" [Text.pack executable, "--fake-plugin"] "" mempty)
   assertWorkflowError
     "outbound request uses the strict JSON domain"
     (\case PluginProtocolFailed "bad-json" _ -> True; _ -> False)
@@ -286,7 +337,7 @@ testPluginExit workspace executable = do
         "bad-json"
         [Text.pack executable, "--fake-plugin"]
         "probe"
-        (Number (scientific (10 ^ (1000 :: Int) + 1) (-1)))
+        (KeyMap.singleton "number" (Number (scientific (10 ^ (1000 :: Int) + 1) (-1))))
     )
 
 testPluginPipeBackpressure :: FilePath -> FilePath -> IO ()
@@ -300,10 +351,92 @@ testPluginPipeBackpressure workspace executable = do
         "backpressure"
         [Text.pack executable, "--fake-backpressure"]
         "probe"
-        (object ["blob" .= largeInput])
+        (KeyMap.singleton "blob" (String largeInput))
   case result of
     Just pluginResult -> assertEqual "backpressure result" (String "ok") (pluginCallValue pluginResult)
     Nothing -> failTest "plugin pipe exchange deadlocked"
+
+testPluginEventStreaming :: FilePath -> FilePath -> IO ()
+testPluginEventStreaming workspace executable = do
+  eventSeen <- newEmptyMVar
+  terminalSeen <- newEmptyMVar
+  runtime <-
+    newRuntimeWithSink (testConfig workspace executable) . EventSink $ \record ->
+      case record of
+        PluginEventRecord "stream" _ event -> do
+          _ <- tryPutMVar eventSeen event
+          pure ()
+        _ -> pure ()
+  _ <- forkIO $ do
+    outcome <-
+      try
+        (callPlugin runtime "stream" [Text.pack executable, "--fake-stream"] "probe" mempty) :: IO (Either SomeException PluginCallResult)
+    putMVar terminalSeen outcome
+  maybeEvent <- timeout 1000000 (takeMVar eventSeen)
+  event <- case maybeEvent of
+    Nothing -> failTest "stream event was not emitted promptly"
+    Just value -> pure value
+  message <-
+    parseFakeParams
+      (withObject "event frame" $ \frame -> frame .: "event" >>= withObject "event" (.: "message"))
+      event :: IO Text
+  assertEqual "UTF-8 event split across reads" "跨块🌊" message
+  prematureTerminal <- tryReadMVar terminalSeen
+  case prematureTerminal of
+    Nothing -> pure ()
+    Just _ -> failTest "terminal completed before the event sink observed the event"
+  completed <- timeout 3000000 (takeMVar terminalSeen)
+  case completed of
+    Just (Right result) -> assertEqual "stream terminal result" (String "done") (pluginCallValue result)
+    Just (Left exception) -> failTest $ "stream call failed: " <> show exception
+    Nothing -> failTest "stream plugin did not complete"
+
+testBlockedEventSink :: FilePath -> FilePath -> IO ()
+testBlockedEventSink workspace executable = do
+  releaseSink <- newEmptyMVar
+  runtime <-
+    newRuntimeWithSink (testConfig workspace executable) . EventSink $ \record ->
+      case record of
+        PluginEventRecord "plugin:calculator" _ _ -> takeMVar releaseSink
+        _ -> pure ()
+  let addPlugin = jsonPlugin "calculator" "add" :: Plugin (Int, Int) Int
+  outcome <-
+    timeout 2500000
+      (try (runWorkflow runtime (call addPlugin (19, 23))) :: IO (Either WorkflowError Int))
+  putMVar releaseSink ()
+  case outcome of
+    Just (Left (RuntimeSinkFailed _)) -> pure ()
+    Just (Left other) -> failTest $ "blocked sink returned the wrong failure: " <> show other
+    Just (Right value) -> failTest $ "blocked sink unexpectedly returned " <> show value
+    Nothing -> failTest "blocked sink did not fail within its bounded flush deadline"
+
+testFinalSinkProjection :: FilePath -> FilePath -> IO ()
+testFinalSinkProjection workspace executable = do
+  projected <- newEmptyMVar
+  runtime <-
+    newRuntimeWithSink (testConfig workspace executable) . EventSink $ \record ->
+      case record of
+        PluginValueRecord _ "calculator" "add" value -> do
+          _ <- tryPutMVar projected value
+          pure ()
+        _ -> pure ()
+  let addPlugin = jsonPlugin "calculator" "add" :: Plugin (Int, Int) Int
+  result <- runWorkflow runtime (call addPlugin (19, 23))
+  assertEqual "typed result" 42 result
+  observed <- tryReadMVar projected
+  assertEqual "final typed value reached sink before return" (Just (Number 42)) observed
+
+testGenericPlugin :: FilePath -> FilePath -> IO ()
+testGenericPlugin workspace executable = do
+  runtime <- newRuntime (testConfig workspace executable)
+  let addPlugin = jsonPlugin "calculator" "add" :: Plugin (Int, Int) Int
+  result <- runWorkflow runtime (call addPlugin (19, 23))
+  assertEqual "typed generic plugin result" 42 result
+  records <- readRuntimeRecords runtime
+  assertEqual
+    "generic plugin value retained"
+    1
+    (length [() | PluginValueRecord _ "calculator" "add" _ <- records])
 
 testInvokeAndObserve :: FilePath -> FilePath -> IO ()
 testInvokeAndObserve workspace executable = do
@@ -456,6 +589,15 @@ testConfig workspace executable =
                 }
             )
           ],
+      runtimePlugins =
+        Map.fromList
+          [ ( "calculator",
+              PluginConfig
+                { pluginCommand = pluginCommand,
+                  pluginOptions = mempty
+                }
+            )
+          ],
       runtimeInstructions = "test instructions"
     }
   where
@@ -540,6 +682,10 @@ fakePlugin = do
     "forget" -> do
       _ <- parseFakeParams (withObject "forget params" (.: "snapshot_id")) params :: IO Text
       succeed requestId (object ["forgotten" .= True])
+    "add" -> do
+      (left, right) <-
+        parseFakeParams (withObject "add params" (.: "input")) params :: IO (Int, Int)
+      succeed requestId (left + right)
     _ ->
       emit $
         object
@@ -619,6 +765,44 @@ fakeBackpressure = do
         "id" .= requestId,
         "ok" .= True,
         "value" .= ("ok" :: Text)
+      ]
+
+fakeStream :: IO ()
+fakeStream = do
+  requestLine <- ByteString.Char8.getLine
+  request <- case eitherDecodeStrict' requestLine of
+    Left message -> failTest $ "fake stream plugin received invalid JSON: " <> message
+    Right value -> pure value
+  requestId <-
+    parseFakeParams (withObject "plugin request" (.: "id")) request :: IO Text
+  let eventBytes =
+        strictEncode $
+          object
+            [ "type" .= ("event" :: Text),
+              "id" .= requestId,
+              "event"
+                .= object
+                  [ "type" .= ("progress" :: Text),
+                    "message" .= ("跨块🌊" :: Text)
+                  ]
+            ]
+      marker = Text.Encoding.encodeUtf8 "🌊"
+      (beforeMarker, markerAndRest) = ByteString.breakSubstring marker eventBytes
+      splitPoint = ByteString.length beforeMarker + 2
+      (firstChunk, secondChunk) = ByteString.splitAt splitPoint eventBytes
+  unless (not (ByteString.null markerAndRest)) $ failTest "stream fixture lost its UTF-8 marker"
+  ByteString.hPut IO.stdout firstChunk
+  IO.hFlush IO.stdout
+  threadDelay 100000
+  ByteString.hPut IO.stdout (secondChunk <> ByteString.singleton 10)
+  IO.hFlush IO.stdout
+  threadDelay 700000
+  LazyChar8.putStrLn . encode $
+    object
+      [ "type" .= ("result" :: Text),
+        "id" .= requestId,
+        "ok" .= True,
+        "value" .= ("done" :: Text)
       ]
 
 fakeOutcomeUnknown :: IO ()

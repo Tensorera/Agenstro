@@ -2,233 +2,304 @@
 title: Agenstro 0.3 architecture
 status: alpha
 last_verified: 2026-08-15
-applies_to: "Clef 0.3.0.0 and Tactus 0.3.0"
-platforms: [windows, ubuntu]
+applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 ---
 
 # Agenstro 0.3 architecture
 
-Agenstro 0.3 has two authoritative runtime components: Clef is a typed Haskell
-embedded domain-specific language (EDSL), and Tactus is a small Python CLI that
-creates project-local configuration and delegates compilation or execution to
-the Haskell toolchain. Provider and effect behavior lives behind replaceable
-one-shot local plugins.
+Agenstro has two authoritative runtime components and one visual projection.
+Clef is a compact typed Haskell EDSL. Tactus is the Rust process/runtime kernel
+that prepares a project, executes Clef programs, supervises plugins, routes
+events, and records factual run evidence. Motivo Studio is a TypeScript/React
+desktop client that asks Tactus for redacted, versioned projections.
 
-This is a source-alpha architecture for trusted local development. It does not
-contain a daemon network, database-backed workflow service, permission broker,
-artifact store, rollback engine, or adversarial-code sandbox.
-
-## Component ownership
+The architectural split is:
 
 | Component | Owns | Deliberately does not own |
 | --- | --- | --- |
-| Clef `0.3.0.0` | `Workflow a`, typed `Task input output`, typed `Operation output`, provider/effect invocation, explicit `parallel`, requirements, runtime records | A custom language parser, global DAG, daemon, plugin discovery service, sandbox, credentials, artifact/CAS policy |
-| Tactus `0.3.0` | `.tactus` layout, TOML loading, runtime JSON generation, script discovery, prompt generation, Cabal/GHC/runghc invocation, diagnostics, plugin smoke probes | Python cells, notebooks, durable scheduler, database, checkpoint/rollback, GUI, provider authentication |
-| Provider plugins | Translate the open JSON request into a native coding-agent CLI invocation and normalize its result | Core workflow semantics, effect policy, cross-provider permission equivalence |
-| Effect plugins | Perform or observe an external operation through a separately named registry | Provider output, authorization, automatic rollback |
-| Haskell workflow | Ordinary program control flow and any direct `IO` chosen by its author | Automatic confinement merely because some operations use Clef |
+| Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, incremental event sink | Provider catalogue, permission policy, custom language parser, daemon, global scheduler, artifacts, authentication |
+| Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio control DTOs | Haskell workflow semantics, provider credentials, daemon/API service, CAS, replay, rollback, GUI |
+| Motivo `0.3.0` | Electron window/preload boundary, React visualization, named Zod IPC, one top-level Tactus action | Workflow semantics, config/trace parsing, general filesystem/shell access, daemon, scheduler, replay, credentials |
+| Plugins | Provider/effect/domain behavior behind `agenstro.plugin/v1` | Core workflow composition and runtime ownership |
 
-Motivo Studio and Segno Flow remain in the repository as frozen 0.2 evidence.
-They are outside this component graph and outside the 0.3 release gate.
+Segno Flow remains frozen code. It is outside the `0.3` execution graph and
+release gate.
 
-## End-to-end topology
-
-```text
-project author or coding agent
-        |
-        | writes NNN_slug.hs / .lhs
-        v
-  .tactus/scripts
-        |
-        | tactus check / tactus run
-        v
-Tactus 0.3 (Python CLI)
-        |-- reads .tactus/tactus.toml and PROMPT.md
-        |-- writes .tactus/runtime.json (clef.runtime/v1)
-        |-- builds clef-sdk through Cabal
-        `-- invokes GHC -fno-code or runghc
-                         |
-                         v
-                  Clef 0.3 Haskell EDSL
-                         |
-              Task invoke / Operation perform
-                         |
-                         v
-              agenstro.plugin/v1 process
-                  |                    |
-                  v                    v
-           provider registry      effect registry
-         Codex / Claude Code /   workspace.paths
-               OpenCode
-```
-
-`tactus generate` takes a shorter route through the same configured provider
-and observer plugins: Tactus assembles `PROMPT.md` plus the requested goal,
-starts the provider adapter, lets it edit the project, records observer
-evidence, and lists resulting scripts. Generation does not compile or run them.
-
-## Clef's type boundary
-
-A Clef workflow is ordinary Haskell:
-
-```haskell
-Task input output
-Operation output
-Workflow result
-
-invoke     :: Task input output -> input -> Workflow output
-invokeWith :: ProviderRef -> Task input output -> input -> Workflow output
-perform    :: Operation output -> Workflow output
-parallel   :: Workflow a -> Workflow b -> Workflow (a, b)
-```
-
-GHC can reject a mismatch between the output of one task and the input of the
-next. It cannot prove that a prompt is semantically correct, that a provider is
-honest, that a plugin terminates, or that arbitrary `IO` is safe. Dynamic
-provider and effect names are resolved from runtime configuration.
-
-Sequential `do` notation is the default execution order. `parallel` is the
-only core primitive that requests concurrency. Clef does not first compile the
-program into a global workflow graph, so ordinary branches and values retain
-normal Haskell semantics.
-
-## Tactus workspace and configuration flow
-
-`tactus init` creates only missing files:
+## Component flow
 
 ```text
-project/
-  .tactus/
-    tactus.toml
-    cabal.project
-    PROMPT.md
-    scripts/
+user / coding agent
+        |
+        | tactus init/list/prompt/generate/check/run/doctor/smoke/plugin-call
+        v
++--------------------------- Tactus (Rust) ----------------------------+
+| typed workspace config -> CLI orchestration -> process supervisor     |
+|                                     |              |                  |
+|                                     |              +-> trace journal |
+|                                     v                                 |
+|                         one-shot plugin dispatch                       |
++-----------------------------|-----------------------------------------+
+                              | agenstro.plugin/v1 JSONL
+                 +------------+-------------+----------------+
+                 v                          v                v
+          provider adapter            effect adapter    generic plugin
+       Codex / Claude / OpenCode      workspace.paths     any language
+                 |
+                 v
+          native agent CLI
+
+tactus run
+    |
+    +-> Cabal/GHC/runghc -> Clef Workflow a
+                              |
+                              | typed call / invoke / perform
+                              v
+                       tactus dispatch (one shot)
+                              |
+                              +-> same supervisor/journal path above
+
+Motivo renderer (sandboxed React)
+        |
+        | named, Zod-validated IPC
+        v
+Electron main (workspace root + child handle)
+        |
+        | argv array, shell=false
+        v
+tactus studio inspect/events + generate/check/run/smoke
 ```
 
-At `generate`, `check`, `run`, or `smoke` time, Tactus validates
-`tactus.toml` and writes `.tactus/runtime.json`. The runtime document contains:
+There is no resident service between these boxes. Each invocation is
+self-contained and correlated by request/run identifiers.
 
-- API name `clef.runtime/v1`;
-- the absolute project workspace;
-- a default provider name;
-- separate provider and effect registries;
-- direct command argument arrays, models, effort/variant values, and open
-  plugin options; and
-- the contents of `PROMPT.md` as workflow instructions.
+## Clef: static composition, open runtime
 
-Tactus sets `TACTUS_RUNTIME_CONFIG` to the absolute runtime JSON path before a
-Haskell program starts. `runTactus` reads that file. Command arrays are executed
-without shell parsing, but the executable itself is still arbitrary trusted
-local code.
+`Workflow a` is an abstract wrapper around `Runtime -> IO a`. It uses ordinary
+Haskell control flow; GHC checks the types passed between steps.
 
-Runnable scripts use `NNN_slug.hs` or `NNN_slug.lhs`. Discovery sorts by the
-three-digit number and then relative path. Other Haskell files are helpers:
-`check` includes them by default, while `run` ignores them unless selected
-explicitly. Both commands are fail-fast unless `--keep-going` is supplied.
+The main building blocks are:
 
-## One-shot plugin protocol
+- `Task input output` for provider-shaped work;
+- `Operation output` for configured effects;
+- `Plugin input output` for any other registered one-shot process;
+- `jsonPlugin` for `ToJSON`/`FromJSON` boundaries and `rawPlugin` for an
+  explicit `Value` escape hatch;
+- `parallel` for explicit structured concurrency;
+- `require`/`requireBecause` for typed guards; and
+- `attempt` for catching workflow-domain failures without swallowing
+  asynchronous cancellation.
 
-Providers and effects share `agenstro.plugin/v1`, but their registries and
-result meanings remain separate. Each call:
+Provider and generic plugin events are decoded as complete lines arrive. Clef
+stores the frames in runtime records and passes each event to an `EventSink`.
+The sink is an observation/projection surface, not `Workflow (Stream a)`: only
+the terminal result is decoded into the workflow's declared output type. Clef
+places records on a bounded queue, serializes a custom sink on one worker, and
+boundedly flushes the final value/evidence before `runWorkflow` returns. A sink
+failure is distinct from a provider whose external outcome is unknown.
 
-1. starts one configured executable in the workflow workspace;
-2. inherits the caller's environment;
-3. writes one UTF-8 JSON request and closes standard input;
-4. accepts zero or more correlated JSONL event frames;
-5. requires exactly one correlated terminal result; and
-6. treats standard error as human diagnostics rather than protocol data.
+The Haskell layer intentionally leaves these values open:
+
+- provider and plugin names;
+- model identifiers and reasoning effort;
+- provider variants, argv additions, and environment additions;
+- plugin-specific option objects; and
+- event subtype payloads.
+
+This prevents the core type model from becoming an out-of-date provider enum.
+Typed convenience wrappers can be added at stable plugin boundaries.
+
+## Tactus workspace and typed configuration
+
+`tactus init` creates only missing paths:
+
+```text
+.tactus/
+  tactus.toml
+  cabal.project
+  PROMPT.md
+  scripts/
+  runs/
+```
+
+`tactus.toml` has three registries:
+
+- `[providers.<name>]`: command plus optional model, effort, and open options;
+- `[effects.<name>]`: command, open options, and observer participation; and
+- `[plugins.<name>]`: command plus open options for arbitrary domain plugins.
+
+Rust structures distinguish those categories and reject unknown fields in each
+definition. Cross-field validation requires `api = "clef.runtime/v1"`, a
+registered default provider, and non-empty argv. Options must fit the JSON data
+domain; TOML datetimes and non-finite floats are rejected. Nested option names
+and string values such as model/effort remain deliberately open.
+
+Before running Haskell, Tactus materializes runtime JSON and sets
+`TACTUS_RUNTIME_CONFIG`. Plugin commands in that document point at the exact
+current `tactus dispatch` executable, not directly at the configured plugin.
+This gives Clef a language-neutral configuration while retaining Rust process
+supervision for every call.
+
+## One-shot dispatch and process groups
+
+For one plugin request Tactus:
+
+1. resolves one exact provider/effect/plugin registry entry;
+2. starts its argv in the workspace without a shell;
+3. places it in a Unix process group or Windows Job Object;
+4. writes one bounded UTF-8 request while concurrently draining stdout and
+   stderr;
+5. validates JSONL frames incrementally with a bounded queue;
+6. forwards each accepted event immediately;
+7. requires one correlated terminal result and a coherent process exit; and
+8. reaps the owned process group on completion, deadline, cancellation, or
+   protocol failure.
+
+The supervisor bounds request size, frame size, aggregate stdout, retained
+stderr, frame count, and pending-event count. CLI commands expose wall-clock
+deadlines; `0` deliberately disables a deadline where supported. These bounds
+limit local resource use. Windows Job Objects contain the nested process tree;
+on Unix, a process that deliberately creates a new session can escape
+process-group containment. Plugins are therefore still trusted local code.
+Local termination also cannot prove whether a remote provider completed an
+operation before a transport failure, and never implies a safe retry.
+
+`tactus check` and `tactus run` apply the same process-group ownership to
+Cabal/GHC/runghc. Their terminal streams remain attached to the caller so
+compiler and program output stays visible.
+
+## Incremental event routing
+
+The wire protocol has two record kinds:
 
 ```json
-{"api":"agenstro.plugin/v1","id":"...","method":"invoke","params":{}}
-{"type":"event","id":"...","event":{"type":"provider.raw"}}
-{"type":"result","id":"...","ok":true,"value":{}}
+{"type":"event","id":"r1","event":{"type":"progress","message":"..."}}
+{"type":"result","id":"r1","ok":true,"value":{}}
 ```
 
-Malformed JSON, duplicate object keys, correlation mismatch, duplicate or
-missing terminal results, data after a terminal result, invalid numeric values,
-and inconsistent process exits are failures. Provider invocation failures may
-be reported as `outcome_unknown` when an external request could have completed
-before the local process failed.
+Tactus does not wait for process exit before handling events. A reader thread
+separates LF-terminated frames, a strict decoder validates them, and a bounded
+queue hands them to an isolated sink worker. The supervisor never calls an
+arbitrary sink on its polling thread: queue overflow or a sink that misses its
+delivery deadline fails the invocation and triggers process-group cleanup. The
+hidden `dispatch` command flushes each validated frame back to Clef, whose
+incremental parser enqueues it for its isolated `EventSink` worker.
 
-Version 1 is deliberately one-shot. It has no persistent plugin session,
-authentication handshake, socket discovery, default deadline, output quota, or
-live UI stream. Clients preserve event order but currently buffer protocol
-output until the plugin exits. See the
-[protocol reference](reference/plugin-protocol-v1.md) for the complete frame and
-method contract.
+Human diagnostics travel on stderr. They remain outside protocol frames and
+typed workflow return values.
 
-## Bundled provider adapters
+## Motivo Studio projection
 
-The reference adapters favor non-interactive native CLI modes so a generated
-workflow does not stop on an approval prompt:
+Motivo preserves Electron's process split. The React renderer has no Node
+integration; a context-isolated preload exposes one named operation per IPC
+channel. Electron main owns the selected root and launches an external
+`tactus` executable without a shell. It never gives the renderer an arbitrary
+command or filesystem primitive.
 
-| Registry name | Native invocation shape | Important boundary |
+Two Rust-owned queries form the read boundary:
+
+- `tactus studio inspect` returns health, ordered relative script names,
+  redacted registries, and compact recent run state;
+- `tactus studio events` validates an opaque run id and returns a bounded event
+  page plus terminal summary and `ok`/`partial`/`corrupt` integrity.
+
+Both use a `tactus.control/v1` envelope with `agenstro.studio/v1` data. Commands,
+plugin options, prompt text, and absolute script paths do not cross the bridge.
+All 64-bit counters are decimal strings. Motivo therefore does not parse TOML,
+walk the journal directory, infer workflow state from open event kinds, or own
+a competing scheduler/replay model.
+
+## `agenstro.trace/v1` journal
+
+Each supervised plugin call creates a unique `.tactus/runs/<run-id>/`
+directory. The journal has two publication rules:
+
+- `events.jsonl` receives monotonically sequenced, append-flushed factual
+  events as they occur;
+- `summary.json` is written to a temporary file and atomically renamed after
+  the terminal outcome is known.
+
+Generation adds controller/provider/discovery events around its nested plugin
+calls. A trace envelope contains the trace API, run ID, sequence, timestamp,
+kind, and structured data. It is intentionally distinct from
+`agenstro.plugin/v1`, which is the live process protocol.
+
+The journal is not an artifact store or replay contract. It may contain
+prompts/provider output, has no built-in redaction or credential service, and
+does not capture arbitrary Haskell `IO`. Local retention and deletion remain
+the workspace owner's responsibility.
+
+## Provider adapters
+
+Tactus includes translations for three native agent CLIs:
+
+| Provider key | Native mode | Reasoning extension |
 | --- | --- | --- |
-| `codex` | `codex exec --dangerously-bypass-approvals-and-sandbox --json ...` | Uses an ephemeral execution and skips the Git-repository check; the native CLI still owns credentials, model access, and endpoint behavior |
-| `claude-code` | `claude -p --dangerously-skip-permissions --output-format stream-json ...` | Uses no session persistence; the native CLI still owns authentication and service policy |
-| `opencode` | `opencode run --auto --format json ...` plus inline `permission=allow` | `--auto` approves ask decisions but cannot override an explicit deny or managed configuration, so a full bypass is not claimed |
+| `codex` | `codex exec --dangerously-bypass-approvals-and-sandbox --json ...` | open `effort` |
+| `claude-code` | `claude -p --dangerously-skip-permissions --output-format stream-json ...` | open `effort` |
+| `opencode` | `opencode run --auto --format json ...` plus inline `permission=allow` | open `variant` (with effort fallback) |
 
-Model identifiers remain open strings. Clef/Tactus map the configured effort
-to Codex/Claude `effort` and to OpenCode `variant`; they do not define a closed
-cross-provider equivalence. Options such as `extra_args`, `extra_env`,
-`command_prefix`, and `timeout_seconds` are plugin concerns and can change
-native behavior materially.
+Each adapter normalizes native streaming output into open plugin events and a
+terminal value. Offline `smoke` resolves the executable/version; live smoke
+sends a minimal request. Tests use fake executables and do not authenticate.
 
-The adapters and protocol edge cases are tested with local fakes in CI. CI does
-not install provider CLIs, authenticate accounts, contact model endpoints, or
-certify a provider CLI version. Live acceptance is explicitly local.
+OpenCode has a deliberate capability caveat: `--auto` approves ask decisions,
+but an explicit deny or managed policy may still win. Tactus reports
+`full_bypass=false` rather than claiming parity with the explicit Codex and
+Claude Code dangerous flags.
 
-## `workspace.paths` observation effect
+Provider login, credential storage, pricing, model availability, and
+organization policy belong to the native CLI. Tactus adds none of its own.
 
-The bundled effect can create opaque snapshots, compare two snapshots, forget
-snapshot state, and wrap provider invocation with `observe.begin` /
-`observe.end`. It compares path kind, size, and SHA-256 content digest and
-returns workspace-relative added, modified, deleted, and type-changed paths.
+## `workspace.paths` effect
 
-Configured observers begin in deterministic name order and end in reverse
-order. Cleanup continues after an observer failure, but cancellation cleanup is
-best effort rather than an exactly-once transaction.
+The built-in effect implements `describe`, offline `smoke`, `snapshot`, `diff`,
+`forget`, `observe.begin`, and `observe.end`. Configured as an observer, it
+takes a path snapshot before a provider call and reports the final delta after
+the call:
 
-The effect excludes `.git`, its own `.tactus/path-effect` state, and
-`.tactus/dist-newstyle`. It does not apply general `.gitignore` rules. It does
-not retain file contents, block changes, infer authorization, restore files, or
-attribute a change conclusively to one process. Final snapshots cannot observe
-reads or transient writes, and concurrent writers make attribution ambiguous.
+```json
+{"added":[],"modified":[],"deleted":[],"type_changed":[]}
+```
 
-## Process, trust, and failure boundaries
+Snapshots compare path kind, file size, and SHA-256. Public evidence contains
+workspace-relative paths, not file contents. The effect excludes `.git`, its
+internal state/run data, and `target`, `node_modules`, `build`, and
+`dist-newstyle`; it does not apply every `.gitignore` rule. One snapshot is
+bounded to 100,000 paths, 512 MiB hashed, and 30 seconds.
 
-- Haskell workflows, plugin commands, and native provider CLIs execute with the
-  current user's operating-system authority and inherited environment.
-- Passing an argument array without a shell avoids shell parsing; it does not
-  authenticate or sandbox the executable.
-- `check` is a compile check, not a proof that running the program is safe.
-- `generate`, `smoke --live`, and provider calls made during `run` can consume
-  quota and modify external state.
-- A normal provider invocation has no framework-imposed timeout. A configured
-  `options.timeout_seconds` bounds the direct child wait but is not a strong
-  process-tree cancellation guarantee.
-- `liftIO` intentionally permits work outside the plugin protocol and outside
-  `workspace.paths` evidence.
+Observer completion is an idempotent commit. A same-token retry reads the
+durable completion value and cleans any residual pre-observation state; bounded
+garbage collection makes completion records eligible for removal after 24
+hours. This is crash recovery for evidence, not workflow replay.
 
-These are documented alpha boundaries, not missing enforcement that callers
-should assume exists elsewhere.
+It cannot observe reads, an intermediate file that disappears before the final
+snapshot, or the identity of a concurrent writer. It does not authorize,
+publish, restore, or roll back anything.
 
-## Frozen 0.2 surfaces
+## Trust and non-goals
 
-The Clef/Tactus Rust product cores were removed after the `c679f45` snapshot.
-Python archives, the shared foundation, scheduler, Electron, and historical
-documentation remain for migration and design evidence. For 0.3:
+Haskell scripts, configured plugins, built-in provider CLIs, and arbitrary
+`liftIO` all run with the user's ambient authority. `argv` execution avoids
+shell-string ambiguity, protocol validation rejects malformed data, and
+process groups make termination more reliable; none creates hostile-code
+isolation.
 
-- Motivo Studio is frozen and is not a supported GUI for Haskell workflows;
-- Segno Flow is frozen and makes no replay guarantee for arbitrary Haskell `IO`
-  or live provider calls;
-- the Clef Python builder and Tactus worker/Jupyter sources under `archive/`
-  are not installed artifacts;
-- the old Clef/Tactus Rust implementations are available only through Git
-  history; and
-- checkpoint, CAS, artifact publication, database, daemon, and rollback claims
-  from 0.2 do not carry into 0.3.
+The `0.3` architecture has no:
 
-Any revival must be an explicit later design decision. The current direction is
-recorded in the [roadmap](roadmap.md) and the
-[0.2 to Haskell 0.3 migration guide](migrations/0.2-to-haskell-0.3.md).
+- daemon, socket API, service discovery, or persistent provider session;
+- authentication, capability token, approval UI, or credential broker;
+- artifact tracker, CAS, checkpoint, workspace transaction, or rollback;
+- exactly-once provider/effect guarantee or automatic retry;
+- global static DAG for arbitrary Haskell control flow; or
+- deterministic replay of arbitrary Haskell `IO`.
+
+## Frozen surface
+
+Segno Flow remains a scheduling/replay exploration. Any revival must separate
+recorded-result replay from a new live provider invocation and acknowledge that
+ordinary Haskell `IO` is not interceptable. It does not participate in the
+current build/runtime claim.
+
+See the [plugin protocol](reference/plugin-protocol-v1.md), [support
+matrix](reference/support-matrix.md), and [roadmap](roadmap.md) for the exact
+current boundary.

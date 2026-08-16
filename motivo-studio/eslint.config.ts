@@ -5,7 +5,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: [".vite/**", "out/**", "coverage/**", "src/generated/**"] },
+  { ignores: [".vite/**", "out/**", "coverage/**"] },
   eslint.configs.recommended,
   ...tseslint.configs.strict,
   {
@@ -39,13 +39,10 @@ export default tseslint.config(
               group: [
                 "electron",
                 "node:*",
-                "@grpc/*",
                 "../../main/*",
                 "../main/*",
                 "../../preload/*",
                 "../preload/*",
-                "../../generated/*",
-                "../generated/*",
               ],
               message: "The renderer may only use the typed window.motivo bridge.",
             },

@@ -1,34 +1,101 @@
-# Motivo Studio
+# Motivo Studio 0.3
 
-> **0.3 refactor status: frozen.** Motivo is not part of the Haskell DSL
-> cutover release gate. The Electron code below documents the 0.2 alpha. If
-> revived, Motivo will be reduced to a projection of Tactus plugin discovery
-> and smoke results; it will not own a second workflow runtime or daemon.
+Motivo Studio is the small desktop control plane for a Tactus workspace. It is a
+TypeScript, React, Vite, and Electron application; Tactus remains the only owner
+of workflow discovery, plugin configuration, health checks, execution, and run
+history.
 
-`motivo-studio` is the `0.2.0` alpha Electron desktop client. The renderer is a
-projection only: Electron main owns daemon and PTY connections, preload exposes
-a named Zod-validated bridge, and the renderer has no Node integration or
-daemon token access.
+The first 0.3 release intentionally has no editor, terminal, daemon, scheduler,
+recovery manager, gRPC client, protobuf-generated client, or direct journal
+reader. It visualizes the versioned `tactus.control/v1` API and launches normal
+Tactus CLI actions.
 
-## Minimal Success Path
+## Try it
 
-With Node.js 22.12 or newer and the checked-in lockfile:
+Requirements:
+
+- Node.js 22.12 or newer
+- the Rust `tactus` executable on `PATH`
+- an installed Haskell toolchain for `Check` and `Run`
+
+From this directory:
 
 ```powershell
-npm ci
-npm run generate
-npm test
-npm run build
+npm install
+npm start
 ```
 
-The build creates a current-platform Electron package, not a signed installer.
-The package does not currently include daemon binaries, so launch falls back to
-an explicit degraded state. Do not interpret packaging as daemon E2E evidence.
+For a development build of Tactus that is not on `PATH`, set an absolute
+executable path in the main-process environment before starting Studio:
 
-## References
+```powershell
+$env:MOTIVO_TACTUS_BIN = 'D:\path\to\tactus.exe'
+npm start
+```
 
-- [Window security policy](src/main/windows/security.ts)
-- [Daemon bootstrap contract](src/main/daemon/bootstrap.ts)
-- [Narrow preload bridge](src/preload/bridge.ts)
-- [Forge packaging configuration](forge.config.ts)
-- [Runtime boundary](../docs/explanation/runtime-boundaries.md)
+Use **Open workspace** for a folder that already contains `.tactus`. Use
+**Initialize folder** to run `tactus init` in the selected folder and then open
+its control snapshot. Initialization must be able to discover Clef through the
+normal Tactus rules, such as `TACTUS_CLEF_SDK`.
+
+## Views
+
+- **Overview** shows workspace health, script and plugin totals, and recent run
+  outcomes.
+- **Workflow** shows Tactus-ordered Haskell scripts and starts Generate, Check,
+  or Run. Generate accepts an optional registered provider.
+- **Plugins** shows provider, effect, and generic-plugin projections and starts
+  offline or live smoke probes.
+- **Runs** pages through the typed event projection for one opaque run ID. Open
+  future event kinds remain visible as structured JSON.
+
+One Generate, Check, Run, or Smoke action may be active at a time. Its bounded
+stdout/stderr frames are projected to the renderer in real time. Cancel asks the
+main process to terminate that Tactus process. When the action finishes, the
+renderer refreshes the Studio snapshot.
+
+Cancellation uses Electron/Node's platform process termination and is
+best-effort. Tactus supervises the subprocesses it starts, but forcibly killing
+the Tactus leader is not a universal process-tree guarantee on every operating
+system. Do not treat Studio cancellation as a security boundary for untrusted
+plugins.
+
+## Authority boundary
+
+```text
+React renderer
+    | strict Zod IPC; no path, Node, Electron, network, or filesystem authority
+    v
+Electron preload (context isolation + sandbox)
+    |
+    v
+Electron main -- owns the selected absolute root and child process
+    | argv array, shell: false, bounded stdout/stderr
+    v
+tactus studio inspect / studio events / init / generate / check / run / smoke
+```
+
+The renderer receives a random workspace handle and a redacted
+`agenstro.studio/v1` snapshot. It never supplies or receives the absolute root.
+The main process never reads `tactus.toml`, `runtime.json`, scripts, or journal
+files. Control JSON is size-limited and validated before it crosses IPC. Action
+output and open event payload strings are scrubbed for the selected root as a
+second line of defense.
+
+Electron uses context isolation, renderer sandboxing, no Node integration, a
+locked-down `motivo://app` asset protocol, denied navigation/window creation,
+and denied permissions. Tactus is external by design and is not bundled into the
+desktop package.
+
+## Development checks
+
+```powershell
+npm run typecheck
+npm run lint
+npm test
+npm run format:check
+```
+
+The unit suite uses fake IPC and pure argv-contract tests; it does not call a
+real model provider. Electron packaging is available through `npm run package`
+or `npm run make`.

@@ -1,35 +1,29 @@
-name: Haskell and Tactus 0.3
+name: Clef and Tactus 0.3
 
 on:
   pull_request:
     paths:
       - ".github/workflows/haskell-tactus.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "cabal.project"
-      - "clef-sdk/clef-sdk.cabal"
-      - "clef-sdk/haskell/**"
-      - "clef-sdk/README.md"
-      - "clef-sdk/MIGRATION.md"
-      - "tactus-runtime/pyproject.toml"
-      - "tactus-runtime/.gitignore"
-      - "tactus-runtime/src/tactus_runtime/**"
-      - "tactus-runtime/tests/**"
-      - "tactus-runtime/README.md"
+      - "clef-sdk/**"
+      - "examples/topology-holes/**"
+      - "motivo-studio/**"
+      - "tactus-runtime/**"
       - "README.md"
       - "docs/**"
       - "mkdocs.yml"
   push:
     paths:
       - ".github/workflows/haskell-tactus.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "cabal.project"
-      - "clef-sdk/clef-sdk.cabal"
-      - "clef-sdk/haskell/**"
-      - "clef-sdk/README.md"
-      - "clef-sdk/MIGRATION.md"
-      - "tactus-runtime/pyproject.toml"
-      - "tactus-runtime/.gitignore"
-      - "tactus-runtime/src/tactus_runtime/**"
-      - "tactus-runtime/tests/**"
-      - "tactus-runtime/README.md"
+      - "clef-sdk/**"
+      - "examples/topology-holes/**"
+      - "motivo-studio/**"
+      - "tactus-runtime/**"
       - "README.md"
       - "docs/**"
       - "mkdocs.yml"
@@ -37,7 +31,40 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
+  tactus-rust:
+    name: Tactus Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-tactus-target
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo +stable fmt --all --check
+      - name: Check Tactus
+        run: cargo +stable check -p tactus-runtime --all-targets --locked
+      - name: Lint Tactus
+        run: cargo +stable clippy -p tactus-runtime --all-targets --locked -- -D warnings
+      - name: Test Tactus without model calls
+        run: cargo +stable test -p tactus-runtime --locked
+      - name: Test the topology reference program
+        run: cargo +stable test --manifest-path examples/topology-holes/reference/Cargo.toml --locked
+      - name: Remove Rust build artifacts
+        if: always()
+        run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
+
   clef-haskell:
     name: Clef Haskell (${{ matrix.os }}, GHC ${{ matrix.ghc }})
     runs-on: ${{ matrix.os }}
@@ -54,6 +81,8 @@ jobs:
           - os: ubuntu-latest
             ghc: "9.14.1"
             cabal: "3.18.1.0"
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/agenstro-tactus-e2e-target
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -62,68 +91,53 @@ jobs:
         with:
           ghc-version: ${{ matrix.ghc }}
           cabal-version: ${{ matrix.cabal }}
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: tactus-runtime/pyproject.toml
-      - name: Install Tactus
-        run: python -m pip install ./tactus-runtime
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build the Rust Tactus executable
+        run: cargo +stable build -p tactus-runtime --bin tactus --locked
+      - name: Put Tactus on PATH
+        shell: bash
+        run: echo "$CARGO_TARGET_DIR/debug" >> "$GITHUB_PATH"
       - name: Build Clef
-        run: cabal build all
-      - name: Test Clef with fake plugins
+        run: cabal build all --enable-tests
+      - name: Test Clef with fake streaming plugins
         run: cabal test all --test-show-details=direct
+      - name: Exercise Haskell through the typed Rust dispatcher
+        run: >-
+          cargo +stable test --locked -p tactus-runtime --test runtime
+          haskell_generic_plugin_routes_through_absolute_tactus_dispatch
+          -- --ignored --exact
+      - name: Run the offline multi-step topology acceptance
+        run: >-
+          cargo +stable test --locked -p tactus-runtime --test runtime
+          haskell_topology_workflow_runs_all_stages_with_parallel_reviews
+          -- --ignored --exact
       - name: Validate the Clef source distribution
+        shell: bash
         run: |
           cd clef-sdk
           cabal check
           cabal sdist
-      - name: Run the real Tactus to GHC path
+      - name: Run the real Tactus-to-GHC path
         shell: bash
         run: |
-          tactus init --root "$RUNNER_TEMP/tactus-e2e" --sdk "$GITHUB_WORKSPACE/clef-sdk"
-          python -c "from pathlib import Path; import os; path=Path(os.environ['RUNNER_TEMP'])/'tactus-e2e'/'.tactus'/'scripts'/'010_ci.hs'; path.write_text('import Clef\nmain :: IO ()\nmain = runTactus (liftIO (putStrLn \"TACTUS_CI_OK\"))\n', encoding='utf-8')"
-          tactus check --root "$RUNNER_TEMP/tactus-e2e"
-          tactus run --root "$RUNNER_TEMP/tactus-e2e" | grep -F TACTUS_CI_OK
-
-  tactus-python:
-    name: Tactus Python (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: tactus-runtime/pyproject.toml
-      - name: Install Tactus and test tools
-        run: python -m pip install -e "./tactus-runtime[dev]"
-      # Provider CLIs are deliberately not installed. The suite uses fake
-      # executors, including for live-smoke argv and output parsing.
-      - name: Run Tactus tests without model calls
-        run: python -m pytest tactus-runtime/tests
-      - name: Lint Tactus
-        run: python -m ruff check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-      - name: Check Tactus formatting
-        run: python -m ruff format --check tactus-runtime/src/tactus_runtime tactus-runtime/tests
-      - name: Type-check Tactus
-        run: python -m pyright -p tactus-runtime/pyproject.toml
-      - name: Build and inspect isolated Tactus artifacts
+          smoke="$RUNNER_TEMP/tactus-e2e"
+          tactus init "$smoke" --sdk "$GITHUB_WORKSPACE/clef-sdk"
+          mkdir -p "$smoke/.tactus/scripts"
+          printf '%s\n' 'import Clef' 'main :: IO ()' 'main = runTactus (liftIO (putStrLn "TACTUS_CI_OK"))' > "$smoke/.tactus/scripts/010_ci.hs"
+          tactus list --root "$smoke" --json
+          tactus doctor --root "$smoke" --json
+          tactus check --root "$smoke"
+          tactus run --root "$smoke" | grep -F TACTUS_CI_OK
+      - name: Type-check the multi-step topology workflows
+        shell: bash
         run: |
-          python -m build --outdir "${{ runner.temp }}/tactus-dist" tactus-runtime
-          python -c "from pathlib import Path; import tarfile,zipfile; root=Path(r'${{ runner.temp }}/tactus-dist'); tar=next(root.glob('*.tar.gz')); wheel=next(root.glob('*.whl')); names=tarfile.open(tar).getnames()+zipfile.ZipFile(wheel).namelist(); forbidden=('/archive/','/rust/','/rewrite-report/','/runtime-check/','/client.py','/jupyter_bridge.py','/jupyter_worker.py','/protocol.py','/script_file.py','/studio.py','/worker.py','/_motivo_ui/'); assert not any(any(part in '/' + name for part in forbidden) for name in names), names"
-          python -c "from pathlib import Path; import subprocess,sys; wheel=next(Path(r'${{ runner.temp }}/tactus-dist').glob('*.whl')); subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall','--no-deps',str(wheel)])"
-          python -c "from importlib.util import find_spec; import tactus_runtime; frozen=('client','jupyter_bridge','jupyter_worker','protocol','script_file','studio','worker','_motivo_ui'); assert all(find_spec('tactus_runtime.'+name) is None for name in frozen)"
-          tactus --version
-          tactus-provider-host --help
-          tactus-effect-host --help
+          for script in examples/topology-holes/workflow/*.hs; do
+            cabal exec -- ghc -fno-code -package clef-sdk "$script"
+          done
+      - name: Remove Rust build artifacts
+        if: always()
+        run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
 
   docs:
     name: Strict documentation build
@@ -131,7 +145,7 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Set up Python
+      - name: Set up Python for MkDocs only
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -139,3 +153,35 @@ jobs:
         run: |
           python -m pip install "mkdocs>=1.6,<2"
           python -m mkdocs build --strict --site-dir "${{ runner.temp }}/agenstro-site"
+
+  motivo-studio:
+    name: Motivo Studio (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: motivo-studio
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: motivo-studio/package-lock.json
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Type-check all Electron boundaries
+        run: npm run typecheck
+      - name: Test without model calls
+        run: npm test
+      - name: Package the desktop application
+        run: npm run package

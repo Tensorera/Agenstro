@@ -1,0 +1,17 @@
+[package]
+name = "topology-holes-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[lib]
+name = "topology_holes"
+path = "src/lib.rs"
+
+[[bin]]
+name = "topology-holes"
+path = "src/main.rs"
+
+# Keep the reference program independent from Agenstro's main Cargo workspace.
+[workspace]

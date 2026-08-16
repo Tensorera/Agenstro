@@ -84,12 +84,13 @@ user environment. The bundled coding-agent adapters deliberately select each
 provider's least-interactive mode. This is trusted local configuration and is
 documented as arbitrary code execution.
 
-### 4. Tactus is a workspace and script runner
+### 4. Tactus is the typed Rust execution kernel
 
-Tactus owns only the project-local `.tactus` convention, plugin configuration,
-script discovery, compiler invocation, and ordered command-line execution.
-It does not own cells, notebooks, artifacts, CAS, rollback, a database, a
-daemon, or an approval state machine.
+Tactus owns the project-local `.tactus` convention, typed plugin configuration,
+script discovery, compiler invocation, ordered command-line execution,
+bounded one-shot process supervision, streaming event routing, cancellation,
+and factual `agenstro.trace/v1` journals. It does not own cells, notebooks,
+artifacts, CAS, rollback, a database, a daemon, or an approval state machine.
 
 Generated entry scripts use `.tactus/scripts/NNN_slug.hs` (or `.lhs`) so a
 coding agent can create several ordered workflows. Naming is a prompt and
@@ -108,11 +109,13 @@ Snapshot differences cannot observe reads or transient writes, and concurrent
 writers make attribution ambiguous. Cooperative operations can later emit
 more precise access events without changing that limitation.
 
-### 6. Motivo and Segno are frozen during the cutover
+### 6. Motivo projects Tactus; Segno remains frozen
 
-Motivo Studio is not part of the 0.3 release gate. If revived, its smallest
-useful role is a read-only projection of `tactus plugin list/describe/smoke`,
-not a second daemon or workflow runtime.
+The cutover initially froze Motivo. The `0.3` follow-up revives only a thin
+TypeScript/React projection over versioned, redacted Rust control queries.
+Electron main owns the selected root and Tactus child; the sandboxed renderer
+receives named, schema-checked IPC. Motivo does not parse runtime state or own a
+second daemon/workflow runtime.
 
 Segno Flow's current cron/lease scheduler is not a replay engine. It is frozen
 until the plugin trace format is stable. A future replay feature must state
@@ -121,10 +124,11 @@ arbitrary Haskell `IO` is not generally replayable.
 
 ## Migration
 
-The Haskell package and Python Tactus path are authoritative. The old
-Clef/Tactus Rust product cores were removed after snapshot `c679f45`; Python
-archives remain migration evidence and must not gain new features. Motivo and
-Segno remain frozen until their future roles are redesigned explicitly.
+The Haskell package and Rust Tactus `0.3` path are authoritative. Superseded
+Clef/Tactus product cores remain available through Git history; selected Python
+archives remain migration evidence and must not gain new features. Motivo's
+projection is current; Segno remains frozen until its future role is redesigned
+explicitly.
 
 ## Consequences
 

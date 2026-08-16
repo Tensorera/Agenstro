@@ -1,58 +1,58 @@
 import { z } from "zod";
-import type { StudioSurface } from "./surface";
 
 export const LIMITS = {
-  cursorCharacters: 512,
+  actionOutputBytes: 16_384,
   diagnosticCharacters: 4_096,
-  fileBytes: 1_048_576,
-  filePage: 100,
+  eventPage: 250,
+  generationGoalBytes: 32_768,
   labelCharacters: 256,
-  runBatchBytes: 262_144,
-  runBatchEvents: 32,
-  subscriptionsPerWindow: 8,
-  terminalChunkBytes: 65_536,
-  terminalInputBytes: 65_536,
+  pluginSelection: 100,
+  runIdCharacters: 128,
 } as const;
 
-const textEncoder = new TextEncoder();
+const encoder = new TextEncoder();
 
 export function utf8Bytes(value: string): number {
-  return textEncoder.encode(value).byteLength;
+  return encoder.encode(value).byteLength;
 }
 
-function boundedUtf8(maximumBytes: number) {
-  return z.string().refine((value) => utf8Bytes(value) <= maximumBytes, {
-    message: `Value exceeds the ${String(maximumBytes)} byte limit.`,
+function boundedText(characters: number) {
+  return z.string().refine((value) => [...value].length <= characters, {
+    message: `Value exceeds the ${String(characters)} character limit.`,
   });
 }
 
-const opaqueId = z
+function boundedUtf8(bytes: number) {
+  return z.string().refine((value) => utf8Bytes(value) <= bytes, {
+    message: `Value exceeds the ${String(bytes)} byte limit.`,
+  });
+}
+
+export const decimalStringSchema = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$/)
+  .refine(
+    (value) => {
+      try {
+        return BigInt(value) <= 18_446_744_073_709_551_615n;
+      } catch {
+        return false;
+      }
+    },
+    { message: "Value exceeds the unsigned 64-bit range." },
+  );
+export const actionIdSchema = z.uuid();
+export const workspaceHandleSchema = z.uuid();
+export const runIdSchema = z
+  .string()
+  .min(1)
+  .max(LIMITS.runIdCharacters)
+  .regex(/^run-[A-Za-z0-9-]+$/);
+export const registryNameSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-export const workspaceIdSchema = opaqueId.brand<"WorkspaceId">();
-export const entryIdSchema = opaqueId.brand<"EntryId">();
-export const runIdSchema = opaqueId.brand<"RunId">();
-export const scheduleIdSchema = opaqueId.brand<"ScheduleId">();
-export const recoveryIdSchema = opaqueId.brand<"RecoveryId">();
-export const terminalIdSchema = opaqueId.brand<"TerminalId">();
-export const subscriptionIdSchema = z.uuid().brand<"SubscriptionId">();
-export const requestIdSchema = z.uuid().brand<"RequestId">();
-export const sequenceSchema = z
-  .string()
-  .regex(/^(0|[1-9][0-9]{0,19})$/)
-  .brand<"Sequence">();
-export const cursorSchema = z.string().min(1).max(LIMITS.cursorCharacters);
-export const pageSizeSchema = z.number().int().min(1).max(LIMITS.filePage);
-export const utcTimestampSchema = z.iso.datetime({ offset: true });
-
-export type WorkspaceId = z.infer<typeof workspaceIdSchema>;
-export type EntryId = z.infer<typeof entryIdSchema>;
-export type RunId = z.infer<typeof runIdSchema>;
-export type TerminalId = z.infer<typeof terminalIdSchema>;
-export type SubscriptionId = z.infer<typeof subscriptionIdSchema>;
-export type Sequence = z.infer<typeof sequenceSchema>;
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 
 export const studioErrorSchema = z
   .object({
@@ -60,12 +60,10 @@ export const studioErrorSchema = z
       .string()
       .min(1)
       .max(96)
-      .regex(/^[A-Z][A-Z0-9_]*$/),
-    category: z.enum(["validation", "connection", "conflict", "resource", "internal"]),
+      .regex(/^[a-z][a-z0-9_]*$/),
+    category: z.enum(["validation", "process", "workspace", "busy", "cancelled", "internal"]),
     retryable: z.boolean(),
-    message: z.string().min(1).max(LIMITS.diagnosticCharacters),
-    userAction: z.string().max(512).optional(),
-    correlationId: opaqueId.optional(),
+    message: boundedText(LIMITS.diagnosticCharacters),
   })
   .strict();
 export type StudioError = z.infer<typeof studioErrorSchema>;
@@ -78,295 +76,215 @@ export const ipcEnvelopeSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: studioErrorSchema }).strict(),
 ]);
 
-export const serviceStatusSchema = z
+export const studioCheckSchema = z
   .object({
-    service: z.enum(["agentrod", "tactusd", "segnod"]),
-    state: z.enum(["ready", "starting", "unavailable"]),
-    instanceId: opaqueId.optional(),
-    detail: z.string().max(512).optional(),
+    name: boundedText(128),
+    ok: z.boolean(),
+    detail: boundedText(LIMITS.diagnosticCharacters),
   })
   .strict();
 
+export const studioScriptSchema = z
+  .object({
+    relativePath: z.string().min(1).max(1_024),
+    order: z.number().int().min(0).max(999).optional(),
+    runnable: z.boolean(),
+  })
+  .strict();
+export type StudioScript = z.infer<typeof studioScriptSchema>;
+
+export const pluginNamespaceSchema = z.enum(["provider", "effect", "plugin"]);
+export type PluginNamespace = z.infer<typeof pluginNamespaceSchema>;
+
+export const studioPluginSchema = z
+  .object({
+    name: registryNameSchema,
+    namespace: pluginNamespaceSchema,
+    available: z.boolean(),
+    default: z.boolean(),
+    model: boundedText(LIMITS.labelCharacters).optional(),
+    effort: boundedText(LIMITS.labelCharacters).optional(),
+    observesInvocations: z.boolean(),
+  })
+  .strict();
+export type StudioPlugin = z.infer<typeof studioPluginSchema>;
+
+export const studioOutcomeSchema = z
+  .object({
+    kind: boundedText(64),
+    exitCode: z.number().int().optional(),
+    error: boundedText(LIMITS.diagnosticCharacters).optional(),
+    elapsedMs: decimalStringSchema,
+    stderrTruncated: z.boolean(),
+  })
+  .strict();
+export type StudioOutcome = z.infer<typeof studioOutcomeSchema>;
+
+export const studioIntegritySchema = z.enum(["ok", "partial", "corrupt"]);
+
+export const studioRunSchema = z
+  .object({
+    runId: runIdSchema,
+    state: boundedText(64),
+    integrity: studioIntegritySchema,
+    startedUnixMs: decimalStringSchema,
+    finishedUnixMs: decimalStringSchema.optional(),
+    eventsRecorded: decimalStringSchema,
+    label: boundedText(LIMITS.labelCharacters),
+    namespace: boundedText(32).optional(),
+    subject: boundedText(128).optional(),
+    method: boundedText(128).optional(),
+    outcome: studioOutcomeSchema.optional(),
+  })
+  .strict();
+export type StudioRun = z.infer<typeof studioRunSchema>;
+
 export const studioSnapshotSchema = z
   .object({
-    state: z.enum(["ready", "degraded", "starting"]),
-    services: z.array(serviceStatusSchema).length(3),
-    version: z.string().min(1).max(64),
+    api: z.literal("agenstro.studio/v1"),
+    generatedAtUnixMs: decimalStringSchema,
+    workspace: z
+      .object({ name: boundedText(LIMITS.labelCharacters).pipe(z.string().min(1)) })
+      .strict(),
+    health: z.object({ ok: z.boolean(), checks: z.array(studioCheckSchema).max(256) }).strict(),
+    scripts: z.array(studioScriptSchema).max(10_000),
+    registries: z
+      .object({
+        defaultProvider: registryNameSchema,
+        providers: z.array(studioPluginSchema).max(1_000),
+        effects: z.array(studioPluginSchema).max(1_000),
+        plugins: z.array(studioPluginSchema).max(1_000),
+      })
+      .strict(),
+    runs: z.array(studioRunSchema).max(200),
   })
   .strict();
 export type StudioSnapshot = z.infer<typeof studioSnapshotSchema>;
 
-export const workspaceSchema = z
+export const studioViewSchema = z
   .object({
-    id: workspaceIdSchema,
-    name: z.string().min(1).max(LIMITS.labelCharacters),
-    revision: z.string().min(1).max(128),
-    rootEntryId: entryIdSchema,
+    handle: workspaceHandleSchema,
+    snapshot: studioSnapshotSchema,
   })
   .strict();
-export type Workspace = z.infer<typeof workspaceSchema>;
+export type StudioView = z.infer<typeof studioViewSchema>;
 
-export const fileEntrySchema = z
+export const studioEventSchema = z
   .object({
-    id: entryIdSchema,
-    parentId: entryIdSchema.optional(),
-    name: z.string().min(1).max(LIMITS.labelCharacters),
-    kind: z.enum(["file", "directory"]),
-    sizeBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    language: z.string().min(1).max(64).optional(),
-    revision: z.string().min(1).max(128).optional(),
-    readOnly: z.boolean(),
+    seq: decimalStringSchema,
+    atUnixMs: decimalStringSchema,
+    kind: boundedText(128),
+    data: z.unknown(),
   })
   .strict();
-export type FileEntry = z.infer<typeof fileEntrySchema>;
+export type StudioEvent = z.infer<typeof studioEventSchema>;
 
-export const filePageSchema = z
+export const studioSummarySchema = z
   .object({
-    workspaceId: workspaceIdSchema,
-    parentId: entryIdSchema.optional(),
-    entries: z.array(fileEntrySchema).max(LIMITS.filePage),
-    nextCursor: cursorSchema.optional(),
+    startedUnixMs: decimalStringSchema,
+    finishedUnixMs: decimalStringSchema,
+    eventsRecorded: decimalStringSchema,
+    outcome: studioOutcomeSchema,
   })
   .strict();
-export type FilePage = z.infer<typeof filePageSchema>;
 
-export const fileDocumentSchema = z
+export const studioEventPageSchema = z
   .object({
-    workspaceId: workspaceIdSchema,
-    entryId: entryIdSchema,
-    name: z.string().min(1).max(LIMITS.labelCharacters),
-    content: boundedUtf8(LIMITS.fileBytes),
-    revision: z.string().min(1).max(128),
-    language: z.string().min(1).max(64),
-    readOnly: z.boolean(),
-    binary: z.boolean(),
-    truncated: z.boolean(),
+    api: z.literal("agenstro.studio/v1"),
+    run: studioRunSchema,
+    events: z.array(studioEventSchema).max(1_000),
+    nextAfter: decimalStringSchema,
+    complete: z.boolean(),
+    integrity: studioIntegritySchema,
+    summary: studioSummarySchema.optional(),
   })
   .strict();
-export type FileDocument = z.infer<typeof fileDocumentSchema>;
+export type StudioEventPage = z.infer<typeof studioEventPageSchema>;
 
-export const runStateSchema = z.enum([
-  "queued",
-  "running",
-  "recovering",
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
+export const actionKindSchema = z.enum(["generate", "check", "run", "smoke"]);
+export type ActionKind = z.infer<typeof actionKindSchema>;
 
-export const runSchema = z
-  .object({
-    id: runIdSchema,
-    workspaceId: workspaceIdSchema,
-    state: runStateSchema,
-    lastSequence: sequenceSchema,
-    updatedAt: utcTimestampSchema,
-    detail: z.string().max(LIMITS.diagnosticCharacters).optional(),
-  })
-  .strict();
-export type Run = z.infer<typeof runSchema>;
-
-const runEventBodySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("started"), label: z.string().max(256) }).strict(),
+export const actionRequestSchema = z.discriminatedUnion("kind", [
   z
     .object({
-      kind: z.literal("stage"),
-      stageId: opaqueId,
-      label: z.string().max(256),
-      state: z.string().min(1).max(64),
+      kind: z.literal("generate"),
+      goal: boundedUtf8(LIMITS.generationGoalBytes).pipe(z.string().min(1)),
+      provider: registryNameSchema.optional(),
     })
     .strict(),
+  z.object({ kind: z.literal("check") }).strict(),
+  z.object({ kind: z.literal("run") }).strict(),
   z
     .object({
-      kind: z.literal("output"),
-      stream: z.enum(["stdout", "stderr", "system"]),
-      data: boundedUtf8(LIMITS.terminalChunkBytes),
-      truncated: z.boolean(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("diagnostic"),
-      code: z.string().min(1).max(96),
-      message: z.string().max(LIMITS.diagnosticCharacters),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("finished"),
-      state: runStateSchema,
-      summary: z.string().max(LIMITS.diagnosticCharacters).optional(),
+      kind: z.literal("smoke"),
+      targets: z
+        .array(z.object({ namespace: pluginNamespaceSchema, name: registryNameSchema }).strict())
+        .min(1)
+        .max(LIMITS.pluginSelection),
+      live: z.boolean(),
     })
     .strict(),
 ]);
+export type ActionRequest = z.infer<typeof actionRequestSchema>;
 
-export const runEventSchema = z
+export const actionStateSchema = z
   .object({
-    runId: runIdSchema,
-    sequence: sequenceSchema,
-    occurredAt: utcTimestampSchema,
-    body: runEventBodySchema,
+    actionId: actionIdSchema,
+    kind: actionKindSchema,
+    startedAtUnixMs: decimalStringSchema,
   })
   .strict();
-export type RunEvent = z.infer<typeof runEventSchema>;
+export type ActionState = z.infer<typeof actionStateSchema>;
 
-export const runStreamMessageSchema = z.discriminatedUnion("kind", [
+export const studioActionEventSchema = z.discriminatedUnion("type", [
   z
     .object({
-      kind: z.literal("events"),
-      subscriptionId: subscriptionIdSchema,
-      events: z.array(runEventSchema).min(1).max(LIMITS.runBatchEvents),
+      type: z.literal("started"),
+      actionId: actionIdSchema,
+      kind: actionKindSchema,
+      startedAtUnixMs: decimalStringSchema,
     })
     .strict(),
   z
     .object({
-      kind: z.literal("resync-required"),
-      subscriptionId: subscriptionIdSchema,
-      lastSafeSequence: sequenceSchema,
-      reason: z.enum(["gap", "backpressure", "retention"]),
+      type: z.literal("output"),
+      actionId: actionIdSchema,
+      sequence: decimalStringSchema,
+      stream: z.enum(["stdout", "stderr"]),
+      text: boundedUtf8(LIMITS.actionOutputBytes),
     })
     .strict(),
   z
     .object({
-      kind: z.literal("closed"),
-      subscriptionId: subscriptionIdSchema,
-      error: studioErrorSchema.optional(),
-    })
-    .strict(),
-]);
-export type RunStreamMessage = z.infer<typeof runStreamMessageSchema>;
-
-export const scheduleSchema = z
-  .object({
-    id: scheduleIdSchema,
-    taskId: opaqueId,
-    label: z.string().min(1).max(LIMITS.labelCharacters),
-    cron: z.string().min(1).max(128),
-    timezone: z.string().min(1).max(128),
-    state: z.enum(["disabled", "ready", "dispatching", "recovery-required"]),
-    nextFireAt: utcTimestampSchema.optional(),
-    lastRunId: runIdSchema.optional(),
-  })
-  .strict();
-export type Schedule = z.infer<typeof scheduleSchema>;
-
-export const schedulePageSchema = z
-  .object({
-    schedules: z.array(scheduleSchema).max(LIMITS.filePage),
-    nextCursor: cursorSchema.optional(),
-  })
-  .strict();
-export type SchedulePage = z.infer<typeof schedulePageSchema>;
-
-export const recoverySchema = z
-  .object({
-    id: recoveryIdSchema,
-    workspaceId: workspaceIdSchema,
-    label: z.string().min(1).max(LIMITS.labelCharacters),
-    state: z.enum(["available", "applied", "conflicted", "expired"]),
-    createdAt: utcTimestampSchema,
-    changedFiles: z.number().int().min(0).max(1_000_000),
-    detail: z.string().max(LIMITS.diagnosticCharacters).optional(),
-  })
-  .strict();
-export type Recovery = z.infer<typeof recoverySchema>;
-
-export const recoveryPageSchema = z
-  .object({
-    records: z.array(recoverySchema).max(LIMITS.filePage),
-    nextCursor: cursorSchema.optional(),
-  })
-  .strict();
-export type RecoveryPage = z.infer<typeof recoveryPageSchema>;
-
-export const terminalProfileSchema = z
-  .object({
-    id: z.enum(["powershell", "bash"]),
-    label: z.string().min(1).max(64),
-    available: z.boolean(),
-  })
-  .strict();
-export type TerminalProfile = z.infer<typeof terminalProfileSchema>;
-
-export const terminalSessionSchema = z
-  .object({
-    id: terminalIdSchema,
-    profileId: terminalProfileSchema.shape.id,
-  })
-  .strict();
-export type TerminalSession = z.infer<typeof terminalSessionSchema>;
-
-export const terminalStreamMessageSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("output"),
-      terminalId: terminalIdSchema,
-      sequence: sequenceSchema,
-      data: boundedUtf8(LIMITS.terminalChunkBytes),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("exit"),
-      terminalId: terminalIdSchema,
+      type: z.literal("finished"),
+      actionId: actionIdSchema,
+      sequence: decimalStringSchema,
+      status: z.enum(["succeeded", "failed", "cancelled"]),
       exitCode: z.number().int().nullable(),
-      reason: z.enum(["exited", "closed", "output-backpressure", "broker-stopped"]),
+      finishedAtUnixMs: decimalStringSchema,
+      message: boundedText(LIMITS.diagnosticCharacters).optional(),
     })
     .strict(),
 ]);
-export type TerminalStreamMessage = z.infer<typeof terminalStreamMessageSchema>;
-
-export interface StreamHandle {
-  readonly subscriptionId: SubscriptionId;
-  unsubscribe(): Promise<void>;
-}
-
-export interface RunStreamHandle extends StreamHandle {
-  ack(highestSequence: Sequence): Promise<void>;
-}
+export type StudioActionEvent = z.infer<typeof studioActionEventSchema>;
 
 export interface MotivoBridge {
-  readonly surface: {
-    current(): Promise<StudioSurface>;
-    subscribe(listener: (surface: StudioSurface) => void): () => void;
+  readonly studio: {
+    current(): Promise<StudioView | null>;
+    openInitialized(): Promise<StudioView | null>;
+    initialize(): Promise<StudioView | null>;
+    refresh(): Promise<StudioView>;
   };
-  readonly system: {
-    snapshot(): Promise<StudioSnapshot>;
-  };
-  readonly workspaces: {
-    open(): Promise<Workspace | null>;
-  };
-  readonly files: {
-    listPage(input: unknown): Promise<FilePage>;
-    read(input: unknown): Promise<FileDocument>;
-    save(input: unknown): Promise<FileDocument>;
+  readonly actions: {
+    start(input: ActionRequest): Promise<ActionState>;
+    cancel(input: { readonly actionId: string }): Promise<void>;
+    subscribe(listener: (event: StudioActionEvent) => void): () => void;
   };
   readonly runs: {
-    start(input: unknown): Promise<Run>;
-    get(input: unknown): Promise<Run>;
-    cancel(input: unknown): Promise<Run>;
-    subscribe(
-      input: unknown,
-      listener: (message: RunStreamMessage) => void,
-    ): Promise<RunStreamHandle>;
-  };
-  readonly schedules: {
-    listPage(input: unknown): Promise<SchedulePage>;
-  };
-  readonly recovery: {
-    listPage(input: unknown): Promise<RecoveryPage>;
-    apply(input: unknown): Promise<Recovery>;
-  };
-  readonly terminals: {
-    profiles(): Promise<readonly TerminalProfile[]>;
-    create(input: unknown): Promise<TerminalSession>;
-    write(input: unknown): Promise<void>;
-    resize(input: unknown): Promise<void>;
-    ack(input: unknown): Promise<void>;
-    close(input: unknown): Promise<void>;
-    subscribe(
-      input: unknown,
-      listener: (message: TerminalStreamMessage) => void,
-    ): Promise<StreamHandle>;
+    events(input: {
+      readonly runId: string;
+      readonly after: string;
+      readonly limit?: number;
+    }): Promise<StudioEventPage>;
   };
 }

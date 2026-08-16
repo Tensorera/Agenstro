@@ -2,333 +2,357 @@
 title: Agenstro 0.3 troubleshooting
 status: alpha
 last_verified: 2026-08-15
-applies_to: "Clef 0.3.0.0 and Tactus 0.3.0"
-platforms: [windows, ubuntu]
+applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 ---
 
 # Agenstro 0.3 troubleshooting
 
-Start with the smallest failing boundary. Tactus can diagnose the workspace and
-Haskell tools without contacting a provider:
+Start with the installed binary, workspace discovery, and typed diagnostics:
 
 ```powershell
-tactus --version
-tactus doctor --root D:\path\to\project
-tactus list --root D:\path\to\project
-```
-
-Add `--json` to `doctor`, `list`, `init`, `generate`, or `smoke` when structured
-output is easier to inspect. `check` and `run` inherit the terminal so Cabal,
-GHC, the Haskell program, and plugin diagnostics remain visible.
-
-## Windows reports invalid UTF-8, mojibake, or a Unicode error
-
-Symptoms include:
-
-- Chinese or other non-ASCII prompt text becoming corrupted;
-- `UnicodeDecodeError` or `UnicodeEncodeError` in a provider/effect host;
-- `plugin stdout was not UTF-8 text`;
-- a JSONL frame that is valid when written to a file but invalid through a
-  Windows pipe; or
-- a failure that appears only when a path, prompt, or provider response contains
-  emoji or characters outside the active code page.
-
-Check the current Python mode in the same terminal that launches Tactus:
-
-```powershell
-python -c "import locale,sys; print('utf8_mode=', sys.flags.utf8_mode); print('stdin=', sys.stdin.encoding); print('stdout=', sys.stdout.encoding); print('locale=', locale.getencoding())"
-```
-
-The current reference provider and effect hosts reconfigure their protocol
-stdin/stdout to UTF-8 independently of this diagnostic. If the failure comes
-from an older editable checkout or a custom Python plugin, set both variables
-**before** starting it:
-
-```powershell
-$env:PYTHONUTF8 = "1"
-$env:PYTHONIOENCODING = "utf-8"
-
-python -c "import sys; print(sys.stdin.encoding, sys.stdout.encoding)"
-tactus doctor --root D:\path\to\project
-```
-
-Environment assignments apply to the current PowerShell process and children;
-repeat them in a new terminal. Changing only the console font does not change
-redirected Python pipe encoding. A custom plugin in any language must read and
-write UTF-8 regardless of the console code page.
-
-If the current reference host still fails, confirm that `tactus`,
-`tactus-provider-host`, and `tactus-effect-host` resolve to the same installation
-before reporting a regression.
-
-## `tactus` or the reference plugin hosts are not found
-
-An editable Tactus install exposes three console commands:
-
-```text
-tactus
-tactus-provider-host
-tactus-effect-host
-```
-
-Activate the virtual environment or add its executable directory to `PATH`.
-On Windows PowerShell, from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".\tactus-runtime"
-$env:PATH = (Resolve-Path .\.venv\Scripts).Path + ";" + $env:PATH
-
 Get-Command tactus
-Get-Command tactus-provider-host
-Get-Command tactus-effect-host
+tactus --version
+tactus doctor --root D:\path\to\project --json
+tactus list --root D:\path\to\project --json
 ```
 
-Do not confuse `tactus-provider-host` with a native provider executable. The
-host is the Agenstro adapter; `codex`, `claude`, or `opencode` must be installed
-separately for that provider.
+The expected Tactus version is `0.3.0`. The current runtime is one Rust binary;
+there are no separate provider/effect host executables to locate.
+
+## `tactus` is missing or an older command is selected
+
+Install the current source explicitly, then open a terminal whose Cargo bin
+directory is on `PATH`:
+
+```powershell
+Set-Location D:\src\Agenstro
+cargo install --path tactus-runtime --bin tactus --locked --force
+Get-Command tactus
+tactus --version
+```
+
+If multiple results appear, remove the stale path from the current terminal or
+invoke the Cargo-installed executable by its full path. An old command surface
+that mentions workers, cells, notebooks, or a daemon is not Tactus Rust `0.3`.
 
 ## `tactus init` cannot locate `clef-sdk`
 
-Without `--sdk`, Tactus searches the project, its parent, the editable source
-checkout, and `TACTUS_CLEF_SDK`. Checkout layouts can make that discovery
-ambiguous. Pass the Cabal package directory explicitly:
+Pass the checkout explicitly. The directory must contain `clef-sdk.cabal`:
 
 ```powershell
-$sdk = (Resolve-Path D:\src\agenstro\clef-sdk).Path
+$sdk = (Resolve-Path D:\src\Agenstro\clef-sdk).Path
 tactus init D:\work\my-project --sdk $sdk
 ```
 
-The path must name the directory containing `clef-sdk.cabal`, not its
-`haskell/src` subdirectory. Tactus writes the resolved location into
-`.tactus/cabal.project`.
+Initialization never overwrites an existing `.tactus/cabal.project`. If that
+file points at a moved checkout, edit its package path deliberately or
+initialize a new disposable project.
 
-For repeated use, the optional environment override is:
+## `doctor` reports missing Cabal, GHC, or runghc
 
-```powershell
-$env:TACTUS_CLEF_SDK = (Resolve-Path D:\src\agenstro\clef-sdk).Path
-```
-
-## `tactus doctor` reports missing Cabal, GHC, or runghc
-
-`doctor` requires all three tools on the effective `PATH`:
+Verify all three names in the same terminal that launches Tactus:
 
 ```powershell
 Get-Command cabal
 Get-Command ghc
 Get-Command runghc
-ghc --version
+ghc --print-libdir
 cabal --version
 ```
 
-Install a compatible GHC/Cabal pair, restart or refresh the terminal after a
-toolchain install, and run `doctor` again. Clef currently requires the GHC
-package `base >=4.20 && <4.23`. A GHC outside that range produces a Cabal solver
-error even if the executable itself is discoverable.
+On Windows, a GHCup installation commonly needs `C:\ghcup\bin` and
+`C:\cabal\bin` on `PATH`. Restart long-lived terminals after changing PATH.
+Clef requires a GHC whose bundled `base` satisfies the bounds in
+`clef-sdk/clef-sdk.cabal`.
 
-On Windows, Tactus also reads current user and machine `PATH` registry values to
-help long-lived shells find a newly installed toolchain. This does not repair a
-missing installation or an incompatible version.
+## Configuration is rejected before a command runs
 
-## Cabal cannot build `clef-sdk`
+Tactus parses `.tactus/tactus.toml` into distinct provider, effect, and generic
+plugin definitions. Frequent errors are:
 
-First reproduce the package build from the Agenstro repository root:
+- `api` is not `clef.runtime/v1`;
+- `default_provider` has no matching `[providers.<name>]` table;
+- `command` is empty or written as a shell string instead of an argv array;
+- a provider-only field such as `model` was placed on an effect/plugin;
+- an unknown field was added beside, rather than inside, open `options`; or
+- options contain a TOML datetime, NaN, or infinity, which cannot cross the JSON
+  runtime boundary.
 
-```powershell
-cabal build all
-cabal test all --test-show-details=direct
-```
-
-Then inspect the project-local Cabal pointer:
-
-```powershell
-Get-Content D:\path\to\project\.tactus\cabal.project
-```
-
-Common causes are:
-
-- `.tactus/cabal.project` points to a moved or deleted checkout;
-- GHC's bundled `base` is outside the supported range;
-- Cabal cannot obtain dependencies on the first build;
-- a stale 0.2 `.tactus` directory was preserved by `init`; or
-- the Haskell source imports a package that the project does not declare.
-
-`tactus init` intentionally preserves existing files. Re-running it will not
-silently replace a bad `cabal.project`; review and repair the file explicitly or
-initialize a clean project.
-
-## `check` says that no Haskell scripts were selected
-
-`tactus check` considers `.hs` and `.lhs` files under `.tactus/scripts`.
-`tactus run` selects only runnable entry names by default:
-
-```text
-010_plan.hs
-020_review.lhs
-```
-
-The required entry pattern is a three-digit prefix, underscore, lowercase
-alphanumeric slug (additional underscore-separated words are allowed), and
-`.hs` or `.lhs`. Use `tactus list` to see each file's classification and
-warning.
-
-A helper can be checked or run by an explicit path even when it is not a
-default entry:
-
-```powershell
-tactus check .tactus\scripts\Support.hs
-tactus run .tactus\scripts\manual.hs -- --workflow-argument
-```
-
-Arguments after `--` are passed to the selected Haskell program.
-
-## Offline smoke fails because a provider executable is missing
-
-With no names, `tactus smoke` probes every configured provider and effect. The
-default configuration therefore expects `codex`, `claude`, and `opencode` all
-to exist. Select only the component being diagnosed:
-
-```powershell
-tactus smoke codex
-tactus smoke claude-code
-tactus smoke opencode
-tactus smoke workspace.paths
-```
-
-The default provider smoke is offline in the sense that it runs the native
-CLI's version command and sends no model prompt. It still starts a local
-executable. `--live` is the separate, explicit model-call path.
-
-If the native command works in one terminal but not through Tactus, compare
-`PATH` and provider-specific environment variables in the process that launches
-Tactus. Commands inherit the current environment; Tactus does not copy login
-state between users, shells, containers, or machines.
-
-## A provider is installed but live smoke or generation fails
-
-Verify the native CLI outside Agenstro first. Authentication commands and
-account policy are owned by that CLI and may change independently of Tactus.
-Then run a selected offline probe before any live probe:
-
-```powershell
-tactus smoke codex
-tactus smoke codex --live --json
-```
-
-For generation, retain the structured result:
-
-```powershell
-tactus generate --provider codex --json "Create one minimal Haskell workflow."
-```
-
-Check these boundaries:
-
-- the provider name is present in `.tactus/tactus.toml`;
-- its `command` is a non-empty argument array;
-- the native executable is available on inherited `PATH`;
-- the native CLI is authenticated for the intended account and endpoint;
-- configured `model`, `effort`, or OpenCode `variant` values are supported by
-  that native version; and
-- `extra_args`, `extra_env`, or a `command_prefix` have not changed native
-  behavior unexpectedly.
-
-CI covers adapter argument construction and output parsing with fakes. It does
-not prove that a current native CLI, account, model, or managed policy will
-accept a live request.
-
-## OpenCode still asks, denies, or changes behavior under `--auto`
-
-The OpenCode adapter uses `opencode run --auto --format json` and injects an
-inline `permission=allow` value. This is not equivalent to the explicit bypass
-flags used by the Codex and Claude Code adapters. An explicit deny or managed
-configuration can still win.
-
-Inspect the effective OpenCode configuration and organization policy. Do not
-weaken a deny merely to make Agenstro report parity with another provider. The
-documented support boundary is that full OpenCode approval bypass cannot be
-proven.
-
-## Generation returns success but no runnable script appears
-
-`generate` asks the provider to edit `.tactus/scripts` and then performs
-discovery; it does not synthesize a file from provider text. A provider can
-return successfully without following the file-writing instruction.
-
-1. Re-run `tactus list` and inspect helpers as well as entries.
-2. Inspect `.tactus/PROMPT.md` and the requested goal.
-3. Use `generate --json` to retain provider events, effect evidence, and the
-   discovered script list.
-4. Inspect the workspace diff before retrying.
-5. Rename a valid program to `NNN_slug.hs` only after reviewing its contents.
-
-Do not automatically run an unreviewed file merely because the provider process
-exited successfully.
-
-## A custom plugin emits invalid protocol output
-
-Protocol stdout may contain only UTF-8 JSONL event frames and one terminal
-result. Send logs to stderr. Common violations are:
-
-- banners, progress bars, or debug prints on stdout;
-- an incorrect correlation `id`;
-- duplicate JSON object keys;
-- two result frames or data after the result;
-- no terminal result before exit;
-- NaN or infinite JSON numbers;
-- a success result followed by a non-zero process exit; or
-- output encoded with the Windows locale instead of UTF-8.
-
-Reduce the plugin to one `describe` or offline `smoke` request and compare it to
-the [local plugin protocol](reference/plugin-protocol-v1.md). A valid structured
-`ok:false` result is a plugin-reported failure, not a reason to print an
-unstructured replacement message.
-
-## A provider invocation hangs
-
-Normal provider invocation has no default framework deadline. A trusted local
-plugin or descendant that never closes its output can block the caller. An
-adapter-specific timeout can be configured in `.tactus/tactus.toml`:
+A minimal generic plugin is:
 
 ```toml
-[providers.codex.options]
-timeout_seconds = 600
+[plugins.example]
+command = ["example-plugin", "--jsonl"]
+
+[plugins.example.options]
+feature = "open-value"
 ```
 
-This bounds the adapter's direct native CLI wait. It is not a hard process-tree
-deadline: a descendant retaining a pipe can delay completion, and termination
-after an external request may leave its outcome unknown. Choose retry behavior
-only after deciding whether repeating the provider operation is safe.
+Use `tactus doctor --json` after every configuration edit.
+
+## A plugin name is unknown or ambiguous
+
+The same text may exist in `[providers]`, `[effects]`, and `[plugins]`. Specify
+the registry:
+
+```powershell
+tactus smoke provider:codex
+tactus smoke effect:workspace.paths
+tactus plugin-call example describe --namespace plugin
+```
+
+Without a prefix/namespace, auto-resolution succeeds only when exactly one
+registry contains the name.
+
+## `list`, `check`, and `run` disagree about scripts
+
+`check` considers every `.hs`/`.lhs` source below `.tactus/scripts` by default.
+`run` implicitly selects only names matching `NNN_slug.hs` or
+`NNN_slug.lhs`, ordered by prefix and path. Other modules are helpers.
+
+```powershell
+tactus list
+tactus check .tactus\scripts\Support.hs
+tactus run --script .tactus\scripts\010_main.hs -- --argument
+```
+
+`run` uses a repeatable `--script`; it does not accept an explicit entry as a
+bare positional path. Re-running `init` will preserve, not replace, an old
+prompt or script tree.
+
+## Cabal or GHC fails during `check`
+
+Run the local project command directly to separate dependency resolution from
+Tactus orchestration:
+
+```powershell
+cabal build --project-dir .tactus lib:clef-sdk
+```
+
+Then inspect `.tactus/cabal.project`, the SDK path, network/proxy access to
+Hackage, and the selected GHC. `tactus check --keep-going` continues to later
+sources after a source-specific failure; it cannot make a failed Clef package
+build usable.
+
+## Rust validation fills the repository
+
+Do not build into the default workspace `target/`. Use a unique system
+temporary target and always clean it:
+
+```powershell
+$targetDir = Join-Path $env:TEMP ("agenstro-target-" + [guid]::NewGuid().ToString("N"))
+$env:CARGO_TARGET_DIR = $targetDir
+$env:CARGO_INCREMENTAL = "0"
+$env:CARGO_PROFILE_DEV_DEBUG = "0"
+$env:CARGO_PROFILE_TEST_DEBUG = "0"
+try {
+  cargo check -p tactus-runtime --all-targets --locked
+  cargo test -p tactus-runtime --locked
+} finally {
+  cargo clean --target-dir $targetDir
+  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
+  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
+}
+```
+
+Use `cargo clean --target-dir <exact-temp-path>` for cleanup; verify the target
+path before cleaning it. Package-scoped commands are usually sufficient while
+iterating on Tactus.
+
+## Chinese text or emoji produces a protocol error
+
+`agenstro.plugin/v1` is always UTF-8. Rust Tactus reads stdout as bytes and
+decodes each complete line strictly, so it does not depend on the Windows
+console code page.
+
+If a custom plugin fails, make the plugin explicitly read/write UTF-8 protocol
+data and flush after each JSONL record. Human-readable logs belong on stderr.
+Do not encode protocol stdout using an OEM/ANSI locale. The usual error includes
+the byte position at which UTF-8 became invalid.
+
+## Events appear only at the end or never appear
+
+Tactus and Clef route complete LF-terminated frames incrementally. Check that
+the plugin:
+
+- writes each event as one complete JSON object followed by `\n`;
+- flushes stdout after the line;
+- does not wait to fill a large userspace buffer;
+- uses the active request `id`; and
+- sends diagnostics, banners, and progress bars to stderr.
+
+The event queue is bounded. If a sink stops consuming, Tactus fails the
+invocation after the queue or delivery deadline is exhausted and cleans the
+owned process group; it does not let a blocked sink disable cancellation. A
+partial line is not an event and will not be exposed before its newline.
+
+## A custom plugin reports a protocol failure
+
+Protocol stdout permits zero or more event frames followed by exactly one
+terminal result. Common violations are:
+
+- non-UTF-8 data or non-JSON banners on stdout;
+- duplicate JSON object keys or non-finite numbers;
+- an incorrect correlation ID;
+- a second result or any frame after the terminal result;
+- success without `value`, failure without a structured `error`, or no terminal
+  result before exit;
+- a frame/request larger than the supervisor limit; or
+- a successful terminal result followed by an incoherent non-zero exit.
+
+Reduce the call to `describe` and retain its structured report:
+
+```powershell
+tactus plugin-call example describe --namespace plugin --json
+```
+
+Compare stdout with the [local plugin protocol](reference/plugin-protocol-v1.md).
+
+## A provider is installed but smoke/generation fails
+
+First run an offline selected probe, then inspect the native CLI outside
+Agenstro:
+
+```powershell
+tactus smoke provider:codex --json
+codex --version
+```
+
+Only after the offline boundary works, opt into a real request:
+
+```powershell
+tactus smoke provider:codex --live --json
+tactus generate --provider codex --json "Create one minimal typed workflow."
+```
+
+Verify:
+
+- the provider registry key and command;
+- native executable visibility on inherited `PATH`;
+- native login/account/endpoint state;
+- current model and effort/variant support; and
+- provider-specific `extra_args`, `extra_env`, or command-prefix options.
+
+Fake-driven tests verify adapter translation, not live account acceptance or a
+future native CLI version.
+
+## OpenCode still asks or denies under `--auto`
+
+The adapter uses `opencode run --auto --format json` and injects an inline
+`permission=allow` configuration. This is not equal to the explicit dangerous
+bypass flags used by Codex and Claude Code. An explicit deny or managed policy
+can still win.
+
+Inspect the effective OpenCode configuration and organization policy. The
+supported claim is `full_bypass=false`, not permission parity.
+
+## Generation succeeds but no runnable entry appears
+
+`generate` asks the provider to write `.tactus/scripts`; it does not convert the
+provider's final text into a file. A provider can return successfully without
+following that instruction.
+
+1. Run `tactus list` and inspect helpers as well as entries.
+2. Read `.tactus/PROMPT.md` and the requested goal.
+3. Inspect the `--json` generation report and relevant run journal.
+4. Review the `workspace.paths` evidence.
+5. Only after review, give a valid program an `NNN_slug.hs` name.
+
+Never automatically run an unreviewed file just because the provider process
+exited successfully.
+
+## A plugin/provider invocation times out or is cancelled
+
+Tactus puts the command in a Unix process group or Windows Job Object and
+terminates the owned group on deadline, Ctrl+C cancellation, or protocol
+failure. Windows Job Objects contain the nested tree. On Unix, a process that
+deliberately creates a new session can escape process-group containment; do not
+treat this mechanism as a hostile-code sandbox.
+
+Most public invocation commands use `--timeout-seconds`; the default is 1,800
+seconds and `0` disables the deadline.
+
+Process termination is not remote rollback. A model service may have received
+or completed work before the local timeout. Inspect the journal and workspace
+before deciding whether a retry is safe.
+
+## A run journal is missing, incomplete, or contains sensitive text
+
+Each supervised plugin call uses `.tactus/runs/<run-id>/events.jsonl` and
+`summary.json`. Event lines are flushed immediately. The summary appears only
+after the terminal outcome and is published by atomic rename.
+
+If the machine loses power, a run can legitimately have events without a
+summary. Journals can include prompts, raw provider events, errors, and path
+evidence; there is no built-in redaction or credential store. Do not commit or
+attach them without reviewing their contents.
+
+`agenstro.trace/v1` is diagnostic evidence, not deterministic replay, a CAS, or
+a rollback log.
 
 ## `workspace.paths` missed or misattributed a change
 
-The effect compares snapshots. It can report final added, modified, deleted,
-and type-changed paths, but it cannot observe:
+The effect compares snapshots and reports final added, modified, deleted, and
+type-changed paths. It cannot observe:
 
-- reads;
-- a file created and deleted between snapshots;
-- the identity of the process that made a change;
-- content under `.git`, `.tactus/path-effect`, or
-  `.tactus/dist-newstyle`; or
+- reads or transient create/delete cycles;
+- which process made a concurrent change;
+- content below `.git`, effect-internal state/run data, `target`,
+  `node_modules`, `build`, or `dist-newstyle`; or
 - authorization, intent, or whether a change should be accepted.
 
-Concurrent editors and background tools can appear in the same diff. Treat the
-result as workspace evidence, not agent attribution, a sandbox decision, or a
-rollback log.
+A snapshot fails after 100,000 paths, 512 MiB hashed, or 30 seconds. The effect
+stores hashes/metadata for comparison, not restorable file content. Treat
+the result as a workspace delta, not a security audit or transaction.
 
-## `run` made an unexpected model call or filesystem change
+An interrupted `observe.end` can be retried with the same opaque begin token;
+Tactus returns the atomically committed delta when one exists. Completion
+metadata is retained for up to 24 hours and cleaned under bounded work, so it
+should not be treated as permanent trace storage.
 
-`tactus check` type-checks; it does not execute. `tactus run` executes ordinary
-trusted Haskell. Inspect the selected scripts for `invoke`, `invokeWith`,
-`perform`, `liftIO`, process launches, and direct filesystem operations. Also
-inspect the selected provider/effect commands in `.tactus/tactus.toml`.
+## `run` made an unexpected call or filesystem change
 
-There is no general dry-run mode for arbitrary Haskell `IO`. Use a disposable
-workspace and non-live/local test plugins when execution effects are uncertain.
+`check` compiles; `run` executes ordinary trusted Haskell. Inspect selected
+scripts for `invoke`, `call`, `perform`, `liftIO`, process launches, and direct
+filesystem operations. Inspect `.tactus/tactus.toml` for the exact commands.
 
-## Old Motivo, Segno, worker, or daemon instructions do not work
+There is no general dry-run for arbitrary Haskell `IO`, no authorization layer,
+and no rollback. Use reviewed scripts, fake plugins, and a disposable workspace
+when effects are uncertain.
 
-Motivo Studio and Segno Flow are frozen 0.2 surfaces. The old Clef Python
-builder, Tactus cells/Jupyter worker, checkpoint/CAS path, and daemon commands
-are not part of the 0.3 install. Use the current commands:
+## Motivo cannot open a workspace
+
+Motivo `0.3` invokes an external Rust `tactus` executable. Confirm that the
+same environment can run:
+
+```powershell
+tactus --version
+tactus studio inspect --root D:\path\to\project
+```
+
+If Studio is launched outside that environment, set `MOTIVO_TACTUS_BIN` to the
+exact executable path before starting it. **Open workspace** requires an
+initialized `.tactus`; use **Initialize folder**. When SDK discovery is not
+available, initialize from a terminal first:
+
+```powershell
+tactus init D:\path\to\project --sdk D:\path\to\clef-sdk
+```
+
+A moved checkout may require repairing the Clef SDK link.
+
+`partial` run integrity means the trace is still open or the bounded page ended
+before the current file. `corrupt` means Rust rejected a complete trace record;
+Motivo does not guess around it. Run `tactus doctor` and preserve a redacted run
+ID when reporting the defect.
+
+## Old Segno, worker, or daemon instructions fail
+
+Segno Flow, notebook/cell workers, daemon commands, persistent scheduling,
+artifact/CAS, and checkpoint restore are not part of the current runtime. The
+supported CLI is:
 
 ```text
 tactus init
@@ -339,25 +363,27 @@ tactus check
 tactus run
 tactus doctor
 tactus smoke
+tactus plugin-call
+tactus studio inspect
+tactus studio events
 ```
 
-For a side-by-side transition, follow the
-[0.2 to Haskell 0.3 migration guide](migrations/0.2-to-haskell-0.3.md). Do not
-point 0.3 at old daemon state or assume an in-place state migration.
+Use the [0.2 to Haskell 0.3 migration
+guide](migrations/0.2-to-haskell-0.3.md) only as side-by-side migration context;
+do not point the Rust runtime at old daemon state.
 
 ## Before reporting a defect
 
 Capture only non-secret diagnostics:
 
 - operating system and architecture;
-- `tactus --version`, `python --version`, `ghc --version`, and
+- `tactus --version`, `rustc --version`, `ghc --version`, and
   `cabal --version`;
 - `tactus doctor --json`;
-- the relevant `tactus list --json` or selected `smoke --json` result;
-- whether the operation was offline, live smoke, generation, or Haskell run;
-- the minimal script or redacted plugin frames needed to reproduce it; and
-- whether the failing host was the current reference implementation, an older
-  editable checkout, or a custom plugin.
+- relevant `list --json`, `smoke --json`, or `plugin-call --json` output;
+- the exact command and whether it was offline or live;
+- a minimal script or redacted protocol frames; and
+- the corresponding run ID and redacted summary.
 
-Do not attach access tokens, provider configuration containing secrets, raw
-environment dumps, or private prompts unless their disclosure has been reviewed.
+Do not attach tokens, raw environment dumps, private prompts, or unreviewed
+journals.
