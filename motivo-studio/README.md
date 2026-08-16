@@ -10,7 +10,7 @@ recovery manager, gRPC client, protobuf-generated client, or direct journal
 reader. It visualizes the versioned `tactus.control/v1` API and launches normal
 Tactus CLI actions.
 
-## Try it
+## Install on Windows x64
 
 Requirements:
 
@@ -18,7 +18,45 @@ Requirements:
 - the Rust `tactus` executable on `PATH`
 - an installed Haskell toolchain for `Check` and `Run`
 
-From this directory:
+From the Agenstro repository root, install the locked dependencies and the
+current Windows x64 desktop build:
+
+```powershell
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio run install:windows
+```
+
+This replaces `%LOCALAPPDATA%\Programs\MotivoStudio` and adds that directory,
+which contains `motivo-studio.exe`, to the user `PATH`. It is a repository-owned
+Windows installation, not an npm global package. Open a new terminal to receive
+the `PATH` change, then start Studio with no argument or pass one initialized
+Tactus workspace:
+
+```powershell
+motivo-studio
+motivo-studio 'D:\work\Project with spaces'
+```
+
+The command shape is `motivo-studio [WORKSPACE]`. Relative paths are resolved
+from the calling terminal. `--workspace PATH` is also accepted, and `--` can
+precede a path whose first character is `-`; do not pass more than one workspace
+or combine the positional and `--workspace` forms.
+
+Motivo is single-instance. A later invocation without a workspace focuses the
+existing window. With a workspace, Tactus validates and switches that window
+before Motivo focuses it; a failed validation keeps the current workspace.
+
+To upgrade after updating the checkout, close Studio and repeat the install
+command. To remove the recognized installation and its user-`PATH` entry, close
+Studio and run from the repository root:
+
+```powershell
+npm --prefix motivo-studio run uninstall:windows
+```
+
+## Develop from the checkout
+
+From this directory, Electron Forge development remains:
 
 ```powershell
 npm install

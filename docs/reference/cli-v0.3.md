@@ -2,7 +2,7 @@
 title: Agenstro CLI reference
 status: alpha
 last_verified: 2026-08-16
-applies_to: "Tactus 0.3.0 and Segno 0.3.0"
+applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 ---
 
 # Agenstro CLI reference
@@ -17,7 +17,8 @@ plumbing and are not a user API.
 Most commands accept `--root PATH`. Tactus and Segno search upward from that
 path for `.tactus/tactus.toml`, so a workspace descendant is sufficient.
 Commands that emit `--json` reserve stdout for machine data; diagnostics go to
-stderr. On PowerShell, pass JSON params in single quotes.
+stderr. On PowerShell, pass JSON params in single quotes. Quote any path that
+contains spaces.
 
 ## Tactus
 
@@ -76,6 +77,32 @@ accepts 1–604,800 seconds. Segno derives a longer Running lease from it.
 
 `history --state-key` and `history --occurrence` are mutually exclusive.
 Business-state history and Tactus journals can contain sensitive plugin output.
+
+## Motivo Studio on Windows x64
+
+The installed desktop launcher has one optional workspace argument:
+
+```text
+motivo-studio [WORKSPACE]
+```
+
+With no argument it opens or focuses the Studio window. A positional path opens
+that initialized Tactus workspace; relative paths are resolved from the calling
+terminal's current directory. Quote paths that contain spaces:
+
+```powershell
+motivo-studio 'D:\work\Project with spaces'
+```
+
+`motivo-studio --workspace PATH` is the equivalent explicit form. Use `--`
+before a path whose first character is `-`. Pass exactly one workspace and do
+not combine the positional and `--workspace` forms.
+
+Motivo is single-instance. Running the command again without a workspace focuses
+the existing window. With a workspace, Tactus validates and switches that window
+before Motivo focuses it; a failed validation keeps the current workspace. See
+[Motivo Studio](../motivo-studio.md) for the Windows installation and
+development commands.
 
 ## Exit and outcome semantics
 

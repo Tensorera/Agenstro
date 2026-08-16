@@ -155,17 +155,40 @@ tactus smoke provider:codex
 
 ## Open the optional visual client
 
-After the workspace is initialized, start Motivo from the Agenstro checkout:
+On Windows x64, install the desktop application and its `motivo-studio` launcher
+from the Agenstro checkout:
 
 ```powershell
-npm --prefix $repoRoot\motivo-studio ci
-npm --prefix $repoRoot\motivo-studio start
+Set-Location $repoRoot
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio run install:windows
 ```
 
-Choose **Open workspace** and select `$demoRoot`. Motivo projects the same
-doctor checks, ordered scripts, registries, and invocation traces through
-versioned Rust control queries. It does not read the config or trace directory
-itself. See [Motivo Studio](motivo-studio.md) for its actions and boundaries.
+This replaces `%LOCALAPPDATA%\Programs\MotivoStudio` and adds that directory to
+the user `PATH`. Open a new terminal to receive the change, then pass the
+initialized workspace directly:
+
+```powershell
+$demoRoot = Join-Path $env:TEMP "agenstro-first-run"
+motivo-studio $demoRoot
+```
+
+With no workspace argument, `motivo-studio` opens the application and lets you
+choose **Open workspace** or **Initialize folder**. Quote a literal path that
+contains spaces, for example `motivo-studio 'D:\work\Project with spaces'`.
+Invoking the command while Studio is already running focuses that window and,
+when a path is supplied, switches it to the requested workspace.
+
+After updating the checkout, close Studio and run
+`npm --prefix motivo-studio run install:windows` again to upgrade. For
+development, keep using `npm --prefix motivo-studio start`; that starts Electron
+Forge from the checkout and does not install the command. See [Motivo
+Studio](motivo-studio.md) for the uninstall command, actions, and authority
+boundaries.
+
+Motivo projects the same doctor checks, ordered scripts, registries, and
+invocation traces through versioned Rust control queries. It does not read the
+config or trace directory itself.
 
 ## Check and run an offline workflow
 

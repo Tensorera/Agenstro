@@ -12,6 +12,8 @@
     "start": "electron-forge start",
     "build": "npm run typecheck && electron-forge package",
     "package": "electron-forge package",
+    "install:windows": "npm run package && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1",
+    "uninstall:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-windows.ps1",
     "make": "electron-forge make",
     "lint": "eslint .",
     "format": "prettier --write .",

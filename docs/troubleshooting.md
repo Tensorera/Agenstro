@@ -351,26 +351,55 @@ There is no general dry-run for arbitrary Haskell `IO`, no authorization layer,
 and no rollback. Use reviewed scripts, fake plugins, and a disposable workspace
 when effects are uncertain.
 
-## Motivo cannot open a workspace
+## `motivo-studio` is missing or cannot open a workspace
 
-Motivo `0.3` invokes an external Rust `tactus` executable. Confirm that the
-same environment can run:
+The Windows x64 install adds `%LOCALAPPDATA%\Programs\MotivoStudio` to the user
+`PATH`, which an already-open terminal does not inherit. Open a new terminal
+first, then check Motivo and Tactus:
 
 ```powershell
+Get-Command motivo-studio,tactus -All
 tactus --version
 tactus studio inspect --root D:\path\to\project
 ```
 
-If Studio is launched outside that environment, set `MOTIVO_TACTUS_BIN` to the
-exact executable path before starting it. **Open workspace** requires an
-initialized `.tactus`; use **Initialize folder**. When SDK discovery is not
-available, initialize from a terminal first:
+If the launcher is still missing, reinstall from the Agenstro repository root:
+
+```powershell
+npm --prefix motivo-studio ci
+npm --prefix motivo-studio run install:windows
+```
+
+Do not look for an npm global executable; the command installs
+`motivo-studio.exe` in that fixed per-user application directory. Close Studio
+and run the same `install:windows` command after updating the checkout to repair
+or upgrade it. The uninstaller also refuses to run while Studio is open:
+
+```powershell
+npm --prefix motivo-studio run uninstall:windows
+```
+
+Motivo `0.3` invokes an external Rust `tactus` executable. If Studio is launched
+outside the environment where Tactus resolves, set `MOTIVO_TACTUS_BIN` to the
+exact executable path before invoking `motivo-studio`. **Open workspace** and a
+command-line workspace both require an initialized `.tactus`; use **Initialize
+folder**. When SDK discovery is not available, initialize from a terminal first:
 
 ```powershell
 tactus init D:\path\to\project --sdk D:\path\to\clef-sdk
 ```
 
-A moved checkout may require repairing the Clef SDK link.
+A moved checkout may require repairing the Clef SDK link. Quote paths that
+contain spaces:
+
+```powershell
+motivo-studio 'D:\work\Project with spaces'
+```
+
+If Motivo is already running, a command with a workspace validates and switches
+that window before focusing it; it does not start a second instance. A
+validation error leaves the existing workspace selected and focuses the same
+window after showing the error.
 
 `partial` run integrity means the trace is still open or the bounded page ended
 before the current file. `corrupt` means Rust rejected a complete trace record;

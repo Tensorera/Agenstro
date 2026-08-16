@@ -22,8 +22,10 @@ export function createMainWindow(): BrowserWindow {
   const trustedUrl = rendererUrl();
   installWindowSecurity(window, trustedUrl);
   installWindowZoom(window);
-  void window.loadURL(trustedUrl);
   window.once("ready-to-show", () => window.show());
+  void window.loadURL(trustedUrl).then(() => {
+    if (!window.isDestroyed() && !window.isVisible()) window.show();
+  });
   return window;
 }
 

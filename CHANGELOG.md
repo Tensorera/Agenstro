@@ -16,6 +16,9 @@ they do not imply a public package release or compatibility guarantee.
   journals.
 - TypeScript/React Motivo Studio as a redacted visual projection over the
   versioned Tactus control API.
+- A per-user Windows x64 Motivo Studio installation and
+  `motivo-studio [WORKSPACE]` command, with quoted-path handling and
+  single-instance workspace switching.
 - Haskell Segno persistent tasks with typed triggers and business state,
   durable lifecycle/cursors, interval and UTC-cron planning, SQLite CAS state,
   and at-least-once execution through Tactus.

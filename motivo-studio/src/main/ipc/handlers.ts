@@ -5,8 +5,12 @@ import {
   ipcEnvelopeSchema,
   studioEventPageSchema,
   studioViewSchema,
+  type ActionRequest,
+  type ActionState,
   type IpcResult,
   type StudioActionEvent,
+  type StudioEventPage,
+  type StudioView,
 } from "../../shared/contracts";
 import {
   actionCancelInputSchema,
@@ -23,14 +27,32 @@ interface HandlerDependencies {
   readonly window: BrowserWindow;
   readonly dialog: Pick<Dialog, "showOpenDialog">;
   readonly tactusExecutable?: string;
+  readonly controller?: StudioController;
+  readonly openWorkspace?: (root: string) => Promise<StudioView>;
+  readonly initialReady?: Promise<void>;
+}
+
+export interface StudioController {
+  current(): StudioView | null;
+  open(root: string): Promise<StudioView>;
+  initialize(root: string): Promise<StudioView>;
+  refresh(): Promise<StudioView>;
+  events(runId: string, after: string, limit?: number): Promise<StudioEventPage>;
+  start(input: ActionRequest): ActionState;
+  cancel(actionId: string): void;
+  dispose(): void;
 }
 
 export function registerIpcHandlers(dependencies: HandlerDependencies): () => void {
   const { ipcMain, window, dialog } = dependencies;
-  const controller = new TactusController({
-    ...(dependencies.tactusExecutable ? { executable: dependencies.tactusExecutable } : {}),
-    emit: (event) => sendActionEvent(window, event),
-  });
+  const controller =
+    dependencies.controller ??
+    new TactusController({
+      ...(dependencies.tactusExecutable ? { executable: dependencies.tactusExecutable } : {}),
+      emit: (event) => sendActionEvent(window, event),
+    });
+  const openWorkspace = dependencies.openWorkspace ?? ((root: string) => controller.open(root));
+  const initialReady = dependencies.initialReady ?? Promise.resolve();
   const channels: string[] = [];
 
   const register = <Input, Output>(
@@ -57,12 +79,14 @@ export function registerIpcHandlers(dependencies: HandlerDependencies): () => vo
     });
   };
 
-  register(IPC.studioCurrent, emptyInputSchema, studioViewSchema.nullable(), () =>
-    controller.current(),
-  );
+  register(IPC.studioCurrent, emptyInputSchema, studioViewSchema.nullable(), async () => {
+    await initialReady;
+    return controller.current();
+  });
   register(IPC.studioOpenInitialized, emptyInputSchema, studioViewSchema.nullable(), async () => {
     const folder = await selectFolder(dialog, window, "Open initialized Tactus workspace");
-    return folder ? controller.open(folder) : null;
+    await initialReady.catch(() => undefined);
+    return folder ? openWorkspace(folder) : null;
   });
   register(IPC.studioInitialize, emptyInputSchema, studioViewSchema.nullable(), async () => {
     const folder = await selectFolder(dialog, window, "Initialize folder with Tactus");

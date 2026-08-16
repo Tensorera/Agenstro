@@ -214,14 +214,34 @@ whether any external effect is safe to repeat.
 ## Visualize a Tactus workspace
 
 Motivo Studio requires Node.js 22.12 or newer and the installed `tactus`
-executable above:
+executable above. On Windows x64, install the desktop application and
+command-line launcher from this checkout:
 
 ```powershell
 npm --prefix motivo-studio ci
-npm --prefix motivo-studio start
+npm --prefix motivo-studio run install:windows
 ```
 
-Open an initialized project, or choose **Initialize folder** in the application.
+The installer replaces the per-user application at
+`%LOCALAPPDATA%\Programs\MotivoStudio` and adds that exact directory to the user
+`PATH`. Open a new terminal to receive the change, then launch the UI with no
+argument or open an initialized workspace directly:
+
+```powershell
+motivo-studio
+motivo-studio 'D:\work\Project with spaces'
+```
+
+Close Studio and run the install command again to upgrade it. Close Studio and
+use `npm --prefix motivo-studio run uninstall:windows` to remove the recognized
+per-user installation and its user-`PATH` entry. Development still uses
+`npm --prefix motivo-studio start`; it runs Electron Forge from the checkout
+without installing the command.
+
+If Studio is already running, another `motivo-studio [WORKSPACE]` invocation
+focuses the existing window and switches it to the supplied workspace. You can
+also choose **Open workspace** or **Initialize folder** in the application.
+
 The Overview, Workflow, Plugins, and Runs views project Tactus health, ordered
 Haskell entries, registry availability, bounded action output, and factual
 trace events. Generate, Check, Run, and offline Smoke remain Tactus commands;

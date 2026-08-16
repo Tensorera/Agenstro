@@ -5,19 +5,55 @@ for an installed Rust Tactus runtime. It shows workspace health, ordered Haskell
 workflow entries, configured plugins, command output, and factual invocation
 traces. It does not implement workflow semantics itself.
 
-## Install and start
+## Install and start on Windows x64
 
-Install Tactus first, then install the locked Node dependencies:
+Install Tactus first. Node.js 22.12 or newer is required to build Motivo from
+this checkout. From the repository root, install the locked dependencies and
+the current Windows x64 desktop build:
 
 ```powershell
 cargo install --path tactus-runtime --bin tactus --locked --force
 npm --prefix motivo-studio ci
+npm --prefix motivo-studio run install:windows
+```
+
+The installer replaces `%LOCALAPPDATA%\Programs\MotivoStudio` and adds that
+directory, which contains `motivo-studio.exe`, to the user `PATH`. It does not
+publish or globally install an npm package. Open a new terminal to receive the
+`PATH` change, then start the UI or open one initialized workspace:
+
+```powershell
+motivo-studio
+motivo-studio 'D:\work\Project with spaces'
+```
+
+The command shape is `motivo-studio [WORKSPACE]`. It resolves a relative path
+from the calling terminal. The equivalent explicit form is `--workspace PATH`;
+use `--` before a path whose first character is `-`. Supply exactly one
+workspace and do not combine the positional and explicit forms.
+
+Motivo is single-instance. A second invocation without a workspace focuses the
+existing window. With a workspace, Tactus validates and switches the existing
+window before Motivo focuses it; invalid roots leave the current workspace open,
+show an error, and focus that same window.
+
+Close Studio and run `npm --prefix motivo-studio run install:windows` again
+after updating the checkout to upgrade. Close Studio and uninstall the
+recognized per-user application and its user-`PATH` entry with:
+
+```powershell
+npm --prefix motivo-studio run uninstall:windows
+```
+
+Development remains separate from the installed launcher:
+
+```powershell
 npm --prefix motivo-studio start
 ```
 
-Node.js 22.12 or newer is required. By default Electron resolves `tactus` from
-`PATH`. A development or packaged installation may point at an exact binary by
-setting `MOTIVO_TACTUS_BIN` before starting Studio.
+By default Electron resolves `tactus` from `PATH`. A development or installed
+application may point at an exact binary by setting `MOTIVO_TACTUS_BIN` before
+starting Studio.
 
 Use **Open workspace** for a project that already contains `.tactus`, or
 **Initialize folder** to run `tactus init` and then open it. Initialization
