@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package agentro.common.v1;
+
+// PageRequest requests one bounded page from a stable ordered list.
+message PageRequest {
+  // page_size is present when the caller overrides the endpoint default.
+  optional uint32 page_size = 1;
+  // page_token is opaque to clients and has an endpoint-defined byte limit.
+  bytes page_token = 2;
+}
+
+// PageInfo describes the bounded page returned by a list operation.
+message PageInfo {
+  // next_page_token is empty only when no later page is available.
+  bytes next_page_token = 1;
+  // returned_items is the number of items in the enclosing response.
+  uint32 returned_items = 2;
+}

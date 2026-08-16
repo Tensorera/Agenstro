@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "accessed_on": "2026-07-27",
+  "policy": "Local files are concise review notes with source links, not copied webpages. Venue-specific rules apply only when review_context names that venue.",
+  "sources": [
+    {
+      "id": "NATURE-CRITERIA",
+      "publisher": "Nature",
+      "title": "Editorial criteria and processes",
+      "url": "https://www.nature.com/nature/for-authors/editorial-criteria-and-processes"
+    },
+    {
+      "id": "NATURE-PEER",
+      "publisher": "Nature",
+      "title": "Peer Review",
+      "url": "https://www.nature.com/nature/editorial-policies/peer-review"
+    },
+    {
+      "id": "NATURE-INITIAL",
+      "publisher": "Nature",
+      "title": "Initial submission",
+      "url": "https://www.nature.com/nature/for-authors/initial-submission"
+    },
+    {
+      "id": "NATURE-REPRO",
+      "publisher": "Nature Portfolio",
+      "title": "Reporting standards and availability of data, materials, code and protocols",
+      "url": "https://www.nature.com/commschem/editorial-policies/reporting-standards"
+    },
+    {
+      "id": "NATURE-POLICIES",
+      "publisher": "Nature",
+      "title": "Editorial policies",
+      "url": "https://www.nature.com/nature/editorial-policies"
+    },
+    {
+      "id": "ELSEVIER-REVIEW",
+      "publisher": "Elsevier",
+      "title": "How to conduct a review",
+      "url": "https://www.elsevier.com/reviewer/how-to-review"
+    },
+    {
+      "id": "COPE-REVIEW",
+      "publisher": "Committee on Publication Ethics",
+      "title": "Ethical guidelines for peer reviewers",
+      "url": "https://members.publicationethics.org/sites/default/files/cope-ethical-guidelines-peer-reviewers-v2_0.pdf"
+    },
+    {
+      "id": "EQUATOR-REPORTING",
+      "publisher": "EQUATOR Network",
+      "title": "What is a reporting guideline?",
+      "url": "https://www.equator-network.org/about-us/what-is-a-reporting-guideline/"
+    },
+    {
+      "id": "ICMJE-2026",
+      "publisher": "ICMJE",
+      "title": "Recommendations for the Conduct, Reporting, Editing, and Publication of Scholarly Work in Medical Journals",
+      "url": "https://www.icmje.org/recommendations/"
+    }
+  ]
+}

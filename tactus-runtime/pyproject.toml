@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tactus-runtime"
+dynamic = ["version"]
+description = "Project-local Haskell workflow runner and plugin bridge."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/Tensorera/agenstro"
+Issues = "https://github.com/Tensorera/agenstro/issues"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "pytest>=8.3,<10",
+  "pyright>=1.1.400,<2",
+  "ruff>=0.14,<1",
+]
+
+[project.scripts]
+tactus = "tactus_runtime.cli:main"
+tactus-provider-host = "tactus_runtime.provider_host:main"
+tactus-effect-host = "tactus_runtime.effect_host:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tactus_runtime"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/rewrite-report/**",
+  "/runtime-check/**",
+  "/rust/**",
+]
+
+[tool.hatch.version]
+path = "src/tactus_runtime/__init__.py"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src/tactus_runtime"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+# Public boundaries intentionally retain runtime checks for untyped callers.
+reportUnnecessaryIsInstance = "none"
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+
+[tool.ruff.lint]
+select = [
+  "E4",
+  "E7",
+  "E9",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "C4",
+  "N",
+  "PIE",
+  "SIM",
+  "RUF",
+  "D",
+]
+ignore = [
+  "D105",
+  "D107",
+  "D203",
+  "D213",
+  "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "N802", "N806", "RUF012"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"

@@ -1,0 +1,67 @@
+# Python environments and build output
+.venv/
+venv/
+build/
+dist/
+site/
+target/
+dist-newstyle/
+.ghc.environment.*
+*.egg-info/
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-of-*/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local tooling and temporary installer directories
+.idea/
+.vscode/
+pip-*/
+tmp*/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+!.env.template
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*secrets*.json
+
+# Runtime state
+.tactus/
+secretdoc/
+
+# Internal rewrite logs and generated model transcripts are not release inputs
+rewrite-evidence/
+**/rewrite-report/
+**/runtime-check/
+
+# Generated legacy UI bundle; the maintained Motivo source is kept separately
+archive/**/_motivo_ui/assets/
+
+# Clef case-study runtime state and generated deliveries
+**/.clef-state/
+# Preserve locally generated state from pre-Agentro checkouts without tracking it.
+**/.harness-state/
+**/.adapter-probe/
+**/.run-control/
+**/.test-work/
+PelicanRide/runs/
+Test2/.env
+Test2/tmp/
+Test2/reproduction/output*/
+Test2/reproduction/live-*.log
+Test2/review-work/
+# Local legacy benchmark corpus (targets a superseded effect-policy API)
+TestFolder/

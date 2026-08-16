@@ -1,0 +1,7 @@
+node_modules
+.vite
+out
+coverage
+src/generated
+package-lock.json
+rewrite-report

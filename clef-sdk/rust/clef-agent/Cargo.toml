@@ -1,0 +1,16 @@
+[package]
+name = "clef-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-neutral Clef agent backend, capability, and event contracts."
+publish = false
+
+[dependencies]
+agentro-contracts.workspace = true
+clef-core.workspace = true
+
+[lints]
+workspace = true

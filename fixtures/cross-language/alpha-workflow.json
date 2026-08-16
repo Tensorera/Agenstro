@@ -1,0 +1,95 @@
+{
+  "expected": {
+    "max_events": 16,
+    "tactus_output": "tactus worker output\n",
+    "workspace_id": "workspace-alpha"
+  },
+  "fixture_version": "agentro.cross-language-fixture/v1",
+  "products": [
+    {
+      "distribution": "clef-sdk",
+      "entry_points": [],
+      "python_import": "clef_sdk"
+    },
+    {
+      "distribution": "tactus-runtime",
+      "entry_points": [
+        "tactus"
+      ],
+      "python_import": "tactus_runtime"
+    },
+    {
+      "distribution": "motivo-studio",
+      "entry_points": [
+        "motivo-studio"
+      ],
+      "python_import": null
+    },
+    {
+      "distribution": "segno-flow",
+      "entry_points": [
+        "segno-flow",
+        "segno-flow-ui"
+      ],
+      "python_import": "segno_flow"
+    }
+  ],
+  "protocol": {
+    "api_major": 1,
+    "api_minor": 0,
+    "workflow_proto": "agentro.workflow.v1.WorkflowDefinition"
+  },
+  "release_version": "0.2.0",
+  "workflow": {
+    "id": "alpha-vertical-slice",
+    "outputs": [
+      {
+        "name": "report",
+        "source": {
+          "output_name": "report",
+          "source_task_id": "execute-script"
+        }
+      }
+    ],
+    "policy": {
+      "fail_fast": true,
+      "max_concurrency": 1,
+      "max_fan_out": 32
+    },
+    "required_capabilities": [],
+    "schema_version": "clef.workflow/v2",
+    "tasks": [
+      {
+        "domain_function": "tactus.python-script.v1",
+        "effects": [
+          {
+            "kind": "create",
+            "path_glob": "out/report.txt"
+          }
+        ],
+        "effort": null,
+        "id": "execute-script",
+        "inputs": [],
+        "outputs": [
+          {
+            "description": "Alpha execution report",
+            "kind": "text",
+            "name": "report",
+            "path": "out/report.txt",
+            "required": true
+          }
+        ],
+        "preferred_capabilities": [],
+        "prompts": [
+          {
+            "content": "print('alpha vertical slice')\n",
+            "name": null,
+            "priority": 0,
+            "role": "instruction"
+          }
+        ],
+        "required_capabilities": []
+      }
+    ]
+  }
+}

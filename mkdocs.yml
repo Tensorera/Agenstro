@@ -1,0 +1,62 @@
+site_name: Agenstro 0.3 Haskell-first Alpha
+site_description: Evidence-based documentation for the Clef and Tactus 0.3 path
+repo_name: Tensorera/agenstro
+repo_url: https://github.com/Tensorera/agenstro
+docs_dir: docs
+site_dir: site
+strict: true
+
+theme:
+  name: readthedocs
+
+markdown_extensions:
+  - fenced_code
+  - tables
+  - toc:
+      permalink: true
+
+# The 0.2 Rust/Python, Motivo, and Segno pages remain in Git as legacy evidence.
+# Only the Haskell-first 0.3 release surface is published in this site.
+exclude_docs: |
+  adr/0001-versioned-rust-foundation.md
+  adr/0002-daemon-state-and-electron-boundaries.md
+  alpha-cross-language-slice.md
+  tutorials/**
+  how-to/**
+  explanation/**
+  migrations/prototype-to-greenfield.md
+  reference/agent-configuration.md
+  reference/clef-api.md
+  reference/clef-entities.md
+  reference/clef/**
+  reference/glossary.md
+  reference/index.md
+  reference/known-limitations.md
+  reference/source-contracts.md
+  reference/tactus-*.md
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+    absolute_links: relative_to_docs
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Architecture: architecture.md
+  - Reference:
+      - Local plugin protocol v1: reference/plugin-protocol-v1.md
+      - Support matrix: reference/support-matrix.md
+  - Operations:
+      - Troubleshooting: troubleshooting.md
+  - Project direction: roadmap.md
+  - Decisions:
+      - ADR 0003 - Haskell DSL and local plugins: adr/0003-haskell-dsl-and-local-plugins.md
+  - Migration:
+      - 0.2 to Haskell 0.3: migrations/0.2-to-haskell-0.3.md

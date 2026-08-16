@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "electron"]
+  },
+  "include": [
+    "src/main.ts",
+    "src/preload.ts",
+    "src/pty-host.ts",
+    "src/shared/**/*.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/pty/**/*.ts",
+    "src/generated/**/*.ts"
+  ]
+}

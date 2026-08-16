@@ -1,0 +1,66 @@
+cabal-version:      3.0
+name:               clef-sdk
+version:            0.3.0.0
+synopsis:           A small typed Haskell workflow DSL for coding agents
+description:
+  Clef is an ordinary Haskell EDSL.  GHC checks task and effect result wiring;
+  providers and effects remain replaceable JSONL subprocess plugins.
+license:            Apache-2.0
+author:             Agenstro contributors
+maintainer:         Agenstro contributors
+category:           Development
+build-type:         Simple
+extra-source-files:
+    README.md
+    MIGRATION.md
+
+common warnings
+  default-language: GHC2021
+  ghc-options:      -Wall
+
+library
+  import: warnings
+  hs-source-dirs: haskell/src
+  exposed-modules:
+      Clef
+      Clef.Effect.WorkspacePaths
+      Clef.Error
+      Clef.Plugin.Protocol
+      Clef.Runtime
+      Clef.Runtime.Config
+      Clef.Workflow
+  build-depends:
+      aeson >=2.2 && <2.3,
+      async >=2.2 && <2.3,
+      base >=4.20 && <4.23,
+      bytestring >=0.12 && <0.13,
+      containers >=0.6.8 && <0.8,
+      filepath >=1.4.300 && <1.6,
+      process >=1.6 && <1.7,
+      scientific >=0.3.8 && <0.4,
+      text >=2.1 && <2.2
+
+test-suite clef-sdk-tests
+  import: warnings
+  type: exitcode-stdio-1.0
+  hs-source-dirs: haskell/test
+  main-is: Main.hs
+  build-depends:
+      aeson,
+      base,
+      bytestring,
+      clef-sdk,
+      containers,
+      directory,
+      scientific,
+      text
+
+executable clef-typed-example
+  import: warnings
+  hs-source-dirs: haskell/examples
+  main-is: TypedWorkflow.hs
+  build-depends:
+      aeson,
+      base,
+      clef-sdk,
+      text

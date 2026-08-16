@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+package agentro.workspace.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// WorkspaceService owns authorized workspace file and recovery operations.
+service WorkspaceService {
+  // OpenWorkspace authorizes and opens one desktop-selected native path.
+  rpc OpenWorkspace(OpenWorkspaceRequest) returns (Workspace);
+  // ListEntries returns one stable bounded directory page.
+  rpc ListEntries(ListEntriesRequest) returns (ListEntriesResponse);
+  // ReadFile reads one bounded file revision.
+  rpc ReadFile(ReadFileRequest) returns (FileDocument);
+  // SaveFile performs an optimistic revision-checked write.
+  rpc SaveFile(SaveFileRequest) returns (FileDocument);
+  // ListRecoveries returns one bounded recovery page.
+  rpc ListRecoveries(ListRecoveriesRequest) returns (ListRecoveriesResponse);
+  // RecoverWorkspace applies one explicit recovery record.
+  rpc RecoverWorkspace(RecoverWorkspaceRequest) returns (RecoveryRecord);
+}
+
+// OpenWorkspaceRequest carries a desktop-authorized native path.
+message OpenWorkspaceRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // authorized_native_path is allowed only on this desktop boundary.
+  string authorized_native_path = 2;
+}
+
+// Workspace is a bounded authorized workspace reference.
+message Workspace {
+  // workspace_id is opaque to clients.
+  string workspace_id = 1;
+  // display_name is bounded user-facing text.
+  string display_name = 2;
+  // revision identifies the current indexed workspace snapshot.
+  string revision = 3;
+  // root_entry_id identifies the virtual root directory.
+  string root_entry_id = 4;
+}
+
+// EntryKind distinguishes regular files and directories.
+enum EntryKind {
+  // ENTRY_KIND_UNSPECIFIED is invalid at a validated boundary.
+  ENTRY_KIND_UNSPECIFIED = 0;
+  // ENTRY_KIND_FILE is a regular file.
+  ENTRY_KIND_FILE = 1;
+  // ENTRY_KIND_DIRECTORY is a directory.
+  ENTRY_KIND_DIRECTORY = 2;
+}
+
+// WorkspaceEntry is one bounded indexed child entry.
+message WorkspaceEntry {
+  // entry_id is opaque to clients.
+  string entry_id = 1;
+  // parent_entry_id is absent only at the virtual root.
+  optional string parent_entry_id = 2;
+  // name is one portable path component.
+  string name = 3;
+  // kind identifies file or directory.
+  EntryKind kind = 4;
+  // size_bytes is meaningful for regular files.
+  uint64 size_bytes = 5;
+  // language is a bounded editor hint when known.
+  optional string language = 6;
+  // revision is present for mutable files.
+  optional string revision = 7;
+  // read_only reports whether SaveFile is unavailable.
+  bool read_only = 8;
+}
+
+// ListEntriesRequest selects one directory page.
+message ListEntriesRequest {
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 1;
+  // parent_entry_id is absent for the virtual root.
+  optional string parent_entry_id = 2;
+  // page_size is constrained by the endpoint.
+  uint32 page_size = 3;
+  // cursor is opaque and absent for the first page.
+  optional string cursor = 4;
+}
+
+// ListEntriesResponse contains one bounded directory page.
+message ListEntriesResponse {
+  // entries are returned in stable service-defined order.
+  repeated WorkspaceEntry entries = 1;
+  // next_cursor is absent when no later page exists.
+  optional string next_cursor = 2;
+}
+
+// ReadFileRequest identifies one bounded file read.
+message ReadFileRequest {
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 1;
+  // entry_id identifies one regular file.
+  string entry_id = 2;
+  // max_bytes is an explicit allocation and response bound.
+  uint32 max_bytes = 3;
+}
+
+// FileDocument is one bounded file revision.
+message FileDocument {
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 1;
+  // entry_id identifies one regular file.
+  string entry_id = 2;
+  // name is the portable display name.
+  string name = 3;
+  // content contains bounded raw file bytes.
+  bytes content = 4;
+  // revision is required for optimistic SaveFile calls.
+  string revision = 5;
+  // language is a bounded editor hint.
+  string language = 6;
+  // read_only reports whether SaveFile is unavailable.
+  bool read_only = 7;
+  // binary reports that content is not editor UTF-8 text.
+  bool binary = 8;
+  // truncated reports that max_bytes limited the response.
+  bool truncated = 9;
+}
+
+// SaveFileRequest performs one optimistic file write.
+message SaveFileRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 2;
+  // entry_id identifies one regular file.
+  string entry_id = 3;
+  // content contains bounded replacement bytes.
+  bytes content = 4;
+  // expected_revision prevents lost updates.
+  string expected_revision = 5;
+}
+
+// RecoveryState is the externally visible recovery lifecycle.
+enum RecoveryState {
+  // RECOVERY_STATE_UNSPECIFIED is invalid at a validated boundary.
+  RECOVERY_STATE_UNSPECIFIED = 0;
+  // RECOVERY_STATE_AVAILABLE may be explicitly applied.
+  RECOVERY_STATE_AVAILABLE = 1;
+  // RECOVERY_STATE_APPLIED completed successfully.
+  RECOVERY_STATE_APPLIED = 2;
+  // RECOVERY_STATE_CONFLICTED preserved an external change.
+  RECOVERY_STATE_CONFLICTED = 3;
+  // RECOVERY_STATE_EXPIRED is outside retention.
+  RECOVERY_STATE_EXPIRED = 4;
+}
+
+// RecoveryRecord is one bounded recovery summary.
+message RecoveryRecord {
+  // recovery_id is opaque to clients.
+  string recovery_id = 1;
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 2;
+  // label is bounded display text.
+  string label = 3;
+  // state is the current recovery lifecycle.
+  RecoveryState state = 4;
+  // created_at is the durable UTC creation instant.
+  google.protobuf.Timestamp created_at = 5;
+  // changed_files is a bounded summary count.
+  uint32 changed_files = 6;
+  // detail is bounded display text when present.
+  optional string detail = 7;
+}
+
+// ListRecoveriesRequest selects one bounded page.
+message ListRecoveriesRequest {
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 1;
+  // page_size is constrained by the endpoint.
+  uint32 page_size = 2;
+  // cursor is opaque and absent for the first page.
+  optional string cursor = 3;
+}
+
+// ListRecoveriesResponse contains one bounded recovery page.
+message ListRecoveriesResponse {
+  // recoveries are returned in stable service-defined order.
+  repeated RecoveryRecord recoveries = 1;
+  // next_cursor is absent when no later page exists.
+  optional string next_cursor = 2;
+}
+
+// RecoverWorkspaceRequest applies one explicit recovery record.
+message RecoverWorkspaceRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 2;
+  // recovery_id identifies the selected recovery record.
+  string recovery_id = 3;
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": "agentro.adapter-manifest/v1",
+  "id": "codex-app-server",
+  "adapter_version": "0.1.0",
+  "provider": "codex",
+  "protocol": {"major": 1, "minor": 0},
+  "tested_provider_versions": ["fake-app-server-v1"],
+  "supported_platforms": ["windows-x86_64", "linux-x86_64"],
+  "static_capabilities": ["streaming", "sessions", "approvals", "structured_output", "file_change_events", "usage", "model_selection", "reasoning_effort", "terminal"],
+  "command": ["codex-adapter-host"],
+  "implementation_status": "contract-only",
+  "probe_policy": "fake-transcript-only"
+}

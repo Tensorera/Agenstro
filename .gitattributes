@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+
+tactus-runtime/src/tactus_runtime/_motivo_ui/** text eol=lf whitespace=-trailing-space,-blank-at-eol
+tactus-runtime/src/tactus_runtime/_motivo_ui/**/*.ttf binary
+segno-flow/src/segno_flow/_ui/** text eol=lf whitespace=-trailing-space,-blank-at-eol

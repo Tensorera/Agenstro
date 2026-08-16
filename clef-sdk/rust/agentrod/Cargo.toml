@@ -1,0 +1,26 @@
+[package]
+name = "agentrod"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded Clef and normalized-agent orchestration application core."
+publish = false
+
+[dependencies]
+agentro-contracts.workspace = true
+clef-agent.workspace = true
+clef-core.workspace = true
+
+[dev-dependencies]
+agentro-proto.workspace = true
+prost.workspace = true
+segno-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tactus-core.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

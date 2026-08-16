@@ -1,0 +1,38 @@
+name = "manuscript_review"
+
+[adapter]
+executable = "opencode"
+model = "zhipuai-coding-plan/glm-5.2"
+agent = "build"
+output_format = "json"
+pure = false
+auto_approve = true
+inherit_environment = true
+required_env = []
+extra_args = []
+
+[runtime]
+max_concurrency = 4
+max_attempts = 2
+retry_backoff_seconds = 0
+fail_fast = false
+max_subagent_depth = 1
+max_fan_out = 32
+session_reuse = "never"
+
+[workspace]
+root = "../.review-workspace-placeholder"
+read_roots = []
+
+[storage]
+state_root = "../.review-state-placeholder"
+cas_dir = "cas"
+traces_dir = "traces"
+cache_dir = "cache"
+manifests_dir = "manifests"
+cache_enabled = false
+fsync = false
+
+[labels]
+purpose = "twelve-dimension manuscript review"
+context_policy = "verified artifacts and fresh session per TaskRun"

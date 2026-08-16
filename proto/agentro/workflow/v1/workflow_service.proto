@@ -1,0 +1,214 @@
+syntax = "proto3";
+
+package agentro.workflow.v1;
+
+// WorkflowService compiles versioned Clef definitions into immutable plans.
+service WorkflowService {
+  // CompileWorkflow validates and deterministically compiles one definition.
+  rpc CompileWorkflow(CompileWorkflowRequest) returns (CompileWorkflowResponse);
+}
+
+// ArtifactKind identifies one stable artifact form.
+enum ArtifactKind {
+  // ARTIFACT_KIND_UNSPECIFIED is invalid at a validated boundary.
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  // ARTIFACT_KIND_FILE is one physical file.
+  ARTIFACT_KIND_FILE = 1;
+  // ARTIFACT_KIND_DIRECTORY is one physical directory tree.
+  ARTIFACT_KIND_DIRECTORY = 2;
+  // ARTIFACT_KIND_TEXT is UTF-8 text content.
+  ARTIFACT_KIND_TEXT = 3;
+  // ARTIFACT_KIND_JSON is strict JSON content.
+  ARTIFACT_KIND_JSON = 4;
+}
+
+// PromptRole identifies the purpose of one ordered prompt fragment.
+enum PromptRole {
+  // PROMPT_ROLE_UNSPECIFIED is invalid at a validated boundary.
+  PROMPT_ROLE_UNSPECIFIED = 0;
+  // PROMPT_ROLE_POLICY carries a mandatory policy fragment.
+  PROMPT_ROLE_POLICY = 1;
+  // PROMPT_ROLE_CONTEXT carries read-only task context.
+  PROMPT_ROLE_CONTEXT = 2;
+  // PROMPT_ROLE_INSTRUCTION carries the requested work.
+  PROMPT_ROLE_INSTRUCTION = 3;
+  // PROMPT_ROLE_REPAIR carries bounded repair guidance.
+  PROMPT_ROLE_REPAIR = 4;
+}
+
+// EffectKind identifies declared task intent, never an authorization grant.
+enum EffectKind {
+  // EFFECT_KIND_UNSPECIFIED is invalid at a validated boundary.
+  EFFECT_KIND_UNSPECIFIED = 0;
+  // EFFECT_KIND_READ declares project-content reads.
+  EFFECT_KIND_READ = 1;
+  // EFFECT_KIND_CREATE declares project-content creation.
+  EFFECT_KIND_CREATE = 2;
+  // EFFECT_KIND_MODIFY declares project-content modification.
+  EFFECT_KIND_MODIFY = 3;
+  // EFFECT_KIND_MOVE declares project-content moves.
+  EFFECT_KIND_MOVE = 4;
+  // EFFECT_KIND_DELETE declares project-content deletion.
+  EFFECT_KIND_DELETE = 5;
+  // EFFECT_KIND_SHELL declares supervised command execution.
+  EFFECT_KIND_SHELL = 6;
+  // EFFECT_KIND_NETWORK declares network intent.
+  EFFECT_KIND_NETWORK = 7;
+}
+
+// Effort is a logical Clef route independent of provider-native variants.
+enum Effort {
+  // EFFORT_UNSPECIFIED means the default configured route.
+  EFFORT_UNSPECIFIED = 0;
+  // EFFORT_XHIGH selects the xhigh logical route.
+  EFFORT_XHIGH = 1;
+  // EFFORT_HIGH selects the high logical route.
+  EFFORT_HIGH = 2;
+  // EFFORT_MEDIUM selects the medium logical route.
+  EFFORT_MEDIUM = 3;
+  // EFFORT_LOW selects the low logical route.
+  EFFORT_LOW = 4;
+}
+
+// Prompt is one bounded ordered prompt fragment.
+message Prompt {
+  // role identifies the fragment purpose.
+  PromptRole role = 1;
+  // content is bounded UTF-8 text.
+  string content = 2;
+  // name is a stable optional fragment label.
+  optional string name = 3;
+  // priority is a deterministic ordering hint.
+  sint32 priority = 4;
+}
+
+// ArtifactSpec declares one task output.
+message ArtifactSpec {
+  // name is the task-local output slot.
+  string name = 1;
+  // description is bounded display text.
+  string description = 2;
+  // kind identifies the stable artifact form.
+  ArtifactKind kind = 3;
+  // path is a portable workspace-relative path when physical.
+  optional string path = 4;
+  // required gates successful publication.
+  bool required = 5;
+}
+
+// ArtifactRef identifies one immutable external input.
+message ArtifactRef {
+  // uri is an authorized opaque artifact handle.
+  string uri = 1;
+  // description is bounded display text.
+  string description = 2;
+  // kind identifies the stable artifact form.
+  ArtifactKind kind = 3;
+  // digest is an algorithm-tagged digest when available.
+  optional string digest = 4;
+  // media_type is a bounded content type when available.
+  optional string media_type = 5;
+}
+
+// ArtifactBinding identifies one upstream task output.
+message ArtifactBinding {
+  // source_task_id identifies the producer task.
+  string source_task_id = 1;
+  // output_name identifies the producer slot.
+  string output_name = 2;
+}
+
+// TaskInput binds one task-local input slot.
+message TaskInput {
+  // name is the consumer input slot.
+  string name = 1;
+  // source identifies either an external artifact or an upstream output.
+  oneof source {
+    // artifact is an immutable external input.
+    ArtifactRef artifact = 10;
+    // binding references one upstream task output.
+    ArtifactBinding binding = 11;
+  }
+}
+
+// Effect declares one bounded task intent.
+message Effect {
+  // kind identifies the intent category.
+  EffectKind kind = 1;
+  // path_glob optionally scopes project-content intent.
+  optional string path_glob = 2;
+}
+
+// TaskDefinition is one immutable task declaration.
+message TaskDefinition {
+  // id is unique within the workflow.
+  string id = 1;
+  // domain_function is the provider-neutral operation name.
+  string domain_function = 2;
+  // prompts are retained in explicit declaration order.
+  repeated Prompt prompts = 3;
+  // inputs are bounded named artifact bindings.
+  repeated TaskInput inputs = 4;
+  // outputs are bounded named artifact declarations.
+  repeated ArtifactSpec outputs = 5;
+  // effects are intent declarations and grant no permission.
+  repeated Effect effects = 6;
+  // required_capabilities must be negotiated before execution.
+  repeated string required_capabilities = 7;
+  // preferred_capabilities may explicitly degrade.
+  repeated string preferred_capabilities = 8;
+  // effort selects an optional logical model route.
+  optional Effort effort = 9;
+}
+
+// WorkflowOutput exposes one task output at workflow scope.
+message WorkflowOutput {
+  // name is unique within the workflow.
+  string name = 1;
+  // source identifies the producing task output.
+  ArtifactBinding source = 2;
+}
+
+// WorkflowPolicy carries bounded scheduling and failure settings.
+message WorkflowPolicy {
+  // max_concurrency bounds simultaneously active tasks.
+  uint32 max_concurrency = 1;
+  // fail_fast stops new admission after a task failure.
+  bool fail_fast = 2;
+  // max_fan_out bounds direct downstream edges per task.
+  uint32 max_fan_out = 3;
+}
+
+// WorkflowDefinition is the cross-language Clef builder DTO.
+message WorkflowDefinition {
+  // schema_version is the explicit Clef model version.
+  string schema_version = 1;
+  // id is the stable workflow identity.
+  string id = 2;
+  // tasks remain in explicit declaration order.
+  repeated TaskDefinition tasks = 3;
+  // outputs expose selected task outputs.
+  repeated WorkflowOutput outputs = 4;
+  // policy contains complete bounded scheduling settings.
+  WorkflowPolicy policy = 5;
+  // required_capabilities apply to the complete workflow.
+  repeated string required_capabilities = 6;
+}
+
+// CompileWorkflowRequest is an idempotent compile command.
+message CompileWorkflowRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // workflow is the complete versioned definition.
+  WorkflowDefinition workflow = 2;
+  // profile_revision_sha256 binds compilation to immutable profile bytes.
+  bytes profile_revision_sha256 = 3;
+}
+
+// CompileWorkflowResponse returns an immutable plan reference.
+message CompileWorkflowResponse {
+  // workflow_id identifies the compiled workflow.
+  string workflow_id = 1;
+  // plan_digest_sha256 is the canonical plan digest bytes.
+  bytes plan_digest_sha256 = 2;
+}

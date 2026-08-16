@@ -1,0 +1,39 @@
+name = "pelican_ride"
+
+[adapter]
+executable = "opencode"
+model = "zhipuai-coding-plan/glm-5.2"
+agent = "build"
+output_format = "json"
+pure = true
+auto_approve = true
+inherit_environment = false
+required_env = []
+extra_args = []
+
+[runtime]
+max_concurrency = 2
+max_attempts = 2
+retry_backoff_seconds = 0
+fail_fast = false
+max_subagent_depth = 2
+max_fan_out = 12
+session_reuse = "never"
+
+[workspace]
+root = "./.pelican-workspace-placeholder"
+read_roots = []
+
+[storage]
+state_root = "./.pelican-state-placeholder"
+cas_dir = "cas"
+traces_dir = "traces"
+cache_dir = "cache"
+manifests_dir = "manifests"
+cache_enabled = false
+fsync = false
+
+[labels]
+case = "pelican-on-a-bicycle"
+delivery = "single-file-windows-exe"
+stack = "dotnet8-wpf"

@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package agentro.execution.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// RunService controls one bounded workflow run and its resumable event stream.
+service RunService {
+  // StartRun durably accepts one idempotent run request.
+  rpc StartRun(StartRunRequest) returns (Run);
+  // GetRun returns a point-in-time run snapshot.
+  rpc GetRun(GetRunRequest) returns (Run);
+  // WatchRun resumes events strictly after the supplied sequence.
+  rpc WatchRun(WatchRunRequest) returns (stream RunEvent);
+  // CancelRun idempotently requests run cancellation.
+  rpc CancelRun(CancelRunRequest) returns (Run);
+}
+
+// RunState is the externally visible run lifecycle.
+enum RunState {
+  // RUN_STATE_UNSPECIFIED is invalid at a validated boundary.
+  RUN_STATE_UNSPECIFIED = 0;
+  // RUN_STATE_QUEUED means durable admission completed.
+  RUN_STATE_QUEUED = 1;
+  // RUN_STATE_RUNNING means at least one stage is active.
+  RUN_STATE_RUNNING = 2;
+  // RUN_STATE_RECOVERING means reconciliation is in progress.
+  RUN_STATE_RECOVERING = 3;
+  // RUN_STATE_SUCCEEDED is a successful terminal state.
+  RUN_STATE_SUCCEEDED = 4;
+  // RUN_STATE_FAILED is a failed terminal state.
+  RUN_STATE_FAILED = 5;
+  // RUN_STATE_CANCELLED is a cancelled terminal state.
+  RUN_STATE_CANCELLED = 6;
+}
+
+// Run is a bounded point-in-time workflow snapshot.
+message Run {
+  // run_id is an opaque run identifier.
+  string run_id = 1;
+  // workspace_id is the authorized workspace reference.
+  string workspace_id = 2;
+  // state is the current lifecycle state.
+  RunState state = 3;
+  // last_sequence is the latest durable event sequence.
+  uint64 last_sequence = 4;
+  // updated_at is the latest durable update instant.
+  google.protobuf.Timestamp updated_at = 5;
+  // status_detail is a bounded display-only summary when present.
+  optional string status_detail = 6;
+}
+
+// StartRunRequest selects a Studio entry in an authorized workspace.
+message StartRunRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // workspace_id identifies the authorized workspace.
+  string workspace_id = 2;
+  // entry_id identifies the versioned workflow or script entry.
+  string entry_id = 3;
+}
+
+// GetRunRequest identifies one run.
+message GetRunRequest {
+  // run_id is the opaque run identifier.
+  string run_id = 1;
+}
+
+// WatchRunRequest resumes one run-local sequence.
+message WatchRunRequest {
+  // run_id is the opaque run identifier.
+  string run_id = 1;
+  // after_sequence is the last sequence already applied by the client.
+  uint64 after_sequence = 2;
+}
+
+// CancelRunRequest idempotently targets one run.
+message CancelRunRequest {
+  // request_id is the command idempotency key.
+  string request_id = 1;
+  // run_id is the opaque run identifier.
+  string run_id = 2;
+}
+
+// RunStarted is the initial run event.
+message RunStarted {
+  // label is a bounded user-facing run label.
+  string label = 1;
+}
+
+// StageChanged reports one normalized stage transition.
+message StageChanged {
+  // stage_id is the stable stage identifier.
+  string stage_id = 1;
+  // label is the bounded display label.
+  string label = 2;
+  // state is the stable normalized stage state.
+  string state = 3;
+}
+
+// OutputChunk carries one bounded output fragment.
+message OutputChunk {
+  // stream identifies stdout, stderr, or a normalized system stream.
+  string stream = 1;
+  // data contains raw bounded chunk bytes.
+  bytes data = 2;
+  // truncated reports deliberate source-side truncation.
+  bool truncated = 3;
+}
+
+// RunDiagnostic carries one bounded stable diagnostic.
+message RunDiagnostic {
+  // code is a stable machine-readable code.
+  string code = 1;
+  // message is bounded display text.
+  string message = 2;
+}
+
+// RunFinished is the unique terminal event body.
+message RunFinished {
+  // state must be a terminal RunState.
+  RunState state = 1;
+  // summary is bounded display text when present.
+  optional string summary = 2;
+}
+
+// RunEvent is one run-local, monotonically sequenced event.
+message RunEvent {
+  // run_id identifies the owning run.
+  string run_id = 1;
+  // sequence is one-based and contiguous within the run.
+  uint64 sequence = 2;
+  // occurred_at is the normalized UTC event instant.
+  google.protobuf.Timestamp occurred_at = 3;
+  // body contains exactly one normalized event variant.
+  oneof body {
+    // started is the initial event.
+    RunStarted started = 10;
+    // stage_changed reports a stage transition.
+    StageChanged stage_changed = 11;
+    // output carries bounded output bytes.
+    OutputChunk output = 12;
+    // diagnostic carries a stable bounded warning or failure detail.
+    RunDiagnostic diagnostic = 13;
+    // finished is the unique terminal event.
+    RunFinished finished = 14;
+  }
+}

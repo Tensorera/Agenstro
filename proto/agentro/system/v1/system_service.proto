@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package agentro.system.v1;
+
+import "agentro/common/v1/capability.proto";
+import "agentro/common/v1/resource.proto";
+import "google/protobuf/timestamp.proto";
+
+// SystemService exposes only daemon liveness and compatibility metadata.
+service SystemService {
+  // CheckHealth returns a point-in-time lifecycle health report.
+  rpc CheckHealth(CheckHealthRequest) returns (CheckHealthResponse);
+  // GetServerInfo returns version and negotiated capability metadata.
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+}
+
+// Product names the unchanged public distribution associated with a daemon.
+enum Product {
+  // PRODUCT_UNSPECIFIED is invalid at a validated boundary.
+  PRODUCT_UNSPECIFIED = 0;
+  // PRODUCT_CLEF_SDK is the clef-sdk distribution.
+  PRODUCT_CLEF_SDK = 1;
+  // PRODUCT_TACTUS_RUNTIME is the tactus-runtime distribution.
+  PRODUCT_TACTUS_RUNTIME = 2;
+  // PRODUCT_MOTIVO_STUDIO is the motivo-studio distribution.
+  PRODUCT_MOTIVO_STUDIO = 3;
+  // PRODUCT_SEGNO_FLOW is the segno-flow distribution.
+  PRODUCT_SEGNO_FLOW = 4;
+}
+
+// DaemonKind names one independent Rust daemon failure domain.
+enum DaemonKind {
+  // DAEMON_KIND_UNSPECIFIED is invalid at a validated boundary.
+  DAEMON_KIND_UNSPECIFIED = 0;
+  // DAEMON_KIND_AGENTROD owns Clef and agent orchestration.
+  DAEMON_KIND_AGENTROD = 1;
+  // DAEMON_KIND_TACTUSD owns execution and workspace transactions.
+  DAEMON_KIND_TACTUSD = 2;
+  // DAEMON_KIND_SEGNOD owns schedules, occurrences, and dispatch intent.
+  DAEMON_KIND_SEGNOD = 3;
+}
+
+// HealthState is the externally visible subset of daemon lifecycle state.
+enum HealthState {
+  // HEALTH_STATE_UNSPECIFIED is invalid at a validated boundary.
+  HEALTH_STATE_UNSPECIFIED = 0;
+  // HEALTH_STATE_STARTING means the daemon is not accepting work yet.
+  HEALTH_STATE_STARTING = 1;
+  // HEALTH_STATE_SERVING means the daemon may accept authorized work.
+  HEALTH_STATE_SERVING = 2;
+  // HEALTH_STATE_DRAINING means the daemon rejects new long-running work.
+  HEALTH_STATE_DRAINING = 3;
+}
+
+// CheckHealthRequest has no fields in API v1.
+message CheckHealthRequest {}
+
+// CheckHealthResponse wraps the daemon health report.
+message CheckHealthResponse {
+  // health is the validated point-in-time report.
+  HealthReport health = 1;
+}
+
+// HealthReport reports lifecycle state at a specific UTC instant.
+message HealthReport {
+  // state is the current externally visible lifecycle state.
+  HealthState state = 1;
+  // checked_at is the UTC instant at which state was sampled.
+  google.protobuf.Timestamp checked_at = 2;
+}
+
+// GetServerInfoRequest has no fields in API v1.
+message GetServerInfoRequest {}
+
+// GetServerInfoResponse wraps one daemon's compatibility metadata.
+message GetServerInfoResponse {
+  // server_info is the validated metadata for the responding instance.
+  ServerInfo server_info = 1;
+}
+
+// ServerInfo is the transport DTO used during bootstrap compatibility checks.
+message ServerInfo {
+  // product is the unchanged public distribution name.
+  Product product = 1;
+  // daemon identifies the independent process failure domain.
+  DaemonKind daemon = 2;
+  // release_version is the product release version.
+  string release_version = 3;
+  // api_versions is the compatible API v1 minor range.
+  agentro.common.v1.ApiVersionRange api_versions = 4;
+  // build_commit is present when source provenance is available.
+  optional string build_commit = 5;
+  // target_triple identifies the compiled Rust target.
+  string target_triple = 6;
+  // protocol_descriptor is the fingerprint of the published descriptor set.
+  agentro.common.v1.Digest protocol_descriptor = 7;
+  // capabilities contains at most 128 unique, sorted capability names.
+  repeated agentro.common.v1.Capability capabilities = 8;
+  // instance_id is an opaque UUIDv7 rotated on every daemon launch.
+  string instance_id = 9;
+  // started_at is the UTC instant at which this instance started.
+  google.protobuf.Timestamp started_at = 10;
+}
