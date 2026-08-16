@@ -544,15 +544,37 @@ const fn send_graceful(_child: &GroupChild) -> Result<(), ProcessError> {
 
 fn ignore_gone(result: Result<(), ProcessError>) -> Result<(), ProcessError> {
     match result {
-        Err(ProcessError::Terminate(error))
-            if matches!(
-                error.kind(),
-                io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
-            ) =>
-        {
-            Ok(())
-        }
+        Err(ProcessError::Terminate(error)) if process_is_already_absent(&error) => Ok(()),
         other => other,
+    }
+}
+
+fn process_is_already_absent(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
+    ) {
+        return true;
+    }
+
+    // Rust 1.88 classifies Linux ESRCH as Uncategorized. A process-group
+    // termination racing with normal leader exit is still successful cleanup.
+    #[cfg(target_os = "linux")]
+    if error.raw_os_error() == Some(3) {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::process_is_already_absent;
+    use std::io;
+
+    #[test]
+    fn esrch_is_an_idempotent_termination_result() {
+        assert!(process_is_already_absent(&io::Error::from_raw_os_error(3)));
     }
 }
 
