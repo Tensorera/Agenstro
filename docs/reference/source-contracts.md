@@ -33,9 +33,9 @@ this alpha. Configuration is currently constructor-level:
 
 | Owner | Source |
 | --- | --- |
-| Tactus admission, output, source, lease and shutdown bounds | [`tactus-runtime/rust/tactus-core/src/daemon.rs`](https://github.com/Tensorera/agenstro/blob/main/tactus-runtime/rust/tactus-core/src/daemon.rs) |
-| Tactus scan, path, object, manifest and restore bounds | [`tactus-runtime/rust/tactus-core/src/checkpoint.rs`](https://github.com/Tensorera/agenstro/blob/main/tactus-runtime/rust/tactus-core/src/checkpoint.rs) |
-| Tactus worker framing and output chunks | [`tactus-runtime/rust/tactus-core/src/worker.rs`](https://github.com/Tensorera/agenstro/blob/main/tactus-runtime/rust/tactus-core/src/worker.rs) |
+| Historical Tactus admission, output, source, lease and shutdown bounds | [`daemon.rs` at the final Rust snapshot](https://github.com/Tensorera/agenstro/blob/c679f45b995228b675ef2f1221a16a9026604085/tactus-runtime/rust/tactus-core/src/daemon.rs) |
+| Historical Tactus scan, path, object, manifest and restore bounds | [`checkpoint.rs` at the final Rust snapshot](https://github.com/Tensorera/agenstro/blob/c679f45b995228b675ef2f1221a16a9026604085/tactus-runtime/rust/tactus-core/src/checkpoint.rs) |
+| Historical Tactus worker framing and output chunks | [`worker.rs` at the final Rust snapshot](https://github.com/Tensorera/agenstro/blob/c679f45b995228b675ef2f1221a16a9026604085/tactus-runtime/rust/tactus-core/src/worker.rs) |
 | Segno dispatch, lease, tick and misfire bounds | [`segno-flow/rust/segnod/src/service.rs`](https://github.com/Tensorera/agenstro/blob/main/segno-flow/rust/segnod/src/service.rs) |
 | Segno package authoring budgets | [`segno-flow/src/segno_flow/package.py`](https://github.com/Tensorera/agenstro/blob/main/segno-flow/src/segno_flow/package.py) |
 | Electron bootstrap timeout/frame/token rules | [`motivo-studio/src/main/daemon/bootstrap.ts`](https://github.com/Tensorera/agenstro/blob/main/motivo-studio/src/main/daemon/bootstrap.ts) |
@@ -49,7 +49,7 @@ at the shared Rust boundary. Display messages are not automation contracts.
 | --- | --- |
 | Shared Rust error grammar | [`crates/agentro-contracts/src/error.rs`](https://github.com/Tensorera/agenstro/blob/main/crates/agentro-contracts/src/error.rs) |
 | Clef RPC-to-exception mapping | [`archive/clef-sdk-python-0.2/src/clef_sdk/errors.py`](https://github.com/Tensorera/agenstro/blob/main/archive/clef-sdk-python-0.2/src/clef_sdk/errors.py) |
-| Tactus Rust application failures | [`tactus-runtime/rust/tactus-core/src/daemon.rs`](https://github.com/Tensorera/agenstro/blob/main/tactus-runtime/rust/tactus-core/src/daemon.rs) |
+| Historical Tactus Rust application failures | [`daemon.rs` at the final Rust snapshot](https://github.com/Tensorera/agenstro/blob/c679f45b995228b675ef2f1221a16a9026604085/tactus-runtime/rust/tactus-core/src/daemon.rs) |
 | Segno Python RPC mapping | [`segno-flow/src/segno_flow/client.py`](https://github.com/Tensorera/agenstro/blob/main/segno-flow/src/segno_flow/client.py) |
 | Motivo sanitized renderer errors | [`motivo-studio/src/main/errors.ts`](https://github.com/Tensorera/agenstro/blob/main/motivo-studio/src/main/errors.ts) |
 

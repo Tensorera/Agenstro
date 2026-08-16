@@ -15,8 +15,9 @@ markdown_extensions:
   - toc:
       permalink: true
 
-# The 0.2 Rust/Python, Motivo, and Segno pages remain in Git as legacy evidence.
-# Only the Haskell-first 0.3 release surface is published in this site.
+# Historical 0.2 architecture pages remain in Git; some describe the removed
+# Clef/Tactus Rust product cores. Only the Haskell-first 0.3 release surface is
+# published in this site. Motivo and Segno source remains frozen.
 exclude_docs: |
   adr/0001-versioned-rust-foundation.md
   adr/0002-daemon-state-and-electron-boundaries.md

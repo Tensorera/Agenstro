@@ -9,6 +9,9 @@ platforms: [windows, ubuntu]
 
 # Runtime Boundaries
 
+> Superseded 0.2 architecture for checkout `c679f45`. Motivo and Segno remain
+> in the current tree, but the described Clef/Tactus Rust daemons do not.
+
 The greenfield contract separates orchestration, execution, scheduling, and UI
 ownership. A shared database or a renderer-owned credential would collapse
 failure and security boundaries.

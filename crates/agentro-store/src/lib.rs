@@ -11,12 +11,9 @@
 mod actor;
 mod migration;
 mod repository;
-pub mod tactus;
 
 pub use actor::{
     JournalMode, MAX_BUSY_TIMEOUT, MAX_QUEUE_CAPACITY, StoreActor, StoreConfig, StoreError,
     StoreHandle,
 };
-pub use migration::{
-    MAX_MIGRATION_SQL_BYTES, MAX_MIGRATIONS, Migration, MigrationDefinitionError, MigrationProfile,
-};
+pub use migration::{MAX_MIGRATION_SQL_BYTES, MAX_MIGRATIONS, Migration, MigrationDefinitionError};

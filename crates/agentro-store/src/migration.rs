@@ -15,56 +15,10 @@ const AGENTRO_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
             checksum TEXT NOT NULL,
             applied_at INTEGER NOT NULL
         );";
-const TACTUS_V1_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY CHECK (version > 0),
-            name TEXT NOT NULL UNIQUE,
-            checksum TEXT NOT NULL
-        );";
 const AGENTRO_INSERT_SQL: &str =
     "INSERT INTO schema_migrations (version, name, checksum, applied_at)
              VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER))";
-const TACTUS_V1_INSERT_SQL: &str =
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (?1, ?2, ?3)";
 const AGENTRO_CHECKSUM_DOMAIN: &[u8] = b"agentro.sqlite.migration.v1\0";
-const TACTUS_V1_CHECKSUM_DOMAIN: &[u8] = b"tactus.sqlite.migration.v1\0";
-
-/// Closed migration-ledger and checksum compatibility behavior.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum MigrationProfile {
-    /// The default Agentro four-column ledger and checksum domain.
-    #[default]
-    AgentroV1,
-    /// The legacy Tactus three-column ledger and checksum domain.
-    ///
-    /// This profile does not alter an existing ledger or synthesize an
-    /// `applied_at` column. Its sole purpose is opening and extending databases
-    /// created by the original Tactus v1 migration algorithm.
-    TactusV1Compatibility,
-}
-
-impl MigrationProfile {
-    fn ledger_sql(self) -> &'static str {
-        match self {
-            Self::AgentroV1 => AGENTRO_LEDGER_SQL,
-            Self::TactusV1Compatibility => TACTUS_V1_LEDGER_SQL,
-        }
-    }
-
-    fn insert_sql(self) -> &'static str {
-        match self {
-            Self::AgentroV1 => AGENTRO_INSERT_SQL,
-            Self::TactusV1Compatibility => TACTUS_V1_INSERT_SQL,
-        }
-    }
-
-    fn checksum_domain(self) -> &'static [u8] {
-        match self {
-            Self::AgentroV1 => AGENTRO_CHECKSUM_DOMAIN,
-            Self::TactusV1Compatibility => TACTUS_V1_CHECKSUM_DOMAIN,
-        }
-    }
-}
 
 /// Invalid immutable migration definition.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -158,9 +112,8 @@ pub(crate) fn validate_plan(migrations: &[Migration]) -> Result<(), StoreError> 
 pub(crate) fn initialize_and_apply(
     connection: &mut Connection,
     migrations: &[Migration],
-    profile: MigrationProfile,
 ) -> Result<(), StoreError> {
-    connection.execute_batch(profile.ledger_sql())?;
+    connection.execute_batch(AGENTRO_LEDGER_SQL)?;
     let (row_count, database_version): (u32, u32) = connection.query_row(
         "SELECT COUNT(version), COALESCE(MAX(version), 0) FROM schema_migrations",
         [],
@@ -195,7 +148,7 @@ pub(crate) fn initialize_and_apply(
                 version: migration.version(),
             });
         }
-        if checksum != migration_checksum(*migration, profile) {
+        if checksum != migration_checksum(*migration) {
             return Err(StoreError::MigrationChecksumMismatch {
                 version: migration.version(),
             });
@@ -206,11 +159,11 @@ pub(crate) fn initialize_and_apply(
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(migration.sql())?;
         transaction.execute(
-            profile.insert_sql(),
+            AGENTRO_INSERT_SQL,
             params![
                 migration.version(),
                 migration.name(),
-                migration_checksum(*migration, profile)
+                migration_checksum(*migration)
             ],
         )?;
         transaction.commit()?;
@@ -228,9 +181,9 @@ pub(crate) fn schema_version(connection: &Connection) -> Result<u32, StoreError>
         .map_err(StoreError::from)
 }
 
-fn migration_checksum(migration: Migration, profile: MigrationProfile) -> String {
+fn migration_checksum(migration: Migration) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(profile.checksum_domain());
+    hasher.update(AGENTRO_CHECKSUM_DOMAIN);
     hasher.update(migration.version().to_be_bytes());
     hasher.update(migration.name().as_bytes());
     hasher.update([0]);

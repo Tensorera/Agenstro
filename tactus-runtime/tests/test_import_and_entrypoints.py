@@ -127,7 +127,7 @@ def test_editable_source_does_not_expose_frozen_worker_or_studio_modules() -> No
     }
     assert set(
         configuration["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
-    ) == {"/rewrite-report/**", "/runtime-check/**", "/rust/**"}
+    ) == {"/rewrite-report/**", "/runtime-check/**"}
     assert "jupyter" not in configuration["project"]["optional-dependencies"]
 
 

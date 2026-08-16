@@ -9,6 +9,9 @@ platforms: [windows, ubuntu]
 
 # Known Limitations
 
+> Historical 0.2 record for checkout `c679f45`. It does not describe the
+> current Haskell Clef and Python Tactus implementation.
+
 These limitations are part of the `0.2.0` acceptance boundary.
 
 ## No Shipped Daemon Network

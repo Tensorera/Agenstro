@@ -1,4 +1,4 @@
-name: Legacy Rust 0.2 foundation
+name: Retained Rust foundation and Segno
 
 on:
   pull_request:
@@ -7,26 +7,22 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "buf.yaml"
-      - "clef-sdk/rust/**"
       - "crates/**"
       - "fixtures/**"
       - "proto/**"
       - "rust-toolchain.toml"
       - "segno-flow/rust/**"
-      - "tactus-runtime/rust/**"
   push:
     paths:
       - ".github/workflows/rust-foundation.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "buf.yaml"
-      - "clef-sdk/rust/**"
       - "crates/**"
       - "fixtures/**"
       - "proto/**"
       - "rust-toolchain.toml"
       - "segno-flow/rust/**"
-      - "tactus-runtime/rust/**"
 
 permissions:
   contents: read
@@ -54,10 +50,8 @@ jobs:
         run: cargo +stable test --workspace --all-features --locked
       - name: Build documentation
         run: cargo +stable doc --workspace --all-features --no-deps --locked --document-private-items
-      # The Python identity/fixture scripts belonged to the superseded 0.2
-      # Clef/Tactus packages. Rust contract and cross-language fixture behavior
-      # remain covered by the workspace's native tests; the Haskell/Tactus 0.3
-      # release surface has its own workflow.
+      # Clef and Tactus have their own Haskell/Python workflow. This job covers
+      # only the retained shared Rust crates and Segno implementation.
 
   msrv:
     name: Rust 1.88 MSRV

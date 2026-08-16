@@ -1,4 +1,4 @@
-"""Regression tests for the Rust workspace dependency boundary gate."""
+"""Regression tests for the retained Rust workspace boundary gate."""
 
 from __future__ import annotations
 
@@ -21,22 +21,18 @@ def dependency(package_id: str) -> dict[str, Any]:
 
 def metadata(
     *,
-    clef_dependencies: tuple[str, ...],
+    segno_dependencies: tuple[str, ...],
     extra_edges: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Build the minimal Cargo metadata shape consumed by the gate."""
     edges = {
         **{package: () for package in REQUIRED_WORKSPACE_PACKAGES},
         "agentro-store": ("rusqlite",),
-        "clef-core": clef_dependencies,
-        "segno-core": ("agentro-contracts",),
-        "tactus-core": ("agentro-contracts", "agentro-store"),
+        "segno-core": segno_dependencies,
         **(extra_edges or {}),
     }
     package_names = set(edges)
-    package_names.update(
-        item for dependencies in edges.values() for item in dependencies
-    )
+    package_names.update(item for values in edges.values() for item in values)
     return {
         "packages": [
             {"id": package_name, "name": package_name}
@@ -56,104 +52,47 @@ def metadata(
 
 
 class CrateDirectionTests(unittest.TestCase):
-    """Exercise the product-core dependency invariants."""
+    """Exercise the retained Segno domain dependency invariants."""
 
-    def test_product_core_may_add_another_pure_domain_dependency(self) -> None:
+    def test_segno_core_may_add_another_pure_domain_dependency(self) -> None:
         graph = metadata(
-            clef_dependencies=("agentro-contracts", "workflow-model"),
-            extra_edges={"workflow-model": ()},
+            segno_dependencies=("agentro-contracts", "schedule-model"),
+            extra_edges={"schedule-model": ()},
         )
 
         check_crate_direction(graph)
 
-    def test_product_core_must_still_depend_on_agentro_contracts(self) -> None:
+    def test_segno_core_must_depend_on_agentro_contracts(self) -> None:
         graph = metadata(
-            clef_dependencies=("workflow-model",),
-            extra_edges={"workflow-model": ()},
+            segno_dependencies=("schedule-model",),
+            extra_edges={"schedule-model": ()},
         )
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "clef-core must depend directly on agentro-contracts",
+            "segno-core must depend directly on agentro-contracts",
         ):
             check_crate_direction(graph)
 
     def test_transitive_transport_dependency_remains_forbidden(self) -> None:
         graph = metadata(
-            clef_dependencies=("agentro-contracts", "workflow-model"),
-            extra_edges={"workflow-model": ("tonic",), "tonic": ()},
+            segno_dependencies=("agentro-contracts", "schedule-model"),
+            extra_edges={"schedule-model": ("tonic",), "tonic": ()},
         )
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "clef-core reaches forbidden domain dependencies: \\['tonic'\\]",
-        ):
-            check_crate_direction(graph)
-
-    def test_tactus_application_must_depend_directly_on_agentro_store(self) -> None:
-        graph = metadata(
-            clef_dependencies=("agentro-contracts",),
-            extra_edges={"tactus-core": ("agentro-contracts",)},
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "tactus-core must depend directly on agentro-store",
-        ):
-            check_crate_direction(graph)
-
-    def test_tactus_application_must_not_depend_directly_on_rusqlite(self) -> None:
-        graph = metadata(
-            clef_dependencies=("agentro-contracts",),
-            extra_edges={
-                "tactus-core": ("agentro-contracts", "agentro-store", "rusqlite"),
-                "rusqlite": (),
-            },
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "tactus-core must not depend directly on rusqlite",
+            "segno-core reaches forbidden domain dependencies: \\['tonic'\\]",
         ):
             check_crate_direction(graph)
 
     def test_segnod_may_keep_its_private_rusqlite_dependency(self) -> None:
         graph = metadata(
-            clef_dependencies=("agentro-contracts",),
+            segno_dependencies=("agentro-contracts",),
             extra_edges={"segnod": ("rusqlite",), "rusqlite": ()},
         )
 
         check_crate_direction(graph)
-
-
-class TactusSourceBoundaryTests(unittest.TestCase):
-    """Keep SQL ownership out of the Tactus application crate."""
-
-    def test_tactus_source_rejects_sql_statements(self) -> None:
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "tactus-runtime" / "rust" / "tactus-core" / "src"
-            source.mkdir(parents=True)
-            (source / "adapter.rs").write_text(
-                'const QUERY: &str = "SELECT run_id FROM runs";\n',
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(RuntimeError, "must not contain SQL"):
-                boundaries.check_tactus_storage_source(root)
-
-    def test_tactus_source_allows_filesystem_and_process_code(self) -> None:
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "tactus-runtime" / "rust" / "tactus-core" / "src"
-            source.mkdir(parents=True)
-            (source / "process.rs").write_text(
-                'const MESSAGE: &str = "update failed";\n'
-                "fn supervise_workspace_process() {}\n",
-                encoding="utf-8",
-            )
-
-            boundaries.check_tactus_storage_source(root)
 
 
 class AgentroStoreSourceBoundaryTests(unittest.TestCase):
@@ -163,12 +102,12 @@ class AgentroStoreSourceBoundaryTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "crates" / "agentro-store" / "src"
-            (source / "tactus").mkdir(parents=True)
+            source.mkdir(parents=True)
             (source / "actor.rs").write_text(
                 'const QUERY: &str = "SELECT run_id FROM runs";\n',
                 encoding="utf-8",
             )
-            (source / "tactus" / "model.rs").write_text("", encoding="utf-8")
+            (source / "model.rs").write_text("", encoding="utf-8")
 
             with self.assertRaisesRegex(
                 RuntimeError, "SQL outside repository/migration"
@@ -179,12 +118,12 @@ class AgentroStoreSourceBoundaryTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "crates" / "agentro-store" / "src"
-            (source / "tactus").mkdir(parents=True)
+            source.mkdir(parents=True)
             (source / "repository.rs").write_text(
                 'const QUERY: &str = "SELECT version FROM schema_migrations";\n',
                 encoding="utf-8",
             )
-            (source / "tactus" / "migration.rs").write_text(
+            (source / "migration.rs").write_text(
                 'const SCHEMA: &str = "CREATE TABLE runs (id TEXT)";\n',
                 encoding="utf-8",
             )

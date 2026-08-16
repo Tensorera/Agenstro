@@ -25,7 +25,7 @@ signed distribution or a successful live provider call.
 | `tactus smoke` | Offline unless `--live` | Version probe only | Version probe only | The default request sets `live=false`; CI uses fakes and never performs an authenticated model request |
 | Motivo Studio | Frozen | Not gated | Not gated | Still present in the source tree; no `0.3` support or packaging claim |
 | Segno Flow | Frozen | Not gated | Not gated | Still present in the source tree; scheduling and replay are outside the `0.3` release |
-| Clef/Tactus Rust and Python `0.2` paths | Legacy evidence | Not gated | Not gated | Removed Python surfaces are isolated under `archive/`; the old Rust workflow is not the current release gate |
+| Clef/Tactus Python `0.2` archives | Legacy evidence | Not gated | Not gated | Removed Python surfaces are isolated under `archive/`; the Rust product cores were removed after snapshot `c679f45` |
 
 ## Trust and capability boundaries
 
@@ -42,7 +42,7 @@ signed distribution or a successful live provider call.
 ## Version combination
 
 The supported source combination is Clef `0.3.0.0` with Tactus `0.3.0`. There
-is no compatibility claim for mixing this path with the `0.2` daemons,
-workers, checkpoint stores, Motivo runtime, or Segno scheduler. Use the
+is no compatibility claim for mixing this path with archived `0.2` workers,
+Motivo runtime, or Segno scheduler. Use the
 [migration guide](../migrations/0.2-to-haskell-0.3.md) for a side-by-side
 cutover and rollback plan.

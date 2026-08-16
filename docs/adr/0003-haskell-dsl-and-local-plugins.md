@@ -121,12 +121,10 @@ arbitrary Haskell `IO` is not generally replayable.
 
 ## Migration
 
-The new Haskell package and Tactus path become authoritative only after the
-Haskell compile, unit, plugin-contract, and end-to-end example gates pass.
-The 0.2 Rust/Python implementation remains temporarily as migration evidence;
-it must not gain new features. After the new gate is green, old Clef daemons,
-Tactus workers/checkpoints, and Segno scheduling members can be removed from
-the default workspace in a mechanical follow-up.
+The Haskell package and Python Tactus path are authoritative. The old
+Clef/Tactus Rust product cores were removed after snapshot `c679f45`; Python
+archives remain migration evidence and must not gain new features. Motivo and
+Segno remain frozen until their future roles are redesigned explicitly.
 
 ## Consequences
 

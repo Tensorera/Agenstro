@@ -12,7 +12,7 @@ use std::{
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::{Migration, MigrationProfile, migration, repository};
+use crate::{Migration, migration, repository};
 
 /// Hard maximum number of queued database operations.
 pub const MAX_QUEUE_CAPACITY: usize = 4_096;
@@ -283,31 +283,6 @@ impl StoreActor {
         migrations: Vec<Migration>,
         startup_timeout: Duration,
     ) -> Result<Self, StoreError> {
-        Self::start_with_migration_profile(
-            path,
-            config,
-            migrations,
-            MigrationProfile::default(),
-            startup_timeout,
-        )
-    }
-
-    /// Opens, checks, and migrates a database with an explicit compatibility profile.
-    ///
-    /// Prefer [`StoreActor::start`] for the default Agentro v1 ledger. The
-    /// explicit profile constructor exists only for persisted formats whose
-    /// ledger and checksum domain are already compatibility contracts.
-    ///
-    /// # Errors
-    ///
-    /// Returns typed path, startup, SQLite, migration, or thread errors.
-    pub fn start_with_migration_profile(
-        path: PathBuf,
-        config: StoreConfig,
-        migrations: Vec<Migration>,
-        migration_profile: MigrationProfile,
-        startup_timeout: Duration,
-    ) -> Result<Self, StoreError> {
         if !path.is_absolute() {
             return Err(StoreError::DatabasePathNotAbsolute);
         }
@@ -331,7 +306,6 @@ impl StoreActor {
                     path,
                     config,
                     migrations,
-                    migration_profile,
                     receiver,
                     thread_shared,
                     startup_sender,
@@ -454,25 +428,19 @@ fn actor_main(
     path: PathBuf,
     config: StoreConfig,
     migrations: Vec<Migration>,
-    migration_profile: MigrationProfile,
     receiver: Receiver<Command>,
     shared: Arc<Shared>,
     startup_sender: SyncSender<Result<rusqlite::InterruptHandle, StoreError>>,
 ) {
-    let mut connection = match repository::open(
-        &path,
-        config.busy_timeout,
-        config.journal_mode,
-        &migrations,
-        migration_profile,
-    ) {
-        Ok(connection) => connection,
-        Err(error) => {
-            shared.accepting.store(false, Ordering::Release);
-            let _ = startup_sender.send(Err(error));
-            return;
-        }
-    };
+    let mut connection =
+        match repository::open(&path, config.busy_timeout, config.journal_mode, &migrations) {
+            Ok(connection) => connection,
+            Err(error) => {
+                shared.accepting.store(false, Ordering::Release);
+                let _ = startup_sender.send(Err(error));
+                return;
+            }
+        };
     let interrupt = connection.get_interrupt_handle();
     if startup_sender.send(Ok(interrupt)).is_err() {
         shared.accepting.store(false, Ordering::Release);

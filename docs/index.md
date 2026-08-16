@@ -56,6 +56,7 @@ explicit deny or managed configuration.
 | Understand the Haskell and trusted-plugin decision | [ADR-0003](adr/0003-haskell-dsl-and-local-plugins.md) |
 | Move a `0.2` workspace to the new path | [0.2 to Haskell 0.3 migration](migrations/0.2-to-haskell-0.3.md) |
 
-Motivo Studio and Segno Flow are frozen for this release. The old `0.2`
-Rust/Python code and documentation remain in Git as legacy evidence while the
-cutover is completed; they are not current release claims or gates.
+Motivo Studio and Segno Flow are frozen for this release. The Clef/Tactus Rust
+product cores have been removed from the current tree and remain available at
+Git commit `c679f45`; Python archives, the shared foundation, and historical
+documentation remain as legacy evidence outside current release claims.

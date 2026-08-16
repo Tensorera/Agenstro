@@ -9,6 +9,9 @@ platforms: [windows, ubuntu]
 
 # Operate the Source Alpha
 
+> Historical 0.2 guide. Its package counts and `agentrod` commands apply only
+> to checkout `c679f45`, before the Clef/Tactus Rust product cores were removed.
+
 This guide covers offline doctor checks and conservative source upgrade,
 rollback, and uninstall. The `0.2.0` alpha has no installed `doctor`, updater,
 backup, rollback, or uninstall command. The procedures below use implemented

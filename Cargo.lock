@@ -70,22 +70,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentrod"
-version = "0.2.0"
-dependencies = [
- "agentro-contracts",
- "agentro-proto",
- "clef-agent",
- "clef-core",
- "prost",
- "segno-core",
- "serde",
- "serde_json",
- "tactus-core",
- "tempfile",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -310,21 +294,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "clef-agent"
-version = "0.2.0"
-dependencies = [
- "agentro-contracts",
- "clef-core",
-]
-
-[[package]]
-name = "clef-core"
-version = "0.2.0"
-dependencies = [
- "agentro-contracts",
-]
 
 [[package]]
 name = "colorchoice"
@@ -1492,21 +1461,6 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
-
-[[package]]
-name = "tactus-core"
-version = "0.2.0"
-dependencies = [
- "agentro-contracts",
- "agentro-store",
- "command-group",
- "ignore",
- "proptest",
- "sha2",
- "tempfile",
- "thiserror",
- "uuid",
-]
 
 [[package]]
 name = "tempfile"

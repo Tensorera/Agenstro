@@ -41,7 +41,6 @@ packages = ["src/tactus_runtime"]
 exclude = [
   "/rewrite-report/**",
   "/runtime-check/**",
-  "/rust/**",
 ]
 
 [tool.hatch.version]

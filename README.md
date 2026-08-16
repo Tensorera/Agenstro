@@ -6,9 +6,10 @@ Haskell programs, GHC checks the typed connections between workflow steps, and
 replaceable local plugins perform provider calls and observable effects.
 
 The current release line is `0.3` and is an alpha. The supported path is the
-Clef Haskell EDSL plus the Tactus Python CLI. The older Rust/Python runtime,
-Motivo Studio, and Segno Flow remain in this private repository as migration
-material; they are not part of the `0.3` release gate.
+Clef Haskell EDSL plus the Tactus Python CLI. The superseded Clef/Tactus Rust
+product cores have been removed from the current tree; Motivo Studio, Segno
+Flow, the shared Rust/Protobuf foundation, and Python archives remain as
+migration material outside the `0.3` release gate.
 
 | Surface | Version | Role in `0.3` |
 | --- | --- | --- |

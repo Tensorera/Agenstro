@@ -215,14 +215,17 @@ should assume exists elsewhere.
 
 ## Frozen 0.2 surfaces
 
-The repository retains old Rust/Python daemon, worker, scheduler, Electron, and
-documentation trees for migration and design evidence. For 0.3:
+The Clef/Tactus Rust product cores were removed after the `c679f45` snapshot.
+Python archives, the shared foundation, scheduler, Electron, and historical
+documentation remain for migration and design evidence. For 0.3:
 
 - Motivo Studio is frozen and is not a supported GUI for Haskell workflows;
 - Segno Flow is frozen and makes no replay guarantee for arbitrary Haskell `IO`
   or live provider calls;
 - the Clef Python builder and Tactus worker/Jupyter sources under `archive/`
-  are not installed artifacts; and
+  are not installed artifacts;
+- the old Clef/Tactus Rust implementations are available only through Git
+  history; and
 - checkpoint, CAS, artifact publication, database, daemon, and rollback claims
   from 0.2 do not carry into 0.3.
 

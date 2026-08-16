@@ -1,6 +1,6 @@
 # ADR-0001: Versioned Rust Foundation
 
-- Status: Accepted
+- Status: Superseded by ADR-0003; Clef/Tactus Rust members removed after `c679f45`
 - Date: 2026-08-01
 - Scope: M0/M1 foundation only
 
@@ -8,6 +8,9 @@ This ADR records the foundation decision at M0/M1. The current `0.2.0` source
 has since added product composition and cross-language DTO tests. See
 [ADR-0002](0002-daemon-state-and-electron-boundaries.md) for the current daemon,
 database, external CAS, Python worker, and Electron ownership decision.
+
+The decision text below is historical. Paths to the removed Clef/Tactus Rust
+product cores refer to snapshot `c679f45`, not the current checkout.
 
 ## Context
 

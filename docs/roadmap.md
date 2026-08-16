@@ -36,8 +36,9 @@ The current release candidate is the combination of Clef `0.3.0.0` and Tactus
 - `workspace.paths` provides observational path-difference evidence;
 - Windows and Ubuntu are configured as required Haskell/Tactus source jobs;
 - CI provider coverage uses fakes and makes no authenticated model request; and
-- Motivo Studio, Segno Flow, and the previous Rust/Python runtime paths are
-  excluded from the gate.
+- the Clef/Tactus Rust product cores have been removed, while Motivo Studio,
+  Segno Flow, the shared foundation, and Python archives remain excluded from
+  the gate.
 
 The source gate is complete only when build, unit, protocol, static-analysis,
 and end-to-end Tactus-to-GHC jobs pass on the declared matrix. A successful

@@ -9,6 +9,9 @@ platforms: [windows]
 
 # Run the Alpha Contract Smoke
 
+> Historical 0.2 guide. It requires checkout `c679f45`; the current tree no
+> longer contains the `agentrod` or `tactus-core` Rust packages.
+
 This tutorial reproduces the implemented offline path for `clef-sdk`,
 `tactus-runtime`, `motivo-studio`, and `segno-flow`. It does not start a daemon
 listener or contact a provider.

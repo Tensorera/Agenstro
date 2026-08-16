@@ -9,6 +9,9 @@ platforms: [windows, ubuntu]
 
 # Install the Source Alpha
 
+> Historical 0.2 guide. Run these commands only from checkout `c679f45`; the
+> current Haskell/Tactus installation is documented in `docs/getting-started.md`.
+
 ## Final State
 
 You will have repository-local Python environments and Node dependencies able

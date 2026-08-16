@@ -1,6 +1,9 @@
 # ADR 0002: Daemon State and Electron Boundaries
 
-Status: Accepted for the greenfield architecture; partially implemented
+Status: Superseded for Clef/Tactus by ADR-0003; Motivo/Segno design retained
+
+The Clef/Tactus Rust daemons described here exist only in snapshot `c679f45`.
+Motivo and Segno source remains in the current tree pending redesign.
 
 Date: 2026-08-01
 

@@ -7,8 +7,9 @@ output`. Runtime provider and effect availability stays dynamic.
 
 The Haskell implementation under `haskell/` is authoritative for new
 development. The Python `0.2` package has moved to
-`../archive/clef-sdk-python-0.2/`; the Rust `0.2` tree remains frozen migration
-evidence. Neither is a dependency or release artifact of the Haskell package.
+`../archive/clef-sdk-python-0.2/`; the Rust `0.2` product core was removed from
+the current tree and remains available in Git history at `c679f45`. Neither is
+a dependency or release artifact of the Haskell package.
 
 ## Build and test
 

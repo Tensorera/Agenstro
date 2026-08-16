@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::{
     actor::{JournalMode, StoreError},
-    migration::{self, Migration, MigrationProfile},
+    migration::{self, Migration},
 };
 
 pub(crate) fn open(
@@ -12,7 +12,6 @@ pub(crate) fn open(
     busy_timeout: Duration,
     journal_mode: JournalMode,
     migrations: &[Migration],
-    profile: MigrationProfile,
 ) -> Result<Connection, StoreError> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(busy_timeout)?;
@@ -57,7 +56,7 @@ pub(crate) fn open(
     }
 
     quick_check(&connection)?;
-    migration::initialize_and_apply(&mut connection, migrations, profile)?;
+    migration::initialize_and_apply(&mut connection, migrations)?;
     quick_check(&connection)?;
     Ok(connection)
 }
