@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 from .errors import ToolError, WorkspaceError
 from .workspace import (
@@ -18,6 +21,15 @@ from .workspace import (
 
 ToolLocator = Callable[[str], str | None]
 CommandExecutor = Callable[..., subprocess.CompletedProcess[object]]
+
+
+class _WindowsRegistry(Protocol):
+    """Typed subset of ``winreg`` loaded only on Windows hosts."""
+
+    HKEY_CURRENT_USER: int
+    HKEY_LOCAL_MACHINE: int
+    OpenKey: Callable[[int, str], AbstractContextManager[object]]
+    QueryValueEx: Callable[[object, str], tuple[object, int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,21 +187,21 @@ def effective_path() -> str:
 
 def _windows_paths() -> tuple[str, ...]:
     try:
-        import winreg
-    except ImportError:
+        registry = cast(_WindowsRegistry, importlib.import_module("winreg"))
+    except ModuleNotFoundError:
         return ()
-    locations = (
-        (winreg.HKEY_CURRENT_USER, r"Environment"),
+    locations: tuple[tuple[int, str], ...] = (
+        (registry.HKEY_CURRENT_USER, r"Environment"),
         (
-            winreg.HKEY_LOCAL_MACHINE,
+            registry.HKEY_LOCAL_MACHINE,
             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
         ),
     )
     values: list[str] = []
     for hive, key_name in locations:
         try:
-            with winreg.OpenKey(hive, key_name) as key:
-                value, _ = winreg.QueryValueEx(key, "Path")
+            with registry.OpenKey(hive, key_name) as key:
+                value, _value_type = registry.QueryValueEx(key, "Path")
         except OSError:
             continue
         if isinstance(value, str):
