@@ -386,7 +386,7 @@ docs/                   current docs and selected migration material
 motivo-studio/          current TypeScript/React Tactus visualizer
 segno-flow/             current Haskell persistent-task driver and plugins
 skills/                 bundled agent guidance for working with Tactus
-Test/                   repository-level cases, fixtures, and contract checks
+Test/                   repository-level fixtures and contract checks
 Build/                  ignored build output, recreated by project tools
 ```
 

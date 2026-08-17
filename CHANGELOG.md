@@ -33,9 +33,9 @@ they do not imply a public package release or compatibility guarantee.
   `agenstro.plugin/v1` one-shot JSONL boundary.
 - Long Segno task phases have a typed `--task-timeout-seconds` budget, and the
   Running lease is derived so it cannot expire before that budget.
-- Repository-level cases, fixtures, and publication checks now live under
-  `Test/`; Cargo, Cabal, MkDocs, and Electron Forge place rebuildable output
-  below ignored `Build/`.
+- Repository-level fixtures and publication checks now live under `Test/`;
+  Cargo, Cabal, MkDocs, and Electron Forge place rebuildable output below
+  ignored `Build/`.
 
 ### Removed
 
@@ -47,6 +47,8 @@ they do not imply a public package release or compatibility guarantee.
   runtime.
 - Frozen source archives and the unused 0.2 foundation crates/Protobuf tree;
   their history remains available in Git.
+- Historical Python Clef case studies that no longer run against the current
+  Haskell SDK; their complete sources remain available in Git history.
 
 ### Compatibility and limitations
 

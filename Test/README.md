@@ -3,8 +3,6 @@
 `Test/` holds repository-level material that does not belong to one product
 package:
 
-- `cases/` contains larger case studies and reproducibility projects, including
-  clearly marked historical cases that require their matching Git snapshot;
 - `fixtures/` contains cross-language contract inputs; and
 - `repository/` contains checks for repository-wide publication contracts.
 

@@ -21,7 +21,7 @@ revive the removed Python/Rust Segno stack or a legacy daemon path.
 | `segno-flow/haskell/test/` | Offline virtual-clock, persistence, and protocol tests |
 | `segno-flow/examples/` | Explicit opt-in persistent-task examples; default gates use fakes |
 | `segno-flow/segno-flow.cabal` | Current Haskell package and `segno` executable |
-| `Test/` | Repository-level case studies, fixtures, and publication contract tests |
+| `Test/` | Repository-level fixtures and publication contract tests |
 | `Build/` | Ignored generated output; tools recreate their own subdirectories |
 
 Old Segno Python/Rust packages and their independent desktop surface are not

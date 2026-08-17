@@ -46,16 +46,10 @@ secretdoc/
 **/rewrite-report/
 **/runtime-check/
 
-# Clef case-study runtime state and generated deliveries
+# Historical/local runtime state and generated deliveries
 **/.clef-state/
 # Preserve locally generated state from pre-Agentro checkouts without tracking it.
 **/.harness-state/
 **/.adapter-probe/
 **/.run-control/
 **/.test-work/
-Test/cases/PelicanRide/runs/
-Test/cases/Test2/.env
-Test/cases/Test2/tmp/
-Test/cases/Test2/reproduction/output*/
-Test/cases/Test2/reproduction/live-*.log
-Test/cases/Test2/review-work/
