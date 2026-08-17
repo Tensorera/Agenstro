@@ -5,7 +5,7 @@ An agent can write ordinary Haskell programs, GHC verifies the value wiring,
 Rust supervises the external tools, and every durable task or visual surface
 stays behind an explicit runtime boundary.
 
-The current release line is `0.3`. It has no Python runtime dependency.
+The current release line is `0.3`.
 
 ## Why these names?
 
@@ -194,11 +194,8 @@ Choose the path that matches the work:
 The documentation site is built with:
 
 ```powershell
-python -m mkdocs build --strict
+mkdocs build --strict
 ```
-
-Python is used only for MkDocs; Clef, Tactus, Segno, and Motivo do not require
-a Python runtime.
 
 ## Safety boundary
 
