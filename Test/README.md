@@ -4,7 +4,8 @@
 package:
 
 - `fixtures/` contains cross-language contract inputs; and
-- `repository/` contains checks for repository-wide publication contracts.
+- `repository/` contains PowerShell checks for repository-wide publication
+  contracts.
 
 Tests that exercise one implementation stay beside that implementation:
 `clef-sdk/haskell/test/`, `tactus-runtime/tests-rust/`,

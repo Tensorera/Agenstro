@@ -8,8 +8,8 @@ members = [
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/Tensorera/agenstro"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Tensorera/Agenstro"
 
 [workspace.dependencies]
 clap = { version = "=4.5.60", features = ["derive"] }

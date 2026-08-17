@@ -1,7 +1,7 @@
 # Changelog
 
-This project is a private source alpha. Versions describe checked-in contracts;
-they do not imply a public package release or compatibility guarantee.
+This project is a source alpha. Versions describe checked-in contracts; they
+do not imply a package-registry release or compatibility guarantee.
 
 ## 0.3.0 — Haskell DSL, Rust runtime, and persistent tasks
 
@@ -27,6 +27,8 @@ they do not imply a public package release or compatibility guarantee.
 
 ### Changed
 
+- Project and package metadata now use GNU AGPL v3.0 only
+  (`AGPL-3.0-only`).
 - `tactus check` and `tactus run` accept repeatable `--package` extensions;
   Clef remains included automatically.
 - Provider, effect, and generic plugin configuration uses the open

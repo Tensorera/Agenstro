@@ -33,6 +33,24 @@ only inside an architecture page.
    behavior.
 10. Use descriptive file names. Do not encode navigation order in file names.
 
+## Canonical subjects
+
+| Subject | Canonical page |
+| --- | --- |
+| Installation, upgrade, uninstall | [Installation](../install.md) |
+| First model-free tutorial | [First workflow](../getting-started.md) |
+| Clef public authoring model | [Clef workflow guide](../clef.md) |
+| `.tactus` layout and TOML | [Tactus workspace](../tactus-workspace.md) |
+| Native provider setup/model/effort | [Provider setup](../providers.md) |
+| Third-party plugin tutorial | [Plugin authoring](../plugin-authoring.md) |
+| Human logs and durable transitions | [Logs and run evidence](../observability.md) |
+| Backup, retention, restore | [Workspace operations](../operations.md) |
+| Shared terms | [Glossary](../reference/glossary.md) |
+
+Component README files contain package build facts and link here. Root README
+contains only product identity, a copyable quick path, safety, license, and
+navigation.
+
 ## Update connected pages
 
 When a public command, field, state transition, or ownership boundary changes:

@@ -15,6 +15,7 @@ successful call to a live provider account.
 
 | Surface | Version/target | Windows | Ubuntu | Evidence boundary |
 | --- | --- | --- | --- | --- |
+| Repository license | `AGPL-3.0-only` | Current | Current | root `LICENSE`, Cargo workspace, both Cabal packages, and Motivo package metadata agree |
 | Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; fake JSONL plugins exercise typed tasks/plugins and incremental events |
 | Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | format, package-scoped check/test/clippy; commands are `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
 | Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, low-priority observation loss, authoritative terminal preservation, and exit behavior use local fakes |

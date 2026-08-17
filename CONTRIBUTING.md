@@ -5,6 +5,10 @@ EDSL, Tactus is the Rust execution kernel, Segno is the Haskell persistent-task
 driver, and Motivo Studio is the TypeScript/React visual projection. Do not
 revive the removed Python/Rust Segno stack or a legacy daemon path.
 
+All contributions are accepted under the repository's GNU AGPL v3.0-only
+license. Do not copy code whose license is incompatible with `AGPL-3.0-only`;
+retain required third-party notices and record new dependencies explicitly.
+
 ## Ownership boundaries
 
 | Path | Ownership |
@@ -55,6 +59,23 @@ current compatibility targets. Git history is the migration record.
 10. Keep Motivo a projection. Renderer code cannot import Node/Electron, and
     Electron main must call versioned Tactus control commands instead of
     parsing `tactus.toml`, `runtime.json`, or trace directories.
+
+## Documentation ownership
+
+Each public fact has one canonical page:
+
+- installation and upgrades: `docs/install.md`;
+- the first controlled tutorial: `docs/getting-started.md`;
+- Clef authoring: `docs/clef.md`;
+- workspace/config schema: `docs/tactus-workspace.md`;
+- provider configuration: `docs/providers.md`;
+- plugin implementation: `docs/plugin-authoring.md`;
+- logs and state transitions: `docs/observability.md`;
+- backup/retention/recovery: `docs/operations.md`; and
+- exact commands/wire shapes: `docs/reference/`.
+
+README files summarize and link to those pages; they must not become a second
+copy of the reference contract.
 
 ## Haskell changes
 

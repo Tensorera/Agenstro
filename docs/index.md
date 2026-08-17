@@ -1,114 +1,74 @@
-# Agenstro 0.3 Documentation
+# Agenstro 0.3 documentation
 
-This site describes the current `0.3` source path: Clef is a typed Haskell
-EDSL, Tactus is the Rust execution kernel that initializes projects,
-supervises plugins and Haskell programs, streams events, and records factual
-run journals, and Segno is the Haskell driver for typed persistent tasks.
-
-## Current release contract
-
-| Surface | Contract |
-| --- | --- |
-| Clef | Cabal package `0.3.0.0`; GHC2021; `base >=4.20 && <4.23` |
-| Tactus | Rust crate/binary `0.3.0`; `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
-| Plugins | Replaceable one-shot JSONL processes; built-in adapters cover Codex, Claude Code, OpenCode, and `workspace.paths` |
-| Effect | `workspace.paths` observes path snapshots and differences; it does not sandbox or roll back changes |
-| Segno | Cabal package `0.3.0.0`, CLI `0.3.0`; typed triggers and state, pure interval/UTC-cron planning, SQLite, single-node at-least-once driver |
-| Motivo Studio | TypeScript + React + Electron `0.3.0`; redacted visual projection over versioned Tactus control queries |
-| Platforms | Windows and Ubuntu are required jobs for Tactus, Clef/Segno integration, and Motivo Studio; real active-window capture is Windows-only |
-
-## Fast Windows path
-
-From the Agenstro checkout, install or upgrade both public commands into the
-Cargo bin directory already used by Rustup:
-
-```powershell
-$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
-$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
-cargo install --path tactus-runtime --bin tactus --locked --force
-cabal update
-cabal install segno-flow:exe:segno `
-  --builddir=Build/cabal `
-  --installdir $toolBin `
-  --overwrite-policy=always
-tactus check --help | Select-String -Pattern '--package'
-segno --version
-```
-
-For a project that already contains `.tactus\tactus.toml`, do not create a
-second workspace. Run `segno init --root PROJECT --sdk REPO\segno-flow`, then
-follow the [one-minute active-window example](segno.md#try-the-model-free-active-window-task).
-The first Cabal build can take several minutes and fetch packages; later runs
-reuse its cache. The example makes no model/network call. Foreground-window
-titles remain in local SQLite business history; Tactus run evidence retains
-only a bounded diagnostic summary.
-
-From the repository root, the source gates are:
-
-```powershell
-cabal build --builddir=Build/cabal all --enable-tests
-cabal test --builddir=Build/cabal all --test-show-details=direct
-
-$env:CARGO_INCREMENTAL = "0"
-$env:CARGO_PROFILE_DEV_DEBUG = "0"
-$env:CARGO_PROFILE_TEST_DEBUG = "0"
-try {
-  cargo check -p tactus-runtime --all-targets --locked
-  cargo test -p tactus-runtime --locked
-  cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
-} finally {
-  cargo clean
-  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
-}
-
-npm --prefix motivo-studio ci
-npm --prefix motivo-studio run format:check
-npm --prefix motivo-studio run lint
-npm --prefix motivo-studio run typecheck
-npm --prefix motivo-studio test
-npm --prefix motivo-studio run package
-```
-
-Those tests use local fakes and do not contact a model provider. Segno's
-scheduler tests use virtual time and fake process boundaries instead of
-waiting for a minute; CI type-checks the active-window task without executing
-desktop capture. Motivo packaging produces an unsigned application for the
-current platform.
-
-## Tactus safety boundary
-
-`tactus check` performs Cabal/GHC compile checks. `tactus run` executes trusted
-Haskell programs, and `tactus generate` invokes the selected coding-agent
-plugin. Provider and effect commands inherit the user's environment and run
-without a shell, but they are still arbitrary local executables rather than a
-security boundary.
-
-`tactus smoke` is offline by default: it performs executable/version health
-checks but sends no model prompt. A real provider request happens only when
-`--live` is supplied. OpenCode is supported at the JSONL adapter boundary, but
-its `--auto` mode cannot prove a full approval bypass in the presence of
-explicit deny or managed configuration.
+Agenstro is a typed, local-first system for coding-agent workflows. Clef
+defines workflows in Haskell, Tactus executes and observes them in Rust, Segno
+adds persistent typed triggers/state, and Motivo Studio projects the runtime in
+TypeScript/React/Electron.
 
 ## Start here
 
-| Goal | Page |
+| Goal | Canonical page |
 | --- | --- |
-| Install Tactus and run the offline path | [Getting started](getting-started.md) |
-| Understand ownership and execution flow | [Architecture](architecture.md) |
-| Run a typed persistent task | [Segno persistent tasks](segno.md) |
-| Visualize an initialized workspace | [Motivo Studio](motivo-studio.md) |
-| Check current platform and component status | [Support matrix](reference/support-matrix.md) |
-| Inspect the provider/effect wire contract | [Local plugin protocol v1](reference/plugin-protocol-v1.md) |
-| Diagnose toolchain, encoding, or plugin failures | [Troubleshooting](troubleshooting.md) |
-| See what is current, exploratory, or historical | [Roadmap](roadmap.md) |
-| Understand the Haskell and trusted-plugin decision | [ADR-0003](adr/0003-haskell-dsl-and-local-plugins.md) |
-| Understand the Segno driver and state decision | [ADR-0004](adr/0004-haskell-segno-persistent-tasks.md) |
-| Move a `0.2` workspace to the new path | [0.2 to Haskell 0.3 migration](migrations/0.2-to-haskell-0.3.md) |
+| Install or upgrade the commands | [Installation](install.md) |
+| Build one model-free workflow | [First workflow](getting-started.md) |
+| Select a provider, model, or effort | [Provider setup](providers.md) |
+| Open a workspace visually | [Motivo Studio](motivo-studio.md) |
 
-Motivo Studio is current but deliberately thin: it invokes Tactus and never
-becomes a second runtime. Segno is persistent scheduling, not recorded-result
-replay. Superseded Clef, Tactus, and Segno implementations remain available
-through Git history and selected archives; they are not alternate current
-runtimes.
+## Develop workflows and capabilities
+
+| Goal | Canonical page |
+| --- | --- |
+| Learn `Workflow`, tasks, effects, plugins, and errors | [Clef workflow guide](clef.md) |
+| Understand `.tactus`, TOML, and script ordering | [Tactus workspace and configuration](tactus-workspace.md) |
+| Implement a one-shot capability | [Plugin authoring](plugin-authoring.md) |
+| Build a persistent typed task | [Segno persistent tasks](segno.md) |
+| Look up exact frames | [Local plugin protocol v1](reference/plugin-protocol-v1.md) |
+
+## Operate and diagnose
+
+| Goal | Canonical page |
+| --- | --- |
+| Understand state, human messages, and journals | [Logs and run evidence](observability.md) |
+| Back up, restore, retain, or upgrade a workspace | [Workspace operations](operations.md) |
+| Diagnose a symptom | [Troubleshooting](troubleshooting.md) |
+| Check supported platforms and guarantees | [Support matrix](reference/support-matrix.md) |
+| Resolve terminology | [Glossary](reference/glossary.md) |
+
+## Component responsibility
+
+| Component | Responsibility | Explicit non-responsibility |
+| --- | --- | --- |
+| Clef | Typed Haskell workflow and persistent-task values | Provider catalogue, scheduling loop, sandbox |
+| Tactus | Workspace, process supervision, protocol routing, diagnostic evidence | Workflow semantics, credentials, rollback, replay |
+| Segno | Single-node triggers, occurrences, leases, fences, SQLite state | Exactly-once effects, distributed consensus, provider execution |
+| Motivo Studio | Redacted visual and action projection over Tactus | Config parsing, general shell, second runtime |
+
+The names follow a musical coordination metaphor: Clef establishes the typed
+frame, Tactus supplies the execution pulse, Segno marks persistent continuation,
+and Motivo makes recurring structure visible. Agenstro names the agent
+orchestration as a whole.
+
+## Safety in one paragraph
+
+Workflow code, plugins, and coding-agent CLIs run with the current user's
+operating-system authority. `generate` and live provider calls may contact or
+bill external services. Tactus is not a sandbox, credential broker, backup,
+or rollback engine. `OutcomeUnknown` means an external effect may have happened
+without a trustworthy terminal result and must be reconciled before retry.
+
+## Project and contributor material
+
+- [Architecture](architecture.md) explains ownership and data flow.
+- [CLI reference](reference/cli-v0.3.md) lists supported commands.
+- [Segno plugin wire](reference/segno-plugin-wire-v1.md) defines trigger/state backends.
+- [Studio control API](reference/studio-control-v1.md) defines Motivo projections.
+- [Public roadmap](roadmap.md) separates current guarantees from later work.
+- [ADR-0003](adr/0003-haskell-dsl-and-local-plugins.md) and
+  [ADR-0004](adr/0004-haskell-segno-persistent-tasks.md) retain design rationale.
+- [Migration 0.2 to 0.3](migrations/0.2-to-haskell-0.3.md) is historical upgrade
+  context, not the new-user path.
+
+## License
+
+Agenstro source is licensed under GNU AGPL v3.0 only (`AGPL-3.0-only`). See the
+repository `LICENSE` file for the complete terms.

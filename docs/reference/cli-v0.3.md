@@ -134,5 +134,6 @@ ghc --numeric-version
 cabal --numeric-version
 ```
 
-Use [Getting started](../getting-started.md) for installation and the
-[troubleshooting guide](../troubleshooting.md) for failure diagnosis.
+Use [Installation](../install.md) for deployment, [First workflow](../getting-started.md)
+for the initial tutorial, and [Troubleshooting](../troubleshooting.md) for
+failure diagnosis.

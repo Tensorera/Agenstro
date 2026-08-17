@@ -5,8 +5,16 @@ Haskell workflows. It owns workspace initialization, typed configuration,
 script discovery, Cabal/GHC process execution, one-shot plugin supervision,
 incremental event routing, and local run journals.
 
+The canonical user references are [Installation](../docs/install.md),
+[Tactus workspace and configuration](../docs/tactus-workspace.md), and the
+[CLI reference](../docs/reference/cli-v0.3.md). This component README stays
+focused on the Rust package and implementation boundary.
+
 It intentionally does not contain a daemon, authentication system, credential
 broker, artifact/CAS service, checkpoint restore, or rollback engine.
+
+Tactus is licensed with the rest of Agenstro under
+[GNU AGPL v3.0 only](../LICENSE).
 
 ## Install
 

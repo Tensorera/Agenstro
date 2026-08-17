@@ -1,245 +1,104 @@
 ---
-title: Agenstro roadmap
+title: Agenstro public roadmap
 status: alpha
-last_verified: 2026-08-16
-applies_to: "Clef/Segno Haskell 0.3 + Tactus Rust 0.3 source-alpha direction"
+last_verified: 2026-08-17
+applies_to: "Agenstro 0.3"
 ---
 
-# Agenstro roadmap
+# Agenstro public roadmap
 
-This page records architectural direction and acceptance gates, not promised
-dates. A feature is current only when implementation, tests, documentation, and
-the stated platform gate agree.
+This page communicates product direction, not an internal issue backlog or a
+delivery-date promise. Current guarantees belong in reference pages; planned
+work appears here only when it changes what users can reasonably expect.
 
-## Status vocabulary
+## Current 0.3 foundation
 
-| Label | Meaning |
-| --- | --- |
-| Current gate | Required behavior for the Clef/Tactus/Segno/Motivo `0.3` path |
-| Hardening candidate | Fits the architecture but is not yet a stable promise |
-| Exploratory | Needs a bounded design/prototype before support can be claimed |
-| Historical | Available through Git history or excluded migration material; not a current compatibility target |
-| Non-goal | Intentionally absent from the core |
+The release candidate path contains:
 
-## Current `0.3` source gate
-
-The current runtime set is Clef `0.3.0.0`, Tactus `0.3.0`, and Segno
-`0.3.0.0`:
-
-- Clef is a small GHC2021 EDSL with typed provider, effect, and generic plugin
+- Clef as a compact GHC2021 EDSL for typed provider, effect, and generic plugin
   calls;
-- plugin events are parsed incrementally and projected through an `EventSink`
-  outside the workflow result type;
-- Tactus is a typed Rust CLI/runtime exposing `init`, `list`, `prompt`,
-  `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call`;
-- Tactus owns one-shot process-group supervision, bounded incremental frame
-  routing, deadlines/cancellation, and `agenstro.trace/v1` run journals;
-- native provider progress is aggregated and excess low-priority callback
-  projection is dropped without changing the authoritative terminal result;
-  degradation is reported explicitly;
-- durable run diagnostics redact prompt/provider raw text and summarize
-  terminal values rather than claiming to preserve replay input;
-- providers, effects, and general plugins share the language-neutral
-  `agenstro.plugin/v1` JSONL boundary;
-- Rust adapters cover Codex, Claude Code, OpenCode, and `workspace.paths`;
-- Clef provides typed `Trigger state event`, `State state`, and
-  `PersistentTask` composition without owning scheduling;
-- Segno provides the single-node Haskell driver, pure interval/UTC-cron
-  planning, durable cursors and lifecycle, a SQLite state plugin, and
-  at-least-once occurrence delivery;
-- every Segno occurrence executes its Clef job through Tactus, while lifecycle
-  state stays separate from typed business state;
-- fake-driven tests make no authenticated model request; and
-- Motivo Studio is a typed Electron/React projection over the versioned Tactus
-  Studio control API.
+- Tactus as one Rust CLI/runtime for `.tactus`, process supervision, bounded
+  event transport, diagnostic journals, and Studio control projections;
+- Segno as one Haskell, single-node, at-least-once persistent-task driver with
+  pure interval/UTC-cron planning and separate SQLite lifecycle/business state;
+- Motivo Studio as a thin TypeScript/React/Electron client over Tactus; and
+- a language-neutral one-shot `agenstro.plugin/v1` process boundary.
 
-The source gate includes Clef and Segno Haskell build/tests, Rust
-format/check/test/clippy, protocol/adaptor tests with local fakes, offline
-Tactus-to-GHC paths, virtual-clock Segno scheduling with a fake active-window
-source, the multi-step topology example, Motivo
-format/lint/typecheck/Vitest/package, and a strict documentation build. Build
-artifacts are centralized below ignored `Build/`; full Rust verification ends
-with `cargo clean` so the checkout does not accumulate gigabytes of output.
+The release gate covers Windows and Ubuntu source builds, local fake providers,
+cross-language Haskell/Rust execution, the multi-step topology example, Segno
+virtual-time behavior, Motivo package creation, and strict documentation.
 
-A green source gate does not imply a signed installer, stable public API, live
-provider certification, hostile-code sandbox, or production-service readiness.
+## Release hardening
 
-## Immediate alpha acceptance work
+The immediate direction is to make the existing boundary easier to install,
+operate, and extend without enlarging the core:
 
-1. Keep package versions, install commands, runtime configuration, examples,
-   support matrix, and actual CLI help synchronized.
-2. Preserve Windows and Linux tests for process-group cleanup, Unicode JSONL,
-   incremental event timing, and strict config/protocol failures.
-3. Keep a first-run offline path reproducible before any provider credentials
-   or billing are involved.
-4. Make every live entry (`generate`, provider `plugin-call`, and `smoke
-   --live`) visibly opt-in in docs and output.
-5. Keep `.tactus/runs`, credentials, local config, provider transcripts, and
-   private prompts out of source control even though current journal writes are
-   redacted and bounded.
-6. Publish evidence for the exact commit/tag before describing a platform or
-   native provider version as verified.
-7. Preserve the trust statement: process groups and argv execution improve
-   runtime correctness, not authorization or isolation.
+1. produce reproducible, signed installation artifacts where practical;
+2. publish exact provider CLI compatibility and authenticated optional smoke
+   evidence without putting credentials in CI;
+3. improve bounded cancellation and process-tree acceptance across platforms;
+4. add plugin author kits and shared conformance vectors for Rust, TypeScript,
+   C#, and Haskell;
+5. formalize run-retention and diagnostic export commands;
+6. add supported reconciliation operations for Segno `OutcomeUnknown`; and
+7. stabilize the public control DTOs used by Motivo.
 
-## Hardening candidates
+## Clef direction
 
-### Stabilize trace retention and redaction policy
+Clef should remain ordinary typed Haskell rather than grow a custom parser,
+hidden DAG, or closed effect universe. Compatible additions include better
+typed wrappers, reusable task libraries, documented error recovery, and
+observation APIs that remain orthogonal to workflow values.
 
-`agenstro.trace/v1` currently records factual ordered events and an atomic
-terminal summary. Prompt/provider raw text, native stderr, and terminal success
-values are already reduced to bounded summaries before persistence, and Motivo
-consumes only a bounded Rust projection rather than the disk layout. Remaining
-hardening must define:
+## Tactus direction
 
-- retention and explicit cleanup ownership;
-- a versioned field-classification/redaction policy for future event kinds;
-- schema compatibility and migration rules;
-- limits for summary/event payloads and total local storage; and
-- the distinction between plugin frames, controller evidence, compiler output,
-  and arbitrary workflow `IO`.
+Tactus should remain a small, dependable execution kernel rather than become a
+network daemon. Compatible work includes packaging, config migration tooling,
+bounded run inspection/retention, provider adapter acceptance, and stronger
+cross-platform descendant cleanup.
 
-This must not retrofit the current journal into a claim of deterministic
-replay.
+## Segno direction
 
-### Broaden process-supervision evidence
+Segno's next useful work is operational rather than distributed: explicit
+reconciliation, configurable policies, lease renewal for very long tasks,
+additional trigger/state plugins, and better backup/inspection. Multi-node
+coordination would require a new consistency design and is not implied by the
+current SQLite driver.
 
-The Rust kernel already owns Unix process groups/Windows Job Objects, bounded
-pipes, cancellation, and deadlines. Additional evidence should cover:
+## Motivo direction
 
-- descendants that inherit pipes or spawn immediately before cancellation;
-- multi-sink stress beyond the current bounded-drop and terminal-preservation
-  tests;
-- very large Unicode input written concurrently with stdout/stderr;
-- repeated Ctrl+C and cleanup races; and
-- disk-full/permission failure while appending events or publishing a summary.
+Motivo should improve visibility and safe named actions while remaining a
+projection. Candidate work includes richer trace filtering, accessibility,
+signed installers, and typed configuration mutation through future Tactus
+commands. Direct TOML/database parsing, a general terminal, and private runtime
+ownership remain out of scope.
 
-Failure reporting must remain factual. Killing a local process cannot prove a
-remote provider did not complete.
+## Explicit non-goals for 0.3
 
-### Expand plugin author ergonomics
+The current line does not promise:
 
-The wire contract intentionally accepts any language. Candidate additions are:
+- hostile-code sandboxing;
+- a hosted or multi-user Tactus service;
+- credential brokerage or authentication;
+- exactly-once external effects;
+- automatic rollback of files, Git, providers, or plugins;
+- serialization of arbitrary Haskell continuations;
+- deterministic replay of arbitrary Haskell `IO`;
+- distributed Segno consensus; or
+- automatic migration of removed 0.2 daemon/scheduler state.
 
-- tiny conformance fixtures for Rust, Haskell, TypeScript, and C#;
-- a command that feeds malformed/edge-case frames to a plugin test harness;
-- generated JSON Schema for requests, frames, runtime config, and trace
-  envelopes where it improves tooling; and
-- typed Haskell convenience modules for stable popular plugins.
+Scheduling and replay are different. Segno creates a new occurrence and asks
+Tactus to execute its Clef task; Tactus diagnostics are never substituted for
+that computation.
 
-None should create a mandatory plugin language, manifest-signing system, or
-closed method/event enumeration.
+## How a roadmap item becomes a guarantee
 
-### Expand provider compatibility evidence
+A feature is current only after all of the following are true:
 
-Default CI should remain fake-driven. Optional credentialed acceptance may
-record native CLI version, OS, selected model, and observed capability, without
-becoming a required secret-bearing job.
+1. the authoritative implementation exists;
+2. boundary and failure tests exercise it;
+3. the relevant reference page defines it;
+4. the support matrix lists its platforms and limits; and
+5. the change appears in the changelog for a concrete commit or release.
 
-Compatibility claims must keep permission semantics distinct:
-
-- Codex and Claude Code expose explicit dangerous bypass flags;
-- OpenCode `--auto` plus `permission=allow` cannot override every explicit deny
-  or managed policy; and
-- model, effort, and variant values are open and provider-specific.
-
-Adapter flags, parsers, tests, support matrix, and troubleshooting guidance must
-change together when a native CLI evolves.
-
-### Packaging and developer ergonomics
-
-Candidates include:
-
-- reproducible source archives and checksums;
-- a documented install/upgrade/uninstall story beyond `cargo install --path`;
-- generated Haddock and Rust API documentation;
-- pinned documentation dependencies and link checks;
-- automatic detection/reporting of a large repository-local `target/`; and
-- a packaged offline example derived from `examples/topology-holes`.
-
-Signed installers, auto-update, and background services are not implied.
-
-### Motivo Studio hardening
-
-Motivo's initial current role is intentionally complete but narrow: workspace
-health, scripts, registries, actions, and bounded trace pages. Follow-up work may
-add signed installers, stronger cross-platform cancellation evidence, persistent
-non-secret UI preferences, and richer trace filtering. It must not become a
-second runtime, daemon, general shell, credential store, or approval-policy
-owner.
-
-### Segno persistent-task hardening
-
-The first Segno driver is intentionally single-node and local. Compatible
-follow-up work includes:
-
-- explicit misfire and catch-up policies beyond the bounded planner result;
-- lifecycle inspection and recovery tooling for `OutcomeUnknown`;
-- state-schema migration fixtures and backend conformance tests;
-- filesystem, webhook, job-completion, and manual trigger plugins;
-- explicit correlation-key/window semantics before any multi-source `and`;
-  and
-- PostgreSQL or another backend implemented behind the existing state plugin
-  methods.
-
-These additions must preserve short CAS transactions, business/lifecycle state
-separation, and Tactus execution of each Clef job. A second node cannot simply
-share the current SQLite directory and be called distributed scheduling.
-
-## Exploratory surface
-
-### Recorded-result replay
-
-Segno now implements scheduling, but replay remains exploratory because it has
-distinct semantics:
-
-1. **Recorded-result replay** substitutes previously captured terminal values
-   and must define trace integrity, missing evidence, schema drift, and secret
-   handling.
-2. **Live re-invocation** intentionally repeats provider/effect calls and can
-   incur new cost and external-state changes.
-3. **Ordinary Haskell `IO`** is not intercepted by Clef and is generally not
-   replayable.
-
-Scheduling, retry, and replay are not synonyms. The current Segno driver always
-executes a new occurrence through Tactus; it never substitutes a recorded
-terminal value. Replay work still requires explicit trace ownership and
-substitution rules.
-
-## Current non-goals
-
-The `0.3` core does not promise:
-
-- hostile-code isolation for Haskell or plugins;
-- plugin signing, authentication, capability tokens, approval UI, or a
-  credential broker;
-- a network daemon/API, service discovery, or persistent provider session;
-- a global static DAG for arbitrary Haskell control flow;
-- artifact publication, workspace transactions, automatic checkpoint restore,
-  or Git rollback outside Segno's explicit business-state CAS;
-- exactly-once provider calls/effect cleanup or automatic retry after an
-  ambiguous external outcome;
-- read/transient-write detection or attribution by `workspace.paths`;
-- permission equivalence among Codex, Claude Code, and OpenCode;
-- automatic translation of historical cell/notebook workflows or scheduler
-  state;
-- authenticated provider calls in ordinary CI; or
-- deterministic replay of arbitrary `IO`.
-
-Moving an item out of this list requires a scoped design, tests at the claimed
-boundary, migration impact, and honest residual limitations.
-
-## How a roadmap item becomes supported
-
-A proposal becomes current only when all applicable evidence exists:
-
-1. an accepted, bounded contract;
-2. code in the authoritative Haskell Clef/Segno or Rust Tactus path;
-3. deterministic tests, including platform-specific cases where relevant;
-4. a support-matrix entry separating fake/offline/live evidence;
-5. user documentation and failure guidance;
-6. migration and removal consequences; and
-7. a green gate for the exact commit/tag.
-
-See [Architecture](architecture.md), [Getting started](getting-started.md), and
-the [support matrix](reference/support-matrix.md) for current behavior.
+Architecture ideas and ADR discussion alone are not release guarantees.

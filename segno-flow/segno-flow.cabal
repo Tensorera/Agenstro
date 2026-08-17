@@ -6,7 +6,7 @@ description:
   Segno is a small Haskell scheduler for typed Clef workflows. Trigger and
   business-state backends are open JSONL plugins; the single-node driver owns
   only occurrence lifecycle, leases, and waiting.
-license:            Apache-2.0
+license:            AGPL-3.0-only
 author:             Agenstro contributors
 maintainer:         Agenstro contributors
 category:           Development

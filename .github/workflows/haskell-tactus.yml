@@ -210,7 +210,8 @@ jobs:
           python -m pip install "mkdocs>=1.6,<2"
           python -m mkdocs build --strict --site-dir "${{ runner.temp }}/agenstro-site"
       - name: Validate documentation contracts
-        run: python Test/repository/test_documentation_contract.py
+        shell: pwsh
+        run: ./Test/repository/test-documentation-contract.ps1
 
   motivo-studio:
     name: Motivo Studio (${{ matrix.os }})

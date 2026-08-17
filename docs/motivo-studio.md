@@ -7,12 +7,11 @@ traces. It does not implement workflow semantics itself.
 
 ## Install and start on Windows x64
 
-Install Tactus first. Node.js 22.12 or newer is required to build Motivo from
-this checkout. From the repository root, install the locked dependencies and
-the current Windows x64 desktop build:
+Use [Installation](install.md) for prerequisites and the canonical deployment
+procedure. From the repository root, the Windows x64 application installation
+itself is:
 
 ```powershell
-cargo install --path tactus-runtime --bin tactus --locked --force
 npm --prefix motivo-studio ci
 npm --prefix motivo-studio run install:windows
 ```

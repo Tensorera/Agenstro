@@ -5,7 +5,7 @@ synopsis:           A small typed Haskell workflow DSL for coding agents
 description:
   Clef is an ordinary Haskell EDSL.  GHC checks task and effect result wiring;
   providers and effects remain replaceable JSONL subprocess plugins.
-license:            Apache-2.0
+license:            AGPL-3.0-only
 author:             Agenstro contributors
 maintainer:         Agenstro contributors
 category:           Development

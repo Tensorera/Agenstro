@@ -5,10 +5,17 @@ TypeScript, React, Vite, and Electron application; Tactus remains the only owner
 of workflow discovery, plugin configuration, health checks, execution, and run
 history.
 
+The canonical user guide is [Motivo Studio](../docs/motivo-studio.md), with
+installation prerequisites maintained in [Install Agenstro](../docs/install.md).
+This component README stays focused on application development and packaging.
+
 The first 0.3 release intentionally has no editor, terminal, daemon, scheduler,
 recovery manager, gRPC client, protobuf-generated client, or direct journal
 reader. It visualizes the versioned `tactus.control/v1` API and launches normal
 Tactus CLI actions.
+
+Motivo Studio is licensed with the rest of Agenstro under
+[GNU AGPL v3.0 only](../LICENSE).
 
 ## Install on Windows x64
 

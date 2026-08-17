@@ -5,8 +5,15 @@ public API keeps trigger and business-state types in Haskell; the single-node
 driver owns durable cursors, occurrences, attempts, leases, fencing, and
 waiting; each actual Clef task still runs through the Rust Tactus kernel.
 
+The canonical user guide is [Segno persistent tasks](../docs/segno.md), with
+installation maintained separately in [Install Agenstro](../docs/install.md).
+This component README stays focused on package development and its example.
+
 The removed Python package, Rust `segnod` crates, ZIP task format, and separate
 desktop UI are not current compatibility surfaces.
+
+Segno is licensed with the rest of Agenstro under
+[GNU AGPL v3.0 only](../LICENSE).
 
 ## Small model
 

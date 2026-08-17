@@ -6,11 +6,17 @@ passed between `Task input output`, `Operation output`, and arbitrary `Plugin
 input output` calls. Runtime provider, effect, and plugin availability stays
 dynamic.
 
+The canonical user guide is [Program workflows with Clef](../docs/clef.md);
+this component README stays focused on package development and local examples.
+
 The Haskell implementation under `haskell/` is authoritative for new
 development. The Python and Rust `0.2` implementations were removed from the
 current tree and remain available in Git history (including snapshots
 `3eef756` and `c679f45`). Neither is a dependency or release artifact of the
 Haskell package.
+
+Clef is licensed with the rest of Agenstro under
+[GNU AGPL v3.0 only](../LICENSE).
 
 ## Build and test
 

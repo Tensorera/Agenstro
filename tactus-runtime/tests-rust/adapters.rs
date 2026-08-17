@@ -542,6 +542,11 @@ fn provider_host_kills_native_output_that_exceeds_its_line_bound() {
     let workspace = tempdir().expect("workspace");
     let fake = FakeNativeCli::create();
     let mut options = fake.options();
+    // PowerShell startup and an 8 MiB pipe write can exceed the shared
+    // five-second fixture budget on a busy Windows runner. This test verifies
+    // the output bound, not deadline behavior; deadline semantics have their
+    // own focused tests.
+    options["timeout_seconds"] = json!(30);
     options["extra_env"]["FAKE_OUTPUT_MODE"] = Value::String("oversize".to_owned());
     let (code, frames, diagnostics) = call_provider(
         "codex",
@@ -567,6 +572,9 @@ fn provider_host_drains_but_bounds_large_native_stderr() {
     let workspace = tempdir().expect("workspace");
     let fake = FakeNativeCli::create();
     let mut options = fake.options();
+    // Keep this diagnostic-volume test independent of Windows runner startup
+    // jitter. Dedicated timeout tests continue to use short finite budgets.
+    options["timeout_seconds"] = json!(30);
     options["extra_env"]["FAKE_STDERR_MODE"] = Value::String("oversize".to_owned());
     let (code, frames, diagnostics) = call_provider(
         "codex",

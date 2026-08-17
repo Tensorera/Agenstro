@@ -1,7 +1,7 @@
 # Security policy
 
-Agenstro `0.3` is a private source alpha for trusted local development. It is
-not a security boundary.
+Agenstro `0.3` is an AGPL-3.0-only source alpha for trusted local development.
+It is not a security boundary.
 
 ## Execution model
 
@@ -49,8 +49,8 @@ model transcript; deleting the latest file revision is not sufficient.
 
 ## Reporting a vulnerability
 
-Because this repository is private, report suspected vulnerabilities to the
-repository owner through a private channel. Include the affected commit,
-platform, minimal reproduction, observed impact, and whether any provider call
-or external side effect occurred. Do not open a public issue containing an
-unredacted exploit, credential, prompt, or private workspace content.
+Report suspected vulnerabilities to the repository owner through a private
+channel. Include the affected commit, platform, minimal reproduction, observed
+impact, and whether any provider call or external side effect occurred. Do not
+open a public issue containing an unredacted exploit, credential, prompt, or
+private workspace content.

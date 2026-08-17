@@ -2,6 +2,7 @@
   "name": "motivo-studio",
   "private": true,
   "version": "0.3.0",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "main": ".vite/build/main.js",
   "description": "Typed Electron control plane for Tactus workflows",

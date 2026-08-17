@@ -1,7 +1,7 @@
 ---
 title: Segno persistent tasks
 status: alpha
-last_verified: 2026-08-16
+last_verified: 2026-08-17
 applies_to: "Segno Flow Haskell 0.3.0.0"
 ---
 
@@ -25,37 +25,11 @@ the typed wrappers and composition; Segno owns durable time, cursor, occurrence
 and lifecycle state; Tactus executes every plugin call and every actual Clef
 job.
 
-## Install or upgrade on Windows
+## Install Segno
 
-From the Agenstro checkout, put GHCup and Cargo's executable directory on the
-current PowerShell `PATH`, then install both public commands into Cargo's bin
-directory:
-
-```powershell
-$repoRoot = (Resolve-Path D:\src\Agenstro).Path
-$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
-$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
-Set-Location $repoRoot
-
-cargo install --path tactus-runtime --bin tactus --locked --force
-cabal update
-cabal build --builddir=Build/cabal all --enable-tests
-cabal install segno-flow:exe:segno `
-  --builddir=Build/cabal `
-  --installdir $toolBin `
-  --overwrite-policy=always
-
-Get-Command tactus,segno -All
-tactus --version
-segno --version
-tactus check --help | Select-String -Pattern '--package'
-```
-
-The same commands upgrade an existing installation. `--force` replaces
-Tactus, and `--overwrite-policy=always` replaces Segno. An older Tactus build
-can also report `0.3.0`, so confirm that its `check` help contains `--package`.
-If `Get-Command -All` lists another executable first, fix `PATH` or open a new
-terminal before continuing.
+Use the canonical [installation guide](install.md) to install or upgrade
+Tactus and the `segno` executable. This guide assumes both commands resolve and
+that `tactus check --help` contains the repeatable `--package` option.
 
 ## Initialize a project
 
@@ -68,8 +42,8 @@ tactus init $projectRoot --sdk (Join-Path $repoRoot "clef-sdk")
 segno init --root $projectRoot --sdk (Join-Path $repoRoot "segno-flow")
 ```
 
-For an existing `.tactus` workspace, do not run `tactus init` again. Verify its
-marker and add only Segno's files and registrations:
+For an existing `.tactus` workspace, verify its marker and add Segno's files
+and registrations in place:
 
 ```powershell
 $projectRoot = (Resolve-Path D:\work\my-existing-project).Path
