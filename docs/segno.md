@@ -154,10 +154,11 @@ atomic result, it records `OutcomeUnknown` and does not retry that occurrence
 automatically.
 
 Real active-window capture currently supports Windows. Its title can include
-private document, URL, or account text. Tactus records the plugin terminal
-value in local run evidence and the task checkpoints it into local SQLite
-history; installing this collection is an explicit opt-in. Do not commit or
-share `.tactus/runs` or `.tactus/segno/state` without inspection.
+private document, URL, or account text. The task checkpoints the business value
+into local SQLite history; Tactus run evidence retains only a bounded diagnostic
+summary of the plugin result. Installing this collection is an explicit opt-in.
+Do not commit or share `.tactus/runs` or `.tactus/segno/state` without
+inspection.
 
 ## Define a persistent task
 

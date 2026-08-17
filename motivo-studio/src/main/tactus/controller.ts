@@ -19,11 +19,13 @@ import {
   studioScriptSchema,
   studioSnapshotSchema,
   studioSummarySchema,
+  studioPresentationSchema,
   type ActionRequest,
   type ActionState,
   type StudioActionEvent,
   type StudioEventPage,
   type StudioSnapshot,
+  type StudioPresentation,
   type StudioView,
 } from "../../shared/contracts";
 import { MainProcessError } from "../errors";
@@ -40,6 +42,8 @@ const ACTION_MAX_PENDING_FRAMES = 128;
 const ACTION_FLUSH_INTERVAL_MS = 40;
 const ACTION_FLUSH_BATCH = 32;
 const CAPTURE_KILL_GRACE_MS = 2_000;
+const ACTION_PROJECTION_WARNING =
+  "Additional Tactus output was omitted after Motivo reached its bounded display limit.";
 
 const inspectFailureSchema = z
   .object({
@@ -135,9 +139,14 @@ interface ActiveAction {
   finished: boolean;
   outputBytes: number;
   outputFrames: number;
-  pending: Array<{ stream: "stdout" | "stderr"; text: string }>;
+  pending: Array<{
+    stream: "stdout" | "stderr";
+    text: string;
+    presentation?: StudioPresentation;
+  }>;
+  lineBuffers: Record<"stdout" | "stderr", string>;
   flushTimer: ReturnType<typeof setTimeout> | undefined;
-  failureMessage: string | undefined;
+  projectionDropped: boolean;
 }
 
 interface CaptureResult {
@@ -264,8 +273,9 @@ export class TactusController {
       outputBytes: 0,
       outputFrames: 0,
       pending: [],
+      lineBuffers: { stdout: "", stderr: "" },
       flushTimer: undefined,
-      failureMessage: undefined,
+      projectionDropped: false,
     };
     this.active = active;
     const state: ActionState = { actionId, kind: request.kind, startedAtUnixMs };
@@ -467,21 +477,47 @@ export class TactusController {
     stream.once("end", () => {
       const tail = decoder.end();
       if (tail) this.enqueueOutput(active, streamName, tail);
+      this.flushOutputTail(active, streamName);
     });
   }
 
   private enqueueOutput(active: ActiveAction, stream: "stdout" | "stderr", rawText: string): void {
-    if (active.finished || active.failureMessage || !rawText) return;
+    if (active.finished || active.projectionDropped || !rawText) return;
     const bytes = Buffer.byteLength(rawText, "utf8");
     if (active.outputBytes + bytes > this.actionOutputLimitBytes) {
-      this.failActionOutput(active, "Tactus action output exceeded its projection byte budget.");
+      this.dropOutputProjection(active, stream);
       return;
     }
     active.outputBytes += bytes;
     const text = redactText(rawText, active.root);
-    for (const part of splitUtf8(text, LIMITS.actionOutputBytes)) {
+    active.lineBuffers[stream] += text;
+    let newline = active.lineBuffers[stream].indexOf("\n");
+    while (newline >= 0) {
+      const line = active.lineBuffers[stream].slice(0, newline + 1);
+      active.lineBuffers[stream] = active.lineBuffers[stream].slice(newline + 1);
+      this.queueOutput(active, stream, line);
+      if (active.projectionDropped) return;
+      newline = active.lineBuffers[stream].indexOf("\n");
+    }
+    this.scheduleFlush(active);
+  }
+
+  private flushOutputTail(active: ActiveAction, stream: "stdout" | "stderr"): void {
+    const tail = active.lineBuffers[stream];
+    active.lineBuffers[stream] = "";
+    if (tail) this.queueOutput(active, stream, tail);
+    this.scheduleFlush(active);
+  }
+
+  private queueOutput(active: ActiveAction, stream: "stdout" | "stderr", text: string): void {
+    if (active.projectionDropped) return;
+    const parts = splitUtf8(text, LIMITS.actionOutputBytes);
+    for (const part of parts) {
+      const presentation = parts.length === 1 ? parseTactusPresentation(part) : undefined;
       const previous = active.pending.at(-1);
       if (
+        !presentation &&
+        !previous?.presentation &&
         previous?.stream === stream &&
         Buffer.byteLength(previous.text, "utf8") + Buffer.byteLength(part, "utf8") <=
           LIMITS.actionOutputBytes
@@ -489,20 +525,23 @@ export class TactusController {
         previous.text += part;
         continue;
       }
+      if (active.pending.length >= this.actionPendingLimitFrames) {
+        this.flushOutput(active, false);
+      }
       if (
         active.outputFrames >= this.actionOutputLimitFrames ||
         active.pending.length >= this.actionPendingLimitFrames
       ) {
-        this.failActionOutput(
-          active,
-          "Tactus action output exceeded the bounded IPC frame budget.",
-        );
+        this.dropOutputProjection(active, stream);
         return;
       }
-      active.pending.push({ stream, text: part });
+      active.pending.push({
+        stream,
+        text: part,
+        ...(presentation ? { presentation } : {}),
+      });
       active.outputFrames += 1;
     }
-    this.scheduleFlush(active);
   }
 
   private scheduleFlush(active: ActiveAction): void {
@@ -528,29 +567,41 @@ export class TactusController {
         sequence: active.sequence.toString(),
         stream: frame.stream,
         text: frame.text,
+        ...(frame.presentation ? { presentation: frame.presentation } : {}),
       });
     }
     if (active.pending.length > 0) this.scheduleFlush(active);
   }
 
-  private failActionOutput(active: ActiveAction, message: string): void {
-    if (active.failureMessage) return;
-    active.failureMessage = message;
-    if (!active.child.kill()) this.finish(active, null, message);
+  private dropOutputProjection(active: ActiveAction, stream: "stdout" | "stderr"): void {
+    if (active.projectionDropped || active.finished) return;
+    active.projectionDropped = true;
+    active.lineBuffers.stdout = "";
+    active.lineBuffers.stderr = "";
+    this.flushOutput(active, true);
+    active.sequence += 1n;
+    this.emit({
+      type: "output",
+      actionId: active.actionId,
+      sequence: active.sequence.toString(),
+      stream,
+      text: `[warning] ${ACTION_PROJECTION_WARNING}\n`,
+      presentation: {
+        category: "warning",
+        message: ACTION_PROJECTION_WARNING,
+      },
+    });
   }
 
   private finish(active: ActiveAction, exitCode: number | null, error: string | undefined): void {
     if (active.finished) return;
+    this.flushOutputTail(active, "stdout");
+    this.flushOutputTail(active, "stderr");
     this.flushOutput(active, true);
     active.finished = true;
     if (this.active === active) this.active = undefined;
     active.sequence += 1n;
-    const status = active.cancelRequested
-      ? "cancelled"
-      : !active.failureMessage && exitCode === 0
-        ? "succeeded"
-        : "failed";
-    const message = active.failureMessage ?? error;
+    const status = active.cancelRequested ? "cancelled" : exitCode === 0 ? "succeeded" : "failed";
     this.emit({
       type: "finished",
       actionId: active.actionId,
@@ -558,7 +609,7 @@ export class TactusController {
       status,
       exitCode,
       finishedAtUnixMs: Date.now().toString(),
-      ...(message ? { message: boundedDiagnostic(message, active.root) } : {}),
+      ...(error ? { message: boundedDiagnostic(error, active.root) } : {}),
     });
   }
 
@@ -610,6 +661,17 @@ export class TactusController {
   }
 }
 
+/** Parse only Tactus's canonical human presentation line; all other text remains raw. */
+export function parseTactusPresentation(value: string): StudioPresentation | undefined {
+  const matched = /^\[(state|info|warning|error)\][\t ]+([^\r\n]+)(?:\r?\n)?$/.exec(value);
+  if (!matched) return undefined;
+  const parsed = studioPresentationSchema.safeParse({
+    category: matched[1],
+    message: matched[2]?.trim(),
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
 export function commandForAction(request: ActionRequest, root: string): string[] {
   switch (request.kind) {
     case "generate":
@@ -617,7 +679,6 @@ export function commandForAction(request: ActionRequest, root: string): string[]
         "generate",
         "--root",
         root,
-        "--json",
         ...(request.provider ? ["--provider", request.provider] : []),
         request.goal,
       ];
@@ -630,7 +691,6 @@ export function commandForAction(request: ActionRequest, root: string): string[]
         "smoke",
         "--root",
         root,
-        "--json",
         ...(request.live ? ["--live"] : []),
         ...request.targets.map((target) => `${target.namespace}:${target.name}`),
       ];

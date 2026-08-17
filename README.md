@@ -40,9 +40,10 @@ it does not pretend to statically authorize an external agent.
 Tactus is the typed Rust execution kernel around Clef. It validates
 `.tactus/tactus.toml`, prepares Clef's runtime JSON, launches each plugin as a
 one-shot process group, routes events incrementally, and writes factual
-`agenstro.trace/v1` journals below `.tactus/runs/`. It is not a daemon and does
-not provide authentication, a credential broker, CAS/artifact storage,
-checkpoint restore, or rollback.
+`agenstro.trace/v1` diagnostic journals below `.tactus/runs/`. Their durable
+payloads are redacted/summarized and are not replay state. Tactus is not a
+daemon and does not provide authentication, a credential broker, CAS/artifact
+storage, checkpoint restore, or rollback.
 
 Segno is the optional Haskell persistent-task driver. Haskell composes typed
 trigger leaves with `mapTrigger`, `filterTrigger`, `mergeTrigger`, and `gate`;
@@ -205,11 +206,12 @@ Segno derives its Running lease from the same budget.
 
 The example records the Windows foreground-window title every minute without a
 model or network call. The first `once` is due immediately. Titles can include
-document names, URLs, or account names; both SQLite history and Tactus run
-evidence retain them locally and should not be committed. Delivery is at least
-once, but an ambiguous timed-out/failed task becomes `OutcomeUnknown` and is
-not retried automatically. See the [Segno guide](docs/segno.md) before deciding
-whether any external effect is safe to repeat.
+document names, URLs, or account names; SQLite business-state history retains
+them locally, while Tactus persists only redacted diagnostic summaries of
+plugin results. Delivery is at least once, but an ambiguous timed-out/failed
+task becomes `OutcomeUnknown` and is not retried automatically. See the
+[Segno guide](docs/segno.md) before deciding whether any external effect is
+safe to repeat.
 
 ## Visualize a Tactus workspace
 
@@ -246,11 +248,24 @@ The Overview, Workflow, Plugins, and Runs views project Tactus health, ordered
 Haskell entries, registry availability, bounded action output, and factual
 trace events. Generate, Check, Run, and offline Smoke remain Tactus commands;
 live Smoke is a separate explicit action that may contact or bill a provider.
+User-facing action and run logs use only `[state]`, `[info]`, `[warning]`, and
+`[error]` plus bounded natural-language messages. Structured payloads, event
+kinds, exit codes, and unmatched legacy output remain available under
+collapsed technical details instead of appearing as raw JSON by default. If
+the desktop action projection reaches its byte or frame budget, Motivo keeps
+draining Tactus, omits further raw output, emits one `[warning]`, and preserves
+the child process's authoritative terminal status.
 
 Studio uses the versioned `tactus studio inspect` and `tactus studio events`
 control queries. They redact command arrays, options, prompt text, and absolute
 script paths. Motivo is not a second workflow runtime, editor, terminal,
 scheduler, replay engine, or credential manager.
+
+Agents editing a workflow can follow the repository-local
+[`tactus` skill](skills/tactus/SKILL.md). It guides the agent to constrain
+requested edits to `.tactus/scripts`, validate selected files before execution, and treat
+`OutcomeUnknown` as terminal evidence that must be reconciled rather than
+blindly retried.
 
 ## Configure open plugins
 
@@ -334,10 +349,24 @@ group. Windows Job Objects contain the nested process tree; on Unix, a process
 that deliberately creates a new session can escape process-group containment,
 so plugins remain trusted local code.
 
-Each supervised call records flushed `events.jsonl` entries and an atomically
-published `summary.json` in a unique `.tactus/runs/<run-id>/` directory. These
-records use `agenstro.trace/v1`. They are local factual evidence, may contain
-provider output, and are not a deterministic replay format or rollback log.
+Observation and presentation are deliberately weaker than the invocation
+result. Native provider progress is aggregated into bounded diagnostics;
+callback pressure can drop low-priority events into `events_dropped`, and a UI
+projection overrun emits one `[warning]`. A stalled observer is recorded as
+`observation_error`. None of these conditions changes the invocation kind or
+replaces its authoritative terminal result; transport/protocol violations
+remain a separate outcome boundary.
+
+Each supervised call attempts to append/flush `events.jsonl` and atomically
+publish `summary.json` in a unique `.tactus/runs/<run-id>/` directory. A
+journal-writer failure degrades evidence without replacing a known invocation
+outcome. Durable records use `agenstro.trace/v1`; they are diagnostic evidence,
+not a deterministic replay format or rollback log. Durable events recursively
+redact prompt, raw/text/content, credential-like, options, environment,
+workspace, and path fields to bounded byte-count/SHA-256 summaries; terminal
+success values and native stderr are also summarized instead of stored
+verbatim. Remaining diagnostics are bounded but may still be sensitive, so
+journals stay local.
 
 The included `workspace.paths` effect records path kind, size, and SHA-256
 changes across an invocation. It reports final added, modified, deleted, and

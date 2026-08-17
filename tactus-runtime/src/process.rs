@@ -8,7 +8,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     thread,
@@ -113,7 +113,9 @@ pub struct ProcessLimits {
     pub max_frame_bytes: usize,
     /// Maximum total stdout bytes drained for this invocation.
     pub max_stdout_bytes: usize,
-    /// Maximum accepted stdout frames, including the terminal result.
+    /// Maximum non-terminal frames delivered to the observational callback.
+    /// Excess events remain protocol-validated but are safely discarded; the
+    /// terminal result always has reserved delivery capacity.
     pub max_frames: u64,
     /// Maximum stderr bytes retained; excess bytes are drained and discarded.
     pub max_stderr_bytes: usize,
@@ -193,6 +195,14 @@ pub struct ProcessOutcome {
     pub terminal: Option<TerminalResult>,
     /// Number of valid frames accepted in order.
     pub frames_seen: u64,
+    /// Valid progress events omitted from the observational callback because
+    /// its bounded delivery budget was exhausted.
+    #[serde(default)]
+    pub events_dropped: u64,
+    /// Bounded diagnostic when the observational callback stopped or stalled.
+    /// It never changes the authoritative plugin outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
     /// Bounded, lossy-decoded diagnostic output.
     pub stderr: String,
     /// Whether additional stderr bytes were discarded.
@@ -406,13 +416,17 @@ impl ProcessSupervisor {
         let max_stderr_bytes = spec.limits.max_stderr_bytes;
         let stderr_worker = thread::spawn(move || capture_stderr(stderr, max_stderr_bytes));
         let stdin_worker = thread::spawn(move || write_stdin(stdin, &input));
+        let callback_bound = spec.limits.event_queue_bound;
         let (callback_sender, callback_receiver) =
-            mpsc::sync_channel::<PluginFrame>(spec.limits.event_queue_bound);
+            mpsc::sync_channel::<PluginFrame>(callback_bound);
+        let queued_callbacks = Arc::new(AtomicUsize::new(0));
+        let callback_queued = Arc::clone(&queued_callbacks);
         let (callback_done_sender, callback_done_receiver) =
             mpsc::sync_channel::<Result<(), String>>(1);
         let callback_worker = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 while let Ok(frame) = callback_receiver.recv() {
+                    callback_queued.fetch_sub(1, Ordering::AcqRel);
                     on_frame(&frame);
                 }
             }))
@@ -428,6 +442,9 @@ impl ProcessSupervisor {
         let mut termination_attempted = false;
         let mut forced: Option<InvocationKind> = None;
         let mut failure: Option<String> = None;
+        let mut events_delivered = 0_u64;
+        let mut events_dropped = 0_u64;
+        let mut observation_error = None;
 
         while !child_done || !stdout_done {
             // A process-group leader may exit while one of its descendants
@@ -450,31 +467,53 @@ impl ProcessSupervisor {
 
             match receive_frame(&receiver) {
                 Receive::Frame(frame) => {
-                    if sequence.frames_seen() >= spec.limits.max_frames {
-                        forced = Some(InvocationKind::ProtocolFailed);
-                        failure = Some(format!(
-                            "plugin emitted more than {} frames",
-                            spec.limits.max_frames
-                        ));
-                        stdout_done = true;
-                    } else if let Err(error) = sequence.accept(&frame) {
+                    if let Err(error) = sequence.accept(&frame) {
                         forced = Some(InvocationKind::ProtocolFailed);
                         failure = Some(error.to_string());
                         stdout_done = true;
                     } else {
+                        let is_terminal = matches!(frame, PluginFrame::Result { .. });
+                        let event_budget_available = events_delivered < spec.limits.max_frames;
+                        // Reserve one slot for the terminal result. A slow log
+                        // consumer may lose progress events, but it must never
+                        // turn a known provider result into a runtime failure.
+                        let event_queue_available = queued_callbacks.load(Ordering::Acquire)
+                            < callback_bound.saturating_sub(1);
+                        if !is_terminal && (!event_budget_available || !event_queue_available) {
+                            events_dropped = events_dropped.saturating_add(1);
+                            continue;
+                        }
+
+                        queued_callbacks.fetch_add(1, Ordering::AcqRel);
                         match callback_sender.try_send(frame) {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                if !is_terminal {
+                                    events_delivered = events_delivered.saturating_add(1);
+                                }
+                            }
+                            Err(mpsc::TrySendError::Full(_)) if !is_terminal => {
+                                queued_callbacks.fetch_sub(1, Ordering::AcqRel);
+                                events_dropped = events_dropped.saturating_add(1);
+                            }
                             Err(mpsc::TrySendError::Full(_)) => {
-                                forced = Some(InvocationKind::RuntimeFailed);
-                                failure = Some(
-                                    "plugin frame callback queue exceeded its bounded capacity"
-                                        .to_owned(),
+                                queued_callbacks.fetch_sub(1, Ordering::AcqRel);
+                                // `FrameSequence` still owns the authoritative
+                                // terminal. This can only be an observation loss.
+                                append_observation_error(
+                                    &mut observation_error,
+                                    "terminal frame could not enter the observer delivery queue",
                                 );
                             }
                             Err(mpsc::TrySendError::Disconnected(_)) => {
-                                forced = Some(InvocationKind::RuntimeFailed);
-                                failure =
-                                    Some("plugin frame callback stopped unexpectedly".to_owned());
+                                queued_callbacks.fetch_sub(1, Ordering::AcqRel);
+                                if !is_terminal {
+                                    events_dropped = events_dropped.saturating_add(1);
+                                } else {
+                                    append_observation_error(
+                                        &mut observation_error,
+                                        "terminal frame observer stopped before delivery",
+                                    );
+                                }
                             }
                         }
                     }
@@ -581,30 +620,7 @@ impl ProcessSupervisor {
             }
             WorkerFinish::Completed(Err(_)) | WorkerFinish::Panicked | WorkerFinish::Stalled => {}
         }
-        let captured = match stderr_result {
-            WorkerFinish::Completed(Ok(value)) => value,
-            WorkerFinish::Completed(Err(error)) => {
-                if forced.is_none() {
-                    forced = Some(InvocationKind::RuntimeFailed);
-                    failure = Some(error);
-                }
-                CapturedStderr::default()
-            }
-            WorkerFinish::Panicked => {
-                if forced.is_none() {
-                    forced = Some(InvocationKind::RuntimeFailed);
-                    failure = Some("stderr worker panicked".to_owned());
-                }
-                CapturedStderr::default()
-            }
-            WorkerFinish::Stalled => {
-                if forced.is_none() {
-                    forced = Some(InvocationKind::RuntimeFailed);
-                    failure = Some("stderr pipe remained open after process completion".to_owned());
-                }
-                CapturedStderr::default()
-            }
-        };
+        let captured = finish_stderr_capture(stderr_result, &mut observation_error);
         let mut callback_finished = false;
         if forced.is_none() {
             let callback_deadline = Instant::now() + CALLBACK_DRAIN_TIMEOUT;
@@ -616,40 +632,22 @@ impl ProcessSupervisor {
                     }
                     Ok(Err(error)) => {
                         callback_finished = true;
-                        forced = Some(InvocationKind::RuntimeFailed);
-                        failure = Some(error);
+                        append_observation_error(&mut observation_error, error);
                         break;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         callback_finished = true;
-                        forced = Some(InvocationKind::RuntimeFailed);
-                        failure = Some("plugin frame callback stopped unexpectedly".to_owned());
+                        append_observation_error(
+                            &mut observation_error,
+                            "plugin frame callback stopped unexpectedly",
+                        );
                         break;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if cancellation.is_cancelled() {
-                            forced = Some(InvocationKind::Cancelled);
-                            failure = Some(
-                                "plugin invocation was cancelled while delivering frames"
-                                    .to_owned(),
-                            );
-                            break;
-                        }
-                        if spec
-                            .limits
-                            .deadline
-                            .is_some_and(|deadline| started.elapsed() >= deadline)
-                        {
-                            forced = Some(InvocationKind::DeadlineExceeded);
-                            failure = Some(
-                                "plugin frame callback exceeded the invocation deadline".to_owned(),
-                            );
-                            break;
-                        }
                         if Instant::now() >= callback_deadline {
-                            forced = Some(InvocationKind::RuntimeFailed);
-                            failure = Some(
-                                "plugin frame callback exceeded its delivery deadline".to_owned(),
+                            append_observation_error(
+                                &mut observation_error,
+                                "plugin frame callback exceeded its delivery deadline",
                             );
                             break;
                         }
@@ -690,6 +688,8 @@ impl ProcessSupervisor {
             exit_code: status.as_ref().and_then(ExitStatus::code),
             terminal,
             frames_seen,
+            events_dropped,
+            observation_error,
             stderr: String::from_utf8_lossy(&captured.bytes).into_owned(),
             stderr_truncated: captured.truncated,
             error: failure,
@@ -901,7 +901,10 @@ struct CapturedStderr {
 }
 
 fn capture_stderr(stderr: PipeValue, limit: usize) -> Result<CapturedStderr, String> {
-    let mut stderr = stderr.into_stderr();
+    capture_stderr_reader(stderr.into_stderr(), limit)
+}
+
+fn capture_stderr_reader(mut stderr: impl Read, limit: usize) -> Result<CapturedStderr, String> {
     let mut captured = CapturedStderr::default();
     let mut chunk = [0_u8; 8192];
     loop {
@@ -917,6 +920,49 @@ fn capture_stderr(stderr: PipeValue, limit: usize) -> Result<CapturedStderr, Str
         captured.truncated |= retained < count;
     }
     Ok(captured)
+}
+
+fn finish_stderr_capture(
+    result: WorkerFinish<Result<CapturedStderr, String>>,
+    observation_error: &mut Option<String>,
+) -> CapturedStderr {
+    match result {
+        WorkerFinish::Completed(Ok(value)) => value,
+        WorkerFinish::Completed(Err(error)) => {
+            append_observation_error(observation_error, error);
+            CapturedStderr::default()
+        }
+        WorkerFinish::Panicked => {
+            append_observation_error(observation_error, "stderr diagnostic reader panicked");
+            CapturedStderr::default()
+        }
+        WorkerFinish::Stalled => {
+            append_observation_error(
+                observation_error,
+                "stderr diagnostic pipe remained open after process completion",
+            );
+            CapturedStderr::default()
+        }
+    }
+}
+
+fn append_observation_error(slot: &mut Option<String>, message: impl AsRef<str>) {
+    const MAX_OBSERVATION_ERROR_BYTES: usize = 4_096;
+    let message = message.as_ref();
+    let combined = slot.as_ref().map_or_else(
+        || message.to_owned(),
+        |existing| format!("{existing}; {message}"),
+    );
+    if combined.len() <= MAX_OBSERVATION_ERROR_BYTES {
+        *slot = Some(combined);
+        return;
+    }
+    let suffix = "…";
+    let mut end = MAX_OBSERVATION_ERROR_BYTES.saturating_sub(suffix.len());
+    while !combined.is_char_boundary(end) {
+        end -= 1;
+    }
+    *slot = Some(format!("{}{suffix}", &combined[..end]));
 }
 
 fn write_stdin(stdin: PipeValue, input: &[u8]) -> Result<(), String> {
@@ -1000,4 +1046,30 @@ fn process_is_absent(error: &io::Error) -> bool {
 
 fn elapsed_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FaultyDiagnosticReader;
+
+    impl Read for FaultyDiagnosticReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected stderr reader failure"))
+        }
+    }
+
+    #[test]
+    fn stderr_reader_failure_is_observation_only() {
+        let result = capture_stderr_reader(FaultyDiagnosticReader, 1024);
+        assert!(result.is_err());
+        let mut observation_error = Some("existing observer warning".to_owned());
+        let captured =
+            finish_stderr_capture(WorkerFinish::Completed(result), &mut observation_error);
+        assert!(captured.bytes.is_empty());
+        let diagnostic = observation_error.expect("observation diagnostic");
+        assert!(diagnostic.contains("existing observer warning"));
+        assert!(diagnostic.contains("injected stderr reader failure"));
+    }
 }

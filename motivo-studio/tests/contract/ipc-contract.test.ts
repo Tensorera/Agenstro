@@ -3,6 +3,8 @@ import {
   actionRequestSchema,
   decimalStringSchema,
   LIMITS,
+  studioActionEventSchema,
+  studioEventSchema,
   studioSnapshotSchema,
 } from "../../src/shared/contracts";
 import { runEventsInputSchema } from "../../src/shared/ipc";
@@ -54,6 +56,39 @@ describe("bounded Motivo IPC contracts", () => {
         workspace: { name: "sample", root: "D:\\private\\sample" },
       }),
     ).toThrow();
+  });
+
+  it("accepts only canonical presentation categories and keeps them optional", () => {
+    const legacy = {
+      seq: "1",
+      atUnixMs: "1770000000000",
+      kind: "legacy.event",
+      data: { raw: true },
+    };
+    expect(studioEventSchema.parse(legacy).presentation).toBeUndefined();
+    expect(
+      studioEventSchema.parse({
+        ...legacy,
+        presentation: { category: "warning", message: "Evidence is incomplete." },
+      }).presentation,
+    ).toEqual({ category: "warning", message: "Evidence is incomplete." });
+    expect(() =>
+      studioEventSchema.parse({
+        ...legacy,
+        presentation: { category: "debug", message: "Not public." },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      studioActionEventSchema.parse({
+        type: "output",
+        actionId: "3ce53087-2218-42fd-bdda-afc4097020ae",
+        sequence: "1",
+        stream: "stderr",
+        text: "normal progress\n",
+        presentation: { category: "error", message: "Only explicit tags project." },
+      }),
+    ).not.toThrow();
   });
 });
 

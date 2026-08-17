@@ -106,8 +106,11 @@ stores the frames in runtime records and passes each event to an `EventSink`.
 The sink is an observation/projection surface, not `Workflow (Stream a)`: only
 the terminal result is decoded into the workflow's declared output type. Clef
 places records on a bounded queue, serializes a custom sink on one worker, and
-boundedly flushes the final value/evidence before `runWorkflow` returns. A sink
-failure is distinct from a provider whose external outcome is unknown.
+boundedly attempts to flush the final value/evidence before `runWorkflow`
+returns. Queue saturation, a stalled sink, or a sink exception stops further
+projection and records one internal warning; it does not replace the typed
+workflow result or manufacture an unknown provider outcome. Runtime records
+retain the authoritative terminal independently of that projection.
 
 The Haskell layer intentionally leaves these values open:
 
@@ -183,6 +186,14 @@ process-group containment. Plugins are therefore still trusted local code.
 Local termination also cannot prove whether a remote provider completed an
 operation before a transport failure, and never implies a safe retry.
 
+Transport validity and observation delivery are separate. Invalid or oversized
+protocol data can make the transport outcome unknown. By contrast, the
+observer callback queue reserves the authoritative terminal path and sheds
+low-priority event projections when its frame or queue budget is full.
+`events_dropped` counts those losses; callback failure or a missed observer
+flush becomes `observation_error`. Neither changes `InvocationKind` or the
+validated terminal result.
+
 `tactus check` and `tactus run` apply the same process-group ownership to
 Cabal/GHC/runghc. Their terminal streams remain attached to the caller so
 compiler and program output stays visible.
@@ -199,13 +210,21 @@ The wire protocol has two record kinds:
 Tactus does not wait for process exit before handling events. A reader thread
 separates LF-terminated frames, a strict decoder validates them, and a bounded
 queue hands them to an isolated sink worker. The supervisor never calls an
-arbitrary sink on its polling thread: queue overflow or a sink that misses its
-delivery deadline fails the invocation and triggers process-group cleanup. The
-hidden `dispatch` command flushes each validated frame back to Clef, whose
-incremental parser enqueues it for its isolated `EventSink` worker.
+arbitrary sink on its polling thread. When the observational queue is full,
+Tactus drops low-priority progress instead of failing or terminating the
+invocation, and retains the terminal in the protocol state machine. A callback
+that stalls or fails is likewise diagnostic degradation rather than a provider
+result. The hidden `dispatch` command flushes accepted frames back to Clef,
+whose incremental parser enqueues them for its isolated `EventSink` worker;
+Clef records sink degradation without changing the typed return value.
 
-Human diagnostics travel on stderr. They remain outside protocol frames and
-typed workflow return values.
+Native diagnostics travel on stderr. They remain outside protocol frames and
+typed workflow return values and are not automatically classified as errors.
+Agenstro-generated user-log entries use only `[state]`, `[info]`, `[warning]`,
+or `[error]` plus bounded natural language. Direct compiler/workflow output is
+separate process output rather than a classified runtime log; Motivo keeps it
+collapsed with raw stderr, protocol payloads, stable codes, and counters as
+technical detail.
 
 ## Segno persistent-task driver
 
@@ -290,25 +309,46 @@ All 64-bit counters are decimal strings. Motivo therefore does not parse TOML,
 walk the journal directory, infer workflow state from open event kinds, or own
 a competing scheduler/replay model.
 
+Projected events may carry a Tactus-owned `presentation` containing one of
+`state`, `info`, `warning`, or `error` plus natural-language text. Motivo shows
+that projection directly and keeps structured data collapsed as technical
+evidence. It does not manufacture severity from stdout versus stderr or from an
+open event-kind string. A true lifecycle change is recorded as
+`runtime.state_transition` with `state_before`, `trigger`, `guard`, and
+`state_after`; ordinary progress does not claim a transition.
+
+Those four bracketed labels are the complete user-log vocabulary. Motivo may
+add its own bounded `[warning]` when its action-output projection budget is
+exhausted, but it keeps draining the child and discards only later raw frames.
+Projection pressure never kills Tactus or changes the action outcome; raw
+stdout/stderr and legacy events remain collapsed technical details.
+
 ## `agenstro.trace/v1` journal
 
-Each supervised plugin call creates a unique `.tactus/runs/<run-id>/`
-directory. The journal has two publication rules:
+Each supervised plugin call attempts to create a unique
+`.tactus/runs/<run-id>/` directory. Journal I/O is observational: a writer
+failure is recorded as degradation and cannot replace an already-known plugin
+terminal or invocation kind. The journal has two publication rules:
 
-- `events.jsonl` receives monotonically sequenced, append-flushed factual
-  events as they occur;
+- `events.jsonl` receives monotonically sequenced, append-flushed accepted
+  diagnostic events as they occur;
 - `summary.json` is written to a temporary file and atomically renamed after
-  the terminal outcome is known.
+  the terminal outcome is known, with an independent degraded-writer attempt
+  so event loss does not hide that outcome.
 
 Generation adds controller/provider/discovery events around its nested plugin
 calls. A trace envelope contains the trace API, run ID, sequence, timestamp,
-kind, and structured data. It is intentionally distinct from
-`agenstro.plugin/v1`, which is the live process protocol.
+kind, optional presentation, and structured data. It is intentionally distinct
+from `agenstro.plugin/v1`, which is the live process protocol.
 
-The journal is not an artifact store or replay contract. It may contain
-prompts/provider output, has no built-in redaction or credential service, and
-does not capture arbitrary Haskell `IO`. Local retention and deletion remain
-the workspace owner's responsibility.
+The journal is diagnostic evidence, not an artifact store, replay contract, or
+workflow state. Before persistence, Tactus recursively replaces prompt,
+raw/text/content, credential-like, options, environment, workspace, and path
+fields with byte-count/SHA-256 summaries, bounds remaining strings and arrays,
+summarizes terminal success values, and withholds native stderr. It still does
+not capture arbitrary Haskell `IO`, and bounded errors or path metadata may be
+sensitive. Local retention and deletion remain the workspace owner's
+responsibility.
 
 ## Provider adapters
 
@@ -320,9 +360,12 @@ Tactus includes translations for three native agent CLIs:
 | `claude-code` | `claude -p --dangerously-skip-permissions --output-format stream-json ...` | open `effort` |
 | `opencode` | `opencode run --auto --format json ...` plus inline `permission=allow` | open `variant` (with effort fallback) |
 
-Each adapter normalizes native streaming output into open plugin events and a
-terminal value. Offline `smoke` resolves the executable/version; live smoke
-sends a minimal request. Tests use fake executables and do not authenticate.
+Each adapter consumes the native stream to derive its live terminal value, but
+does not forward token-level provider JSON or free text as user/journal events.
+It emits one bounded `provider.diagnostic` aggregate containing counts, byte
+sizes, event types, truncation state, and hashes. Offline `smoke` resolves the
+executable/version; live smoke sends a minimal request. Tests use fake
+executables and do not authenticate.
 
 OpenCode has a deliberate capability caveat: `--auto` approves ask decisions,
 but an explicit deny or managed policy may still win. Tactus reports

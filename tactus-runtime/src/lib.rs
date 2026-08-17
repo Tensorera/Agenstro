@@ -11,7 +11,10 @@ pub mod protocol;
 pub mod studio;
 pub mod workspace;
 
-pub use journal::{RunJournal, RunSummary, TraceEvent};
+pub use journal::{
+    Presentation, PresentationCategory, RunJournal, RunSummary, StateTransition, TraceEvent,
+    TransitionGuard, TransitionTrigger, TriggerKind,
+};
 pub use process::{
     CancellationToken, CommandKind, CommandOutcome, InvocationKind, ProcessLimits, ProcessOutcome,
     ProcessSpec, ProcessSupervisor,

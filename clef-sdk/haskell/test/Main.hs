@@ -13,10 +13,20 @@ import Clef.Plugin.Protocol
   )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
-import Control.Exception (SomeException, bracket, catch, finally, throwIO, try)
+import Control.Exception
+  ( AsyncException (ThreadKilled),
+    SomeException,
+    bracket,
+    catch,
+    finally,
+    fromException,
+    throwIO,
+    try,
+  )
 import Control.Monad (forM, unless)
 import Data.Aeson
   ( FromJSON (parseJSON),
+    ToJSON (toJSON),
     Value (..),
     encode,
     eitherDecodeStrict',
@@ -39,9 +49,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
 import System.Directory (getCurrentDirectory, removeFile)
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv, unsetEnv)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode (..), exitFailure)
 import System.IO (hClose, openBinaryTempFile, stderr)
 import qualified System.IO as IO
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
 main :: IO ()
@@ -56,6 +67,10 @@ main = do
     ["--fake-stream"] -> fakeStream
     ["--fake-block"] -> fakeBlock
     ["--fake-block-end"] -> fakeBlockEnd
+    ["--fake-cli-error", configPath] -> fakeCliError configPath
+    ["--fake-cli-provider", configPath] -> fakeCliProvider configPath
+    ["--fake-cli-unknown", configPath] -> fakeCliUnknown configPath
+    ["--fake-cli-unexpected", configPath] -> fakeCliUnexpected configPath
     _ -> runTests
 
 runTests :: IO ()
@@ -71,6 +86,10 @@ runTests = do
           ("plugin process exit is checked", testPluginExit workspace executable),
           ("plugin pipes drain concurrently", testPluginPipeBackpressure workspace executable),
           ("plugin events stream before terminal across UTF-8 chunks", testPluginEventStreaming workspace executable),
+          ("runtime transitions explain state, trigger, guard, and result", testRuntimeTransitions workspace executable),
+          ("default presentation excludes raw structured diagnostics", testHumanProjection),
+          ("outcome unknown is natural language with a structured cause", testOutcomeUnknownRendering),
+          ("runTactus renders expected errors without a call stack", testRunTactusPresentation workspace executable),
           ("blocked event sinks fail boundedly without hiding plugin outcome", testBlockedEventSink workspace executable),
           ("runWorkflow flushes the final typed value projection", testFinalSinkProjection workspace executable),
           ("generic plugin call is statically typed", testGenericPlugin workspace executable),
@@ -328,7 +347,7 @@ testPluginExit workspace executable = do
     (callPlugin runtime "bad-invoke" [Text.pack executable, "--fake-exit"] "invoke" mempty)
   assertWorkflowError
     "reported outcome unknown retains its classification for a generic method"
-    (\case PluginOutcomeUnknown "reported-unknown" "compute" message -> "timeout" `Text.isInfixOf` message; _ -> False)
+    (\case PluginOutcomeUnknown "reported-unknown" "compute" cause -> "timeout" `Text.isInfixOf` workflowCauseMessage cause; _ -> False)
     (callPlugin runtime "reported-unknown" [Text.pack executable, "--fake-outcome-unknown"] "compute" mempty)
   assertWorkflowError
     "empty plugin method"
@@ -396,6 +415,256 @@ testPluginEventStreaming workspace executable = do
     Just (Left exception) -> failTest $ "stream call failed: " <> show exception
     Nothing -> failTest "stream plugin did not complete"
 
+testRuntimeTransitions :: FilePath -> FilePath -> IO ()
+testRuntimeTransitions workspace executable = do
+  runtime <-
+    newRuntimeWithSink
+      (testConfig workspace executable)
+      (EventSink (const (pure ())))
+  let addPlugin = jsonPlugin "calculator" "add" :: Plugin (Int, Int) Int
+  result <- runWorkflow runtime (call addPlugin (19, 23))
+  assertEqual "typed result" 42 result
+  records <- readRuntimeRecords runtime
+  let transitions =
+        [ transition
+          | RuntimeTransitionRecord transition <- records,
+            "plugin." `Text.isPrefixOf` stateTransitionCode transition
+        ]
+  case transitions of
+    started : completed : _ -> do
+      assertEqual "start state_before" "ready" (stateTransitionStateBefore started)
+      assertEqual "start state_after" "running" (stateTransitionStateAfter started)
+      assertEqual "start trigger kind" RequestTrigger (transitionTriggerKind (stateTransitionTrigger started))
+      assertEqual "start guard passed" True (transitionGuardPassed (stateTransitionGuard started))
+      unless (not (Text.null (transitionGuardCondition (stateTransitionGuard started)))) $
+        failTest "transition guard condition must be present"
+      unless (not (Text.null (transitionGuardReason (stateTransitionGuard started)))) $
+        failTest "transition guard reason must be present"
+      assertEqual "terminal state_before" "running" (stateTransitionStateBefore completed)
+      assertEqual "terminal state_after" "succeeded" (stateTransitionStateAfter completed)
+      assertEqual "terminal trigger kind" InternalResultTrigger (transitionTriggerKind (stateTransitionTrigger completed))
+      case toJSON started of
+        Object fields -> do
+          let transitionFields =
+                [ "type",
+                  "code",
+                  "level",
+                  "message",
+                  "subject",
+                  "state_before",
+                  "trigger",
+                  "guard",
+                  "state_after",
+                  "context"
+                ]
+          unless (KeyMap.size fields == length transitionFields && all (`KeyMap.member` fields) transitionFields) $
+            failTest "persistent transition JSON drifted from its fixed schema"
+          assertEqual "transition presentation category" (Just (String "state")) (KeyMap.lookup "level" fields)
+          case KeyMap.lookup "trigger" fields of
+            Just (Object triggerFields) -> do
+              let triggerSchema = ["kind", "source", "code", "details"]
+              unless (KeyMap.size triggerFields == length triggerSchema && all (`KeyMap.member` triggerFields) triggerSchema) $
+                failTest "transition trigger drifted from kind/source/code/details"
+              unless (not (KeyMap.member "detail" triggerFields)) $
+                failTest "transition trigger retained the obsolete singular detail field"
+            other -> failTest $ "transition trigger did not encode as an object: " <> show other
+          case KeyMap.lookup "guard" fields of
+            Just (Object guardFields) -> do
+              let guardSchema = ["condition", "passed", "reason"]
+              unless (KeyMap.size guardFields == length guardSchema && all (`KeyMap.member` guardFields) guardSchema) $
+                failTest "transition guard drifted from condition/passed/reason"
+            other -> failTest $ "transition guard did not encode as an object: " <> show other
+        other -> failTest $ "transition did not encode as an object: " <> show other
+    _ -> failTest $ "expected start and terminal transitions, received " <> show transitions
+
+testHumanProjection :: IO ()
+testHumanProjection = do
+  let rawEvent =
+        PluginEventRecord
+          "provider:fake"
+          "clef-1"
+          (object ["event" .= object ["type" .= ("provider.raw" :: Text), "secret" .= (42 :: Int)]])
+      pluginDiagnostic = PluginDiagnosticRecord "provider:fake" "raw stderr {\"secret\":true}"
+      normalizedMessage =
+        RuntimeMessageRecord
+          RuntimeMessage
+            { runtimeMessageCode = "workflow.progress",
+              runtimeMessageLevel = InfoLevel,
+              runtimeMessageText = "The workflow is preparing its next step.",
+              runtimeMessageContext = mempty
+            }
+  assertEqual "raw provider events have no default projection" Nothing (renderRuntimeRecord rawEvent)
+  assertEqual "plugin stderr has no default projection" Nothing (renderRuntimeRecord pluginDiagnostic)
+  case renderRuntimeRecord normalizedMessage of
+    Just line -> do
+      assertEqual "normalized info line" "[info] The workflow is preparing its next step." line
+      unless (not ("{" `Text.isInfixOf` line)) $ failTest "human projection exposed structured JSON"
+    Nothing -> failTest "normalized message was not projected"
+
+testOutcomeUnknownRendering :: IO ()
+testOutcomeUnknownRendering = do
+  let cause =
+        WorkflowCause
+          { workflowCauseCode = "outcome_unknown",
+            workflowCauseMessage = "the provider event channel closed",
+            workflowCauseDetails = Just (object ["cause" .= ("frame_limit" :: Text), "frames" .= (10000 :: Int)])
+          }
+      workflowError = PluginOutcomeUnknown "provider:fake" "invoke" cause
+      rendered = renderWorkflowError workflowError
+      structured = LazyByteString.toStrict (encode (workflowErrorDiagnostic workflowError))
+  unless ("did not retry" `Text.isInfixOf` rendered) $
+    failTest "outcome unknown did not explain the retry policy"
+  unless (not ("{" `Text.isInfixOf` rendered)) $
+    failTest "outcome unknown rendered its structured details to the user"
+  unless (ByteString.Char8.pack "frame_limit" `ByteString.isInfixOf` structured) $
+    failTest "outcome unknown lost its structured diagnostic cause"
+
+testRunTactusPresentation :: FilePath -> FilePath -> IO ()
+testRunTactusPresentation workspace executable = do
+  configPath <- vacantTemporaryPath workspace "clef-runtime-*.json"
+  unknownConfigPath <- vacantTemporaryPath workspace "clef-runtime-unknown-*.json"
+  diagnosticPath <- vacantTemporaryPath workspace "clef-diagnostics-*.jsonl"
+  let makeConfig command =
+        object
+          [ "api" .= ("clef.runtime/v1" :: Text),
+            "workspace" .= workspace,
+            "default_provider" .= ("fake" :: Text),
+            "providers"
+              .= object
+                [ "fake"
+                    .= object
+                      [ "command" .= command,
+                        "options" .= object []
+                      ]
+                ],
+            "effects" .= object [],
+            "plugins" .= object [],
+            "instructions" .= ("" :: Text)
+          ]
+      config = makeConfig [executable, "--fake-plugin"]
+      unknownConfig = makeConfig [executable, "--fake-outcome-unknown"]
+  LazyByteString.writeFile configPath (encode config)
+  LazyByteString.writeFile unknownConfigPath (encode unknownConfig)
+  ( (failureExit, _, failureError),
+    (successExit, _, successError),
+    (unknownExit, _, unknownError),
+    (unexpectedExit, _, unexpectedError),
+    diagnosticRecords,
+    asyncOutcome
+    ) <-
+    ( do
+        (failed, succeeded, unknown, unexpected, records) <-
+          withEnvironment [("TACTUS_DIAGNOSTIC_PATH", diagnosticPath)] $ do
+            failed <- readProcessWithExitCode executable ["--fake-cli-error", configPath] ""
+            succeeded <- readProcessWithExitCode executable ["--fake-cli-provider", configPath] ""
+            unknown <- readProcessWithExitCode executable ["--fake-cli-unknown", unknownConfigPath] ""
+            unexpected <- readProcessWithExitCode executable ["--fake-cli-unexpected", configPath] ""
+            encodedRecords <- LazyByteString.readFile diagnosticPath
+            records <-
+              forM
+                (filter (not . LazyByteString.null) (LazyChar8.lines encodedRecords))
+                ( \line -> case eitherDecodeStrict' (LazyByteString.toStrict line) of
+                    Left message -> failTest $ "invalid Clef diagnostic JSONL: " <> message
+                    Right value -> pure value
+                )
+            pure (failed, succeeded, unknown, unexpected, records)
+        asynchronous <-
+          withEnvironment [("TACTUS_RUNTIME_CONFIG", configPath)] $
+            (try (runTactus (liftIO (throwIO ThreadKilled))) :: IO (Either SomeException ()))
+        pure (failed, succeeded, unknown, unexpected, records, asynchronous)
+    )
+      `finally` mapM_ removeIfPresent [configPath, unknownConfigPath, diagnosticPath]
+  assertEqual "expected workflow error exit" (ExitFailure 1) failureExit
+  unless ("[error] workflow requirement failed" `Text.isInfixOf` Text.pack failureError) $
+    failTest $ "runTactus did not use the human error projection: " <> failureError
+  unless (not ("HasCallStack" `Text.isInfixOf` Text.pack failureError)) $
+    failTest "runTactus exposed a Haskell HasCallStack"
+  unless (not ("called at" `Text.isInfixOf` Text.pack failureError)) $
+    failTest "runTactus exposed a Haskell source call site"
+  assertEqual "provider workflow exit" ExitSuccess successExit
+  let presentationLines = filter (not . Text.null) (Text.lines (Text.pack successError))
+      hasAllowedTag line = any (`Text.isPrefixOf` line) ["[state] ", "[info] ", "[warning] ", "[error] "]
+  unless (not (null presentationLines) && all hasAllowedTag presentationLines) $
+    failTest $ "provider workflow emitted a non-presentation line: " <> successError
+  unless (not ("provider.raw" `Text.isInfixOf` Text.pack successError)) $
+    failTest "provider workflow exposed a raw provider event"
+  unless (not ("{" `Text.isInfixOf` Text.pack successError)) $
+    failTest "provider workflow exposed structured JSON"
+  assertEqual "outcome-unknown workflow exit" (ExitFailure 1) unknownExit
+  let unknownText = Text.pack unknownError
+  unless ("[state] " `Text.isInfixOf` unknownText && "outcome-unknown state" `Text.isInfixOf` unknownText) $
+    failTest $ "outcome unknown did not expose its state transition: " <> unknownError
+  unless ("[warning] " `Text.isInfixOf` unknownText) $
+    failTest $ "outcome unknown did not expose a warning: " <> unknownError
+  unless (not ("[error] " `Text.isInfixOf` unknownText)) $
+    failTest $ "outcome unknown was incorrectly presented as an error: " <> unknownError
+  unless (all (\marker -> not (marker `Text.isInfixOf` unknownText)) ["HasCallStack", "called at", "{"]) $
+    failTest $ "outcome unknown leaked technical diagnostics: " <> unknownError
+  assertEqual "unexpected synchronous exception exit" (ExitFailure 1) unexpectedExit
+  let unexpectedText = Text.pack unexpectedError
+      unexpectedLines = filter (not . Text.null) (Text.lines unexpectedText)
+      unexpectedErrorLines = filter ("[error] " `Text.isPrefixOf`) unexpectedLines
+  unless
+    ( "[error] Workflow execution stopped because of an unexpected Haskell runtime error." `Text.isInfixOf` unexpectedText
+        && all hasAllowedTag unexpectedLines
+        && length unexpectedErrorLines == 1
+    ) $
+    failTest $ "unexpected synchronous exception did not use one concise human projection: " <> unexpectedError
+  unless
+    (all (\marker -> not (marker `Text.isInfixOf` unexpectedText)) ["UNSAFE_SYNC_EXCEPTION", "HasCallStack", "called at", "{"]) $
+    failTest $ "unexpected synchronous exception leaked technical details: " <> unexpectedError
+  let transitionObjects =
+        [ objectValue
+          | Object objectValue <- diagnosticRecords,
+            KeyMap.lookup "type" objectValue == Just (String "state_transition")
+        ]
+      allowedRecord value = case value of
+        Object objectValue ->
+          KeyMap.lookup "type" objectValue
+            `elem` [Just (String "state_transition"), Just (String "message")]
+        _ -> False
+  unless (not (null transitionObjects) && all allowedRecord diagnosticRecords) $
+    failTest "Clef sidecar contained no transitions or included raw runtime records"
+  unless
+    ( all
+        (\objectValue -> all (`KeyMap.member` objectValue) ["state_before", "trigger", "guard", "state_after"])
+        transitionObjects
+    ) $
+    failTest "Clef sidecar transition omitted one of the four required fields"
+  case asyncOutcome of
+    Left exception -> case fromException exception :: Maybe AsyncException of
+      Just ThreadKilled -> pure ()
+      other -> failTest $ "runTactus changed the asynchronous exception: " <> show other
+    Right () -> failTest "runTactus swallowed an asynchronous exception"
+
+fakeCliError :: FilePath -> IO ()
+fakeCliError configPath = do
+  setEnv "TACTUS_RUNTIME_CONFIG" configPath
+  _ <- runTactus (requireBecause "expected presentation failure" (const False) ())
+  pure ()
+
+fakeCliProvider :: FilePath -> IO ()
+fakeCliProvider configPath = do
+  setEnv "TACTUS_RUNTIME_CONFIG" configPath
+  let selectedProvider =
+        (providerRef "fake") {providerRefExtraArgs = ["--adapter-owned-flag"]}
+  _ <- runTactus (invokeWith selectedProvider (textTask "echo" id) "provider output stays structured")
+  pure ()
+
+fakeCliUnknown :: FilePath -> IO ()
+fakeCliUnknown configPath = do
+  setEnv "TACTUS_RUNTIME_CONFIG" configPath
+  _ <- runTactus (invoke (textTask "unknown" id) "external result may be unknown")
+  pure ()
+
+fakeCliUnexpected :: FilePath -> IO ()
+fakeCliUnexpected configPath = do
+  setEnv "TACTUS_RUNTIME_CONFIG" configPath
+  _ <-
+    runTactus
+      (liftIO (throwIO (userError "UNSAFE_SYNC_EXCEPTION {raw-json}\nHasCallStack called at Internal.hs:1")))
+  pure ()
+
 testBlockedEventSink :: FilePath -> FilePath -> IO ()
 testBlockedEventSink workspace executable = do
   releaseSink <- newEmptyMVar
@@ -410,9 +679,14 @@ testBlockedEventSink workspace executable = do
       (try (runWorkflow runtime (call addPlugin (19, 23))) :: IO (Either WorkflowError Int))
   putMVar releaseSink ()
   case outcome of
-    Just (Left (RuntimeSinkFailed _)) -> pure ()
+    Just (Right 42) -> do
+      records <- readRuntimeRecords runtime
+      assertEqual
+        "sink failure is retained as an internal diagnostic"
+        1
+        (length [() | RuntimeInternalDiagnosticRecord message <- records, runtimeMessageCode message == "runtime.sink_failed"])
     Just (Left other) -> failTest $ "blocked sink returned the wrong failure: " <> show other
-    Just (Right value) -> failTest $ "blocked sink unexpectedly returned " <> show value
+    Just (Right value) -> failTest $ "blocked sink changed the typed value to " <> show value
     Nothing -> failTest "blocked sink did not fail within its bounded flush deadline"
 
 testFinalSinkProjection :: FilePath -> FilePath -> IO ()

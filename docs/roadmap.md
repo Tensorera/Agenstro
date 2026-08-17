@@ -34,6 +34,11 @@ The current runtime set is Clef `0.3.0.0`, Tactus `0.3.0`, and Segno
   `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call`;
 - Tactus owns one-shot process-group supervision, bounded incremental frame
   routing, deadlines/cancellation, and `agenstro.trace/v1` run journals;
+- native provider progress is aggregated and excess low-priority callback
+  projection is dropped without changing the authoritative terminal result;
+  degradation is reported explicitly;
+- durable run diagnostics redact prompt/provider raw text and summarize
+  terminal values rather than claiming to preserve replay input;
 - providers, effects, and general plugins share the language-neutral
   `agenstro.plugin/v1` JSONL boundary;
 - Rust adapters cover Codex, Claude Code, OpenCode, and `workspace.paths`;
@@ -71,7 +76,8 @@ provider certification, hostile-code sandbox, or production-service readiness.
 4. Make every live entry (`generate`, provider `plugin-call`, and `smoke
    --live`) visibly opt-in in docs and output.
 5. Keep `.tactus/runs`, credentials, local config, provider transcripts, and
-   private prompts out of source control.
+   private prompts out of source control even though current journal writes are
+   redacted and bounded.
 6. Publish evidence for the exact commit/tag before describing a platform or
    native provider version as verified.
 7. Preserve the trust statement: process groups and argv execution improve
@@ -79,14 +85,16 @@ provider certification, hostile-code sandbox, or production-service readiness.
 
 ## Hardening candidates
 
-### Stabilize trace retention and redaction
+### Stabilize trace retention and redaction policy
 
 `agenstro.trace/v1` currently records factual ordered events and an atomic
-terminal summary. Motivo consumes only a bounded Rust projection, not the disk
-layout. Before any tool treats traces as a durable/replay API, define:
+terminal summary. Prompt/provider raw text, native stderr, and terminal success
+values are already reduced to bounded summaries before persistence, and Motivo
+consumes only a bounded Rust projection rather than the disk layout. Remaining
+hardening must define:
 
 - retention and explicit cleanup ownership;
-- redaction hooks for prompts, provider events, and diagnostics;
+- a versioned field-classification/redaction policy for future event kinds;
 - schema compatibility and migration rules;
 - limits for summary/event payloads and total local storage; and
 - the distinction between plugin frames, controller evidence, compiler output,
@@ -101,7 +109,8 @@ The Rust kernel already owns Unix process groups/Windows Job Objects, bounded
 pipes, cancellation, and deadlines. Additional evidence should cover:
 
 - descendants that inherit pipes or spawn immediately before cancellation;
-- slow event sinks and queue backpressure;
+- multi-sink stress beyond the current bounded-drop and terminal-preservation
+  tests;
 - very large Unicode input written concurrently with stdout/stderr;
 - repeated Ctrl+C and cleanup races; and
 - disk-full/permission failure while appending events or publishing a summary.

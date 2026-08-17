@@ -13,7 +13,7 @@ For each call the runtime:
 3. writes one UTF-8 JSON request followed by LF and closes stdin;
 4. reads zero or more UTF-8 JSONL event frames and exactly one terminal result
    from stdout; and
-5. reads stderr as human diagnostics, never as protocol data.
+5. drains stderr as native diagnostic bytes, never as protocol data.
 
 Version 1 is deliberately one-shot. There is no daemon, socket discovery,
 authentication handshake, persistent session, or service registry hidden in
@@ -24,17 +24,22 @@ the Rust `tactus dispatch` subcommand. Tactus then starts the real plugin in a
 Unix process group or Windows Job Object, validates and forwards frames as they
 arrive, and journals the invocation. Clef parses those forwarded lines
 incrementally and enqueues them to its bounded, serial `EventSink` worker before
-the terminal result. `runWorkflow` boundedly flushes the final value/evidence;
-sink failure is a runtime-projection failure, not an unknown provider outcome.
+the terminal result. `runWorkflow` boundedly attempts to flush the final
+value/evidence. A full, stalled, or failed sink records projection degradation
+but does not change the typed result or turn a known provider result into
+`OutcomeUnknown`.
 
 The Rust supervisor uses bounded requests, frames, total stdout, retained
 stderr, frame count, pending-event queue, and sink-delivery time. An isolated
 worker performs sink I/O, so a blocked consumer cannot stop deadline or
 cancellation polling. Its default wall-clock deadline is 1,800 seconds; public
 CLI options may override it, and a supported value of zero disables it
-deliberately. Deadline, cancellation, protocol failure, queue overflow, and a
-stalled sink terminate the owned process group. Windows Job Objects contain the
-nested tree; on Unix, a process that deliberately creates a new session can
+deliberately. Deadline, cancellation, and protocol/transport failure can
+terminate the owned process group. Observation pressure cannot: Tactus drops
+low-priority events when the callback frame/queue budget is exhausted, counts
+them in `events_dropped`, preserves dedicated terminal capacity, and records a
+stalled or failed callback as `observation_error`. Windows Job Objects contain
+the nested tree; on Unix, a process that deliberately creates a new session can
 escape process-group containment. Local termination cannot prove that a remote
 provider did not already complete work.
 
@@ -80,8 +85,18 @@ unknown event subtypes and must not confuse them with new top-level frame
 kinds. Plugins should terminate and flush every event line immediately;
 partial lines are not exposed to an event sink.
 
-Events are evidence/progress. They are recorded and projected to observers,
-but do not enter the typed workflow value graph.
+Events are non-authoritative evidence/progress. Accepted events can be routed
+live and persisted as redacted diagnostics, but they do not enter the typed
+workflow value graph. A bounded observer may aggregate or drop low-priority
+events; the terminal result remains authoritative and the loss is reported
+separately rather than changing the invocation outcome.
+
+Protocol fields and stderr bytes are not user-facing severity.
+Agenstro-generated user-log entries use only `[state]`, `[info]`, `[warning]`,
+or `[error]` plus bounded natural-language text. Direct compiler/workflow
+output is separate process output; Motivo keeps it, raw plugin stdout/stderr,
+payloads, stable codes, and counters in technical details. Stderr alone never
+means `[error]`.
 
 ## Terminal result
 
@@ -143,7 +158,9 @@ current strict decoders reject:
 - configured transport-limit violations.
 
 Diagnostics, banners, native progress bars, and debug prints belong on stderr.
-An adapter that writes them to stdout corrupts its protocol stream.
+An adapter that writes them to stdout corrupts its protocol stream. Stderr is
+still raw technical evidence; the runtime does not promote it directly into a
+user-facing warning or error.
 
 ## Common discovery and health methods
 
@@ -179,9 +196,12 @@ The bundled provider adapters expose `invoke` with open parameters shaped like:
 ```
 
 OpenCode uses `variant` as its native reasoning selector and accepts effort as
-a compatibility fallback. Adapters emit normalized native-stream events and a
-terminal object containing at least the resulting text and process/provider
-metadata. Session reuse is not implicit.
+a compatibility fallback. Adapters use native streaming output to derive the
+live terminal object, but project token-level JSON/free text as one bounded
+`provider.diagnostic` aggregate of counts, byte sizes, event types, truncation,
+and hashes. The live terminal still contains at least the resulting text and
+process/provider metadata; durable journals summarize that value. Session reuse
+is not implicit.
 
 ## Observer lifecycle
 
@@ -193,9 +213,9 @@ An effect configured with `observe_invocations = true` may implement:
   returning evidence.
 
 Controllers begin in stable configuration order and end in reverse order.
-Provider output and controller evidence remain separate records. Cleanup is
-best-effort when cancellation or process loss makes an earlier begin result
-unknown; this protocol does not promise exactly-once effects.
+Provider diagnostic summaries and controller evidence remain separate records.
+Cleanup is best-effort when cancellation or process loss makes an earlier begin
+result unknown; this protocol does not promise exactly-once effects.
 
 ## Built-in provider adapters
 
@@ -263,8 +283,16 @@ an atomically published `summary.json`. The trace API is not the plugin API:
   event kinds; and
 - the trace is factual evidence, not deterministic replay.
 
-Run journals can contain provider output and have no built-in redaction. They
-must not be committed or shared without review.
+Journal delivery is observational. An append/flush failure is attached as
+degradation, and Tactus independently attempts the terminal summary; it does
+not rewrite an already-known invocation result as failed or unknown.
+
+Durable run journals use a diagnostic projection, not the live payload as a
+replay record. Tactus replaces prompt, raw/text/content, credential-like,
+options, environment, workspace, and path fields with byte-count/SHA-256
+summaries, bounds other strings and arrays, summarizes terminal success values,
+and withholds native stderr. Bounded errors and path metadata can still be
+sensitive, so journals must not be committed or shared without review.
 
 ## Trust model
 

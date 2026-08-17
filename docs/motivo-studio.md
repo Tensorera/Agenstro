@@ -72,10 +72,18 @@ The application has four projections:
   redacted metadata and can start offline Smoke. Live Smoke is a separate,
   explicit action because it may contact or bill a provider.
 - **Runs** pages through open `agenstro.trace/v1` events and shows the terminal
-  summary when one exists. Unknown event kinds remain visible as open JSON.
+  summary when one exists. Canonical Tactus presentation messages form the
+  visible log; unknown and legacy event data remains available in collapsed
+  technical details.
 
-The action drawer displays bounded stdout and stderr while Electron owns the
-top-level Tactus child. Only one action may run at a time. Closing the window or
+The action drawer displays only `[state]`, `[info]`, `[warning]`, and `[error]`
+plus bounded natural-language messages while Electron owns the top-level
+Tactus child. It strictly recognizes those exact tags from Tactus human output;
+untagged stdout/stderr stays inside a collapsed raw-output panel because stderr
+alone does not imply an error. If that raw projection reaches its byte or frame
+budget, Electron continues draining both pipes, omits subsequent raw frames,
+and emits one `[warning]`; it does not kill Tactus or replace the child's real
+terminal status. Only one action may run at a time. Closing the window or
 pressing Cancel asks that process to stop; a terminal action event reports the
 observed result. Cancellation is best effort at the desktop boundary, while
 Tactus remains responsible for supervised plugin descendants.
@@ -105,7 +113,11 @@ Each query emits exactly one `tactus.control/v1` envelope containing an
 plugin options, generation prompt text, and absolute script paths. Timestamps,
 event sequences, and counts are decimal strings, avoiding JavaScript's 53-bit
 integer limit. Event pages report `ok`, `partial`, or `corrupt` integrity and
-refuse unsafe trace paths. See the
+refuse unsafe trace paths. An event may carry Tactus's canonical
+`presentation` object with one public category and a bounded natural-language
+message; its structured `data` remains redacted technical evidence. Trace pages
+are diagnostic observations, not replay input or authoritative workflow state.
+See the
 [Studio control API v1 reference](reference/studio-control-v1.md) for the exact
 envelopes, pagination rules, and limits.
 

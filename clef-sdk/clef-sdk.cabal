@@ -23,6 +23,7 @@ library
   hs-source-dirs: haskell/src
   exposed-modules:
       Clef
+      Clef.Diagnostic
       Clef.Effect.WorkspacePaths
       Clef.Error
       Clef.Plugin.Protocol
@@ -56,6 +57,7 @@ test-suite clef-sdk-tests
       clef-sdk,
       containers,
       directory,
+      process,
       scientific,
       text
 

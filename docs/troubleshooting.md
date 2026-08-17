@@ -205,10 +205,18 @@ the plugin:
 - uses the active request `id`; and
 - sends diagnostics, banners, and progress bars to stderr.
 
-The event queue is bounded. If a sink stops consuming, Tactus fails the
-invocation after the queue or delivery deadline is exhausted and cleans the
-owned process group; it does not let a blocked sink disable cancellation. A
-partial line is not an event and will not be exposed before its newline.
+Event delivery is bounded. When the observer frame or queue budget is full,
+Tactus drops low-priority progress, increments `events_dropped`, and preserves
+dedicated capacity for the authoritative terminal. A callback that stalls or
+fails becomes `observation_error`; neither condition changes the invocation
+kind or terminal result. Clef likewise records a failed/full `EventSink` as an
+internal warning without replacing the typed workflow value. A partial line is
+not an event and will not be exposed before its newline.
+
+Check the terminal summary and any `[warning]` before treating missing progress
+as a plugin failure. Protocol/transport errors remain distinct: malformed or
+oversized frames, a missing terminal, deadline, or cancellation can still
+produce a failed or outcome-unknown invocation.
 
 ## A custom plugin reports a protocol failure
 
@@ -314,9 +322,14 @@ Each supervised plugin call uses `.tactus/runs/<run-id>/events.jsonl` and
 after the terminal outcome and is published by atomic rename.
 
 If the machine loses power, a run can legitimately have events without a
-summary. Journals can include prompts, raw provider events, errors, and path
-evidence; there is no built-in redaction or credential store. Do not commit or
-attach them without reviewing their contents.
+summary. A journal append/publish failure is observation degradation and does
+not replace an already-known invocation result; the durable evidence may still
+be partial or absent. Current journals do not persist prompt/provider raw text
+verbatim: prompt, raw/text/content, credential-like, options, environment,
+workspace, and path fields become byte-count/SHA-256 summaries; terminal
+success values and native stderr are also summarized, while other strings and
+arrays are bounded. Errors, fingerprints, and path metadata can still be
+sensitive. Do not commit or attach journals without reviewing their contents.
 
 `agenstro.trace/v1` is diagnostic evidence, not deterministic replay, a CAS, or
 a rollback log.
@@ -485,10 +498,10 @@ and is supported on Windows. Other platforms return a structured
 desktop capture, so it does not depend on whichever application is focused.
 
 Window titles can include document names, URLs, account names, or other private
-text. The call's terminal value enters local Tactus run evidence and the task
-checkpoints it into local SQLite history. The example makes no model/network
-call and must be installed explicitly. Do not commit or share `.tactus/runs`
-or `.tactus/segno/state` without reviewing them.
+text. The task checkpoints that business value into local SQLite history;
+Tactus run evidence retains only a bounded diagnostic summary. The example
+makes no model/network call and must be installed explicitly. Do not commit or
+share `.tactus/runs` or `.tactus/segno/state` without reviewing them.
 
 ## Old Segno, worker, or daemon instructions fail
 

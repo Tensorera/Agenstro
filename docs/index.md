@@ -38,8 +38,9 @@ For a project that already contains `.tactus\tactus.toml`, do not create a
 second workspace. Run `segno init --root PROJECT --sdk REPO\segno-flow`, then
 follow the [one-minute active-window example](segno.md#try-the-model-free-active-window-task).
 The first Cabal build can take several minutes and fetch packages; later runs
-reuse its cache. The example makes no model/network call, but foreground-window
-titles remain locally in SQLite history and Tactus run evidence.
+reuse its cache. The example makes no model/network call. Foreground-window
+titles remain in local SQLite business history; Tactus run evidence retains
+only a bounded diagnostic summary.
 
 From the repository root, the source gates are:
 

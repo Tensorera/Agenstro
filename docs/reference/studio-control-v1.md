@@ -83,6 +83,50 @@ unknown event kinds and must not infer replay semantics from them. A missing
 summary means the run is open or incomplete; it is not proof that a process is
 still alive.
 
+An event may additionally contain a backward-compatible human projection:
+
+```json
+{
+  "kind": "runtime.state_transition",
+  "presentation": {
+    "category": "state",
+    "message": "provider:codex method generate started."
+  },
+  "data": {
+    "state_before": "ready",
+    "trigger": {
+      "kind": "request",
+      "source": "tactus.cli",
+      "code": "plugin.invocation_requested"
+    },
+    "guard": {
+      "condition": "plugin resolved and request validated",
+      "passed": true,
+      "reason": "The configured plugin and invocation request passed runtime validation."
+    },
+    "state_after": "running"
+  }
+}
+```
+
+`presentation.category` is exactly `state`, `info`, `warning`, or `error`.
+`message` is bounded natural language with embedded newlines flattened. The
+`state` category is reserved for a real lifecycle transition; every such event
+uses `runtime.state_transition` and the four-part `state_before`, `trigger`,
+`guard`, `state_after` diagnostic. Progress events do not claim a transition.
+
+Clients should render `presentation` directly and keep `kind` plus `data` as
+collapsed technical evidence. Older trace-v1 events may omit `presentation`;
+clients must not guess a public severity or message from the open event kind or
+payload. They may expose that legacy event only as technical details.
+
+The underlying trace is already a diagnostic persistence projection. Prompt,
+provider raw/text/content, credential-like, options, environment, workspace,
+and path fields are replaced with bounded byte-count/SHA-256 summaries;
+terminal success values and native stderr are summarized rather than persisted
+verbatim. This redaction does not turn the trace into replay state, and bounded
+errors or path metadata may still be sensitive.
+
 The event count limit is 1–1,000, the page byte limit is 1–8 MiB, each JSONL
 record is limited to 1 MiB, and a summary is limited to 2 MiB. A partial final
 line or exhausted page budget yields `partial`; a complete malformed record,
@@ -95,8 +139,12 @@ sequence gap, mismatched API, run id, or summary count yields `corrupt`.
 - Clients must reject an unknown top-level `api` or command envelope, while
   tolerating additional fields and unknown event kinds inside a recognized
   version.
-- The on-disk `.tactus/runs` layout and `runtime.json` are runtime internals.
-  Studio clients must not read them directly.
+- The optional event `presentation` field is additive within trace v1. Its four
+  categories are closed; event `kind` and `data` remain open.
+- The on-disk `.tactus/runs` layout and the temporary Clef runtime
+  configuration are runtime internals. Runtime configuration is removed after
+  the supervised command; Studio clients must not read either implementation
+  detail directly.
 - Motivo starts Tactus with an argument array and `shell: false`; the renderer
   receives only validated projections and never owns the workspace root.
 

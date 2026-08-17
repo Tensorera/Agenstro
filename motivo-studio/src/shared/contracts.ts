@@ -122,6 +122,17 @@ export type StudioOutcome = z.infer<typeof studioOutcomeSchema>;
 
 export const studioIntegritySchema = z.enum(["ok", "partial", "corrupt"]);
 
+export const presentationCategorySchema = z.enum(["state", "info", "warning", "error"]);
+export type PresentationCategory = z.infer<typeof presentationCategorySchema>;
+
+export const studioPresentationSchema = z
+  .object({
+    category: presentationCategorySchema,
+    message: boundedText(LIMITS.diagnosticCharacters).pipe(z.string().min(1)),
+  })
+  .strict();
+export type StudioPresentation = z.infer<typeof studioPresentationSchema>;
+
 export const studioRunSchema = z
   .object({
     runId: runIdSchema,
@@ -175,6 +186,7 @@ export const studioEventSchema = z
     atUnixMs: decimalStringSchema,
     kind: boundedText(128),
     data: z.unknown(),
+    presentation: studioPresentationSchema.optional(),
   })
   .strict();
 export type StudioEvent = z.infer<typeof studioEventSchema>;
@@ -252,6 +264,7 @@ export const studioActionEventSchema = z.discriminatedUnion("type", [
       sequence: decimalStringSchema,
       stream: z.enum(["stdout", "stderr"]),
       text: boundedUtf8(LIMITS.actionOutputBytes),
+      presentation: studioPresentationSchema.optional(),
     })
     .strict(),
   z

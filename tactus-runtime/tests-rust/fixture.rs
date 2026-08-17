@@ -24,8 +24,15 @@ fn main() {
     }
     if matches!(
         mode.as_str(),
-        "native-orphan-provider" | "native-orphan-health" | "native-orphan-descendant"
+        "native-orphan-provider"
+            | "native-orphan-health"
+            | "native-orphan-descendant"
+            | "native-claude-flood"
     ) {
+        if mode == "native-claude-flood" {
+            native_claude_flood();
+            return;
+        }
         native_orphan(&mode);
         return;
     }
@@ -89,6 +96,35 @@ fn main() {
         "timeout" => thread::sleep(Duration::from_secs(30)),
         other => panic!("unknown fixture mode {other}"),
     }
+}
+
+fn native_claude_flood() {
+    let mut prompt = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut prompt)
+        .expect("read native prompt");
+    let stdout = std::io::stdout();
+    let mut stdout = std::io::BufWriter::new(stdout.lock());
+    for sequence in 0..20_000_u64 {
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "type":"system",
+                "subtype":"thinking_tokens",
+                "estimated_tokens":sequence + 1,
+                "estimated_tokens_delta":1,
+            }),
+        )
+        .expect("thinking event");
+        stdout.write_all(b"\n").expect("thinking LF");
+    }
+    serde_json::to_writer(
+        &mut stdout,
+        &serde_json::json!({"type":"result","result":"TACTUS_OK"}),
+    )
+    .expect("Claude result");
+    stdout.write_all(b"\n").expect("result LF");
+    stdout.flush().expect("flush flood");
 }
 
 #[cfg(unix)]

@@ -99,6 +99,10 @@ created or preserved:
   PROMPT.md
   scripts/
   runs/
+  skills/
+    tactus/
+      SKILL.md
+      references/
 ```
 
 The important distinction is:
@@ -309,10 +313,11 @@ tactus list
 tactus check
 ```
 
-`generate` combines `.tactus/PROMPT.md` with the goal and calls the selected
-provider. The default instructions require increasing `NNN_slug.hs`/`.lhs`
-names below `.tactus/scripts/`. Tactus discovers the resulting files but never
-runs them automatically.
+`generate` combines `.tactus/PROMPT.md`, the materialized Tactus skill and its
+command/outcome references, and the goal before calling the selected provider.
+The default instructions require increasing `NNN_slug.hs`/`.lhs` names below
+`.tactus/scripts/`. Tactus discovers the resulting files but never runs them
+automatically.
 
 Review every generated program before:
 
@@ -370,11 +375,18 @@ try {
 ## Read run evidence
 
 Plugin calls and generation produce unique directories below `.tactus/runs/`.
-`events.jsonl` is append-flushed as frames arrive; `summary.json` is published
-atomically when supervision finishes. Both use `agenstro.trace/v1` envelopes.
+Accepted diagnostic events are append-flushed to `events.jsonl` as they arrive;
+`summary.json` is published atomically when supervision finishes. Low-priority
+observation loss is counted instead of changing the terminal, and a journal
+writer failure does not replace an already-known invocation outcome. Both files
+use `agenstro.trace/v1` envelopes when durable publication succeeds.
 
-These files can contain prompts and provider output. Keep them local and treat
-them as diagnostic evidence, not a replay or rollback mechanism.
+These files contain a bounded diagnostic projection, not raw replay input.
+Tactus replaces prompt/provider raw-text and credential-like fields with
+byte-count/SHA-256 summaries, summarizes terminal success values and native
+stderr, and bounds remaining strings and arrays. Errors, hashes, and path
+metadata may still be sensitive, so keep journals local and do not treat them
+as replay, rollback, or authoritative workflow state.
 
 ## Understand timeout and persistence semantics
 

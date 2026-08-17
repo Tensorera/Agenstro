@@ -37,6 +37,13 @@ contains spaces.
 | `tactus studio inspect` | Return a redacted Studio workspace projection | `--run-limit` |
 | `tactus studio events RUN_ID` | Read one bounded trace page | `--after`, `--limit`, `--max-bytes` |
 
+Without `--json`, the Tactus-generated user-log vocabulary is closed to
+`[state]`, `[info]`, `[warning]`, and `[error]`, each followed by bounded
+natural-language text. Native stderr, provider JSON/free text, event payloads,
+stable codes, and counters are technical diagnostics and are never promoted
+directly into that layer. `check`/`run` may attach compiler or workflow process
+output separately. Machine-mode JSON remains structured by design.
+
 Clef is always exposed to `check` and `run`. Repeat `--package` for extensions,
 for example Segno:
 
@@ -76,7 +83,10 @@ The task timeout is per Tactus build/run phase, defaults to 1,800 seconds, and
 accepts 1–604,800 seconds. Segno derives a longer Running lease from it.
 
 `history --state-key` and `history --occurrence` are mutually exclusive.
-Business-state history and Tactus journals can contain sensitive plugin output.
+Business-state history can contain plugin values. Tactus journals persist only
+a bounded diagnostic projection: prompt/provider raw text, terminal success
+values, and native stderr are redacted or summarized, but errors, hashes, and
+path metadata can still be sensitive.
 
 ## Motivo Studio on Windows x64
 

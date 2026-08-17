@@ -85,12 +85,18 @@ normal Tactus rules, such as `TACTUS_CLEF_SDK`.
 - **Plugins** shows provider, effect, and generic-plugin projections and starts
   offline or live smoke probes.
 - **Runs** pages through the typed event projection for one opaque run ID. Open
-  future event kinds remain visible as structured JSON.
+  future event kinds remain available under collapsed technical details.
 
-One Generate, Check, Run, or Smoke action may be active at a time. Its bounded
-stdout/stderr frames are projected to the renderer in real time. Cancel asks the
-main process to terminate that Tactus process. When the action finishes, the
-renderer refreshes the Studio snapshot.
+One Generate, Check, Run, or Smoke action may be active at a time. The visible
+log contains only `[state]`, `[info]`, `[warning]`, and `[error]` plus bounded
+natural-language messages. Raw stdout/stderr, exit information, event kinds,
+and structured payloads are bounded and available under collapsed technical
+details; stderr is not classified as an error by itself. If the raw action
+projection reaches its byte or frame budget, Studio continues draining the
+Tactus child, discards later raw projection, and emits exactly one canonical
+`[warning]`. Projection loss never kills Tactus or changes the action's exit
+status. Cancel asks the main process to terminate that Tactus process. When the
+action finishes, the renderer refreshes the Studio snapshot.
 
 Studio starts at 120% zoom for more readable desktop text. Hold `Ctrl` while
 using the mouse wheel, or use `Ctrl` + `+` / `-`, to zoom between 80% and 200%.
@@ -123,6 +129,12 @@ The main process never reads `tactus.toml`, `runtime.json`, scripts, or journal
 files. Control JSON is size-limited and validated before it crosses IPC. Action
 output and open event payload strings are scrubbed for the selected root as a
 second line of defense.
+
+Trace-v1 events may include Tactus's additive `presentation` field with one
+closed category and a bounded natural-language message. Studio displays that
+canonical projection and does not infer user-facing severity from open event
+kinds or legacy payloads. The trace remains redacted diagnostic evidence, not
+a replay contract or a source of workflow state.
 
 Electron uses context isolation, renderer sandboxing, no Node integration, a
 locked-down `motivo://app` asset protocol, denied navigation/window creation,

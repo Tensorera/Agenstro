@@ -26,6 +26,7 @@ clap = { version = "=4.5.60", features = ["derive"] }
 command-group = { version = "=5.0.1", default-features = false }
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 dunce = "=1.0.5"
+fs4 = { version = "=1.1.0", default-features = false, features = ["sync"] }
 ignore = { version = "=0.4.31", default-features = false }
 nix = { version = "=0.27.1", default-features = false, features = ["process", "signal"] }
 prost = { version = "=0.14.4", default-features = false, features = ["derive", "std"] }

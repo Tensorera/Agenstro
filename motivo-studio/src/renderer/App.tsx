@@ -102,6 +102,7 @@ export default function App() {
           stderr: "",
           stdoutChunks: 0,
           stderrChunks: 0,
+          presentations: [],
         });
         setOutputStream("stdout");
         return;
@@ -116,6 +117,9 @@ export default function App() {
             ...current,
             [event.stream]: appendBounded(current[event.stream], event.text),
             [counter]: current[counter] + 1,
+            presentations: event.presentation
+              ? [...current.presentations, { sequence: event.sequence, ...event.presentation }]
+              : current.presentations,
           };
         });
         return;
@@ -202,6 +206,7 @@ export default function App() {
               stderr: "",
               stdoutChunks: 0,
               stderrChunks: 0,
+              presentations: [],
             },
       );
       setOutputStream("stdout");

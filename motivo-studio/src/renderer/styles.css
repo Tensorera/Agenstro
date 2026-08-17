@@ -1204,14 +1204,13 @@ textarea:disabled {
 
 .event-row {
   display: grid;
-  grid-template-columns: 47px 95px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: start;
   padding: 11px 15px;
   border-bottom: 1px solid var(--line-soft);
 }
 
-.event-row > span:first-child,
 .event-time {
   color: #62645e;
   font:
@@ -1219,7 +1218,50 @@ textarea:disabled {
     monospace;
 }
 
+.event-presentation {
+  display: flex;
+  min-width: 0;
+  gap: 9px;
+  color: #c8cac2;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.presentation-tag {
+  flex: 0 0 auto;
+  color: #86ad91;
+  font:
+    500 8px/1.7 "JetBrains Mono",
+    monospace;
+}
+
+.warning .presentation-tag {
+  color: #d9a85d;
+}
+
+.error .presentation-tag {
+  color: #e58f89;
+}
+
+.state .presentation-tag {
+  color: #8ca9d7;
+}
+
+.event-technical {
+  grid-column: 1 / -1;
+  color: #777971;
+  font-size: 8px;
+}
+
+.event-technical summary,
+.action-technical summary {
+  cursor: pointer;
+  user-select: none;
+}
+
 .event-kind {
+  display: block;
+  margin: 9px 0 5px;
   overflow: hidden;
   color: var(--orange);
   font:
@@ -1299,6 +1341,10 @@ textarea:disabled {
   margin-left: auto;
 }
 
+.action-control {
+  margin-left: auto;
+}
+
 .segmented {
   display: inline-flex;
   padding: 2px;
@@ -1329,7 +1375,7 @@ textarea:disabled {
 }
 
 .action-output {
-  flex: 1;
+  max-height: 128px;
   min-height: 0;
   margin: 0;
   padding: 12px 15px 20px;
@@ -1343,24 +1389,51 @@ textarea:disabled {
 }
 
 .action-body {
-  display: flex;
+  display: grid;
   min-height: 0;
-  flex-direction: column;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
-.action-message {
-  flex: 0 0 auto;
-  padding: 7px 15px;
-  color: #d2d3cd;
-  background: #191a17;
-  border-bottom: 1px solid var(--line-soft);
+.presentation-log {
+  min-height: 0;
+  padding: 10px 15px;
+  overflow: auto;
+}
+
+.presentation-line {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 7px;
+  color: #c8cac2;
   font-size: 9px;
+  line-height: 1.5;
 }
 
-.action-message.failed,
-.action-message.cancelled {
-  color: #f1aaa5;
-  background: #261817;
+.action-technical {
+  padding: 8px 15px 10px;
+  color: #777971;
+  background: #121310;
+  border-top: 1px solid var(--line-soft);
+  font-size: 8px;
+}
+
+.action-technical .segmented {
+  display: flex;
+  width: fit-content;
+  margin-top: 8px;
+}
+
+.action-diagnostic {
+  max-height: 72px;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  color: #d3a19d;
+  background: #181310;
+  font:
+    8px/1.5 "JetBrains Mono",
+    monospace;
+  white-space: pre-wrap;
 }
 
 .action-output.stderr {

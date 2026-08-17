@@ -79,11 +79,17 @@ export function RunsView({
             <ol className="event-list">
               {events.map((event) => (
                 <li className="event-row" key={`${selectedRunId ?? "run"}:${event.seq}`}>
-                  <span>#{event.seq}</span>
-                  <strong className="event-kind" title={event.kind}>
-                    {event.kind}
-                  </strong>
-                  <pre className="event-payload">{formatEventData(event.data)}</pre>
+                  {event.presentation ? (
+                    <div className={`event-presentation ${event.presentation.category}`}>
+                      <span className="presentation-tag">[{event.presentation.category}]</span>
+                      <span>{event.presentation.message}</span>
+                    </div>
+                  ) : null}
+                  <details className="event-technical">
+                    <summary>Technical details · event #{event.seq}</summary>
+                    <strong className="event-kind">{event.kind}</strong>
+                    <pre className="event-payload">{formatEventData(event.data)}</pre>
+                  </details>
                   <time className="event-time">{formatTime(event.atUnixMs)}</time>
                 </li>
               ))}

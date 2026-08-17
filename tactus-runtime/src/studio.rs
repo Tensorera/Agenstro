@@ -17,7 +17,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    journal::{RunSummary, TRACE_API, TraceEvent},
+    journal::{Presentation, RunSummary, TRACE_API, TraceEvent},
     process::{InvocationKind, ProcessOutcome},
     workspace::{RuntimeConfig, Workspace, WorkspaceError, discover_scripts, doctor},
 };
@@ -270,6 +270,9 @@ pub struct StudioEvent {
     pub at_unix_ms: String,
     /// Open event category.
     pub kind: String,
+    /// Ready-to-display human projection supplied by Tactus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Presentation>,
     /// Open structured event payload.
     pub data: Value,
 }
@@ -441,6 +444,7 @@ pub fn events(
             seq: trace.seq.to_string(),
             at_unix_ms: trace.at_unix_ms.to_string(),
             kind: trace.kind,
+            presentation: trace.presentation,
             data: trace.data,
         });
     }
@@ -697,6 +701,52 @@ fn first_event_context(path: &Path, run_id: &str) -> RunContext {
             .map(ToOwned::to_owned)
     };
     match event.kind.as_str() {
+        "runtime.state_transition" => {
+            let trigger = object
+                .and_then(|data| data.get("trigger"))
+                .and_then(Value::as_object);
+            let code = trigger
+                .and_then(|trigger| trigger.get("code"))
+                .and_then(Value::as_str);
+            let details = trigger
+                .and_then(|trigger| trigger.get("details"))
+                .and_then(Value::as_object);
+            let detail = |name: &str| {
+                details
+                    .and_then(|details| details.get(name))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            };
+            if code == Some("workflow.generation_requested") {
+                let provider = detail("provider");
+                return RunContext {
+                    label: Some(provider.as_ref().map_or_else(
+                        || "Generate workflow".to_owned(),
+                        |name| format!("Generate with {name}"),
+                    )),
+                    namespace: Some("provider".to_owned()),
+                    subject: provider,
+                    method: Some("generate".to_owned()),
+                    corrupt: false,
+                };
+            }
+            let namespace = detail("namespace");
+            let subject = detail("plugin");
+            let method = detail("method");
+            let label = match (&namespace, &subject, &method) {
+                (Some(namespace), Some(subject), Some(method)) => {
+                    format!("{namespace}:{subject} · {method}")
+                }
+                _ => "Runtime transition".to_owned(),
+            };
+            RunContext {
+                label: Some(label),
+                namespace,
+                subject,
+                method,
+                corrupt: false,
+            }
+        }
         "generation.started" => {
             let provider = value("provider");
             RunContext {
@@ -951,6 +1001,8 @@ mod tests {
             exit_code: Some(0),
             terminal: None,
             frames_seen: 1,
+            events_dropped: 0,
+            observation_error: None,
             stderr: String::new(),
             stderr_truncated: false,
             error: None,
@@ -1012,9 +1064,28 @@ mod tests {
         let report = initialize_workspace(&project, Some(&sdk)).expect("workspace");
         let mut journal = RunJournal::create(&report.workspace).expect("journal");
         journal
-            .record(
-                "invocation.started",
-                serde_json::json!({"namespace":"plugin","plugin":"demo","method":"work"}),
+            .record_transition(
+                "ready",
+                crate::journal::TransitionTrigger::new(
+                    crate::journal::TriggerKind::Request,
+                    "tactus.test",
+                    "plugin.invocation_requested",
+                )
+                .with_details(serde_json::json!({
+                    "namespace":"plugin",
+                    "plugin":"demo",
+                    "method":"work"
+                })),
+                crate::journal::TransitionGuard::new(
+                    "request is valid",
+                    true,
+                    "The test request passed validation.",
+                ),
+                "running",
+                crate::journal::Presentation::new(
+                    crate::journal::PresentationCategory::State,
+                    "Demo work started.",
+                ),
             )
             .expect("event one");
         journal
@@ -1025,6 +1096,14 @@ mod tests {
 
         let first = events(&project, &run_id, 0, 1, 1024 * 1024).expect("first page");
         assert_eq!(first.events[0].seq, "1");
+        assert_eq!(
+            first.events[0]
+                .presentation
+                .as_ref()
+                .expect("presentation")
+                .message,
+            "Demo work started."
+        );
         assert_eq!(first.next_after, "1");
         assert!(!first.complete);
         let second = events(&project, &run_id, 1, 10, 1024 * 1024).expect("second page");

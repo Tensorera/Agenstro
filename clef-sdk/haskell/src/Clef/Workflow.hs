@@ -37,11 +37,13 @@ import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Exception
   ( AsyncException,
     SomeException,
+    displayException,
     fromException,
     mask,
     throwIO,
     try,
   )
+import Control.Monad (unless)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -58,7 +60,21 @@ import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (encodeUtf8)
-import Clef.Error (WorkflowError (..))
+import System.Exit (exitFailure)
+import Clef.Diagnostic
+  ( PresentationLevel (..),
+    RuntimeMessage (..),
+    RuntimeStateTransition (..),
+    TransitionGuard (..),
+    TransitionTrigger (..),
+    TriggerKind (..),
+    renderPresentationLine,
+  )
+import Clef.Error
+  ( WorkflowError (..),
+    renderWorkflowError,
+    workflowErrorDiagnostic,
+  )
 import Clef.Plugin.Protocol (decodeStrictJSON)
 import Clef.Runtime
   ( PluginCallResult (..),
@@ -71,6 +87,7 @@ import Clef.Runtime
     readRuntimeRecords,
     recordRuntime,
     runtimeConfig,
+    writeRuntimePresentation,
   )
 import qualified Clef.Runtime.Config as Config
 
@@ -304,29 +321,211 @@ attempt :: Workflow value -> Workflow (Either WorkflowError value)
 attempt workflow = Workflow $ \runtime -> try (executeWorkflow workflow runtime)
 
 -- | Run a workflow and boundedly flush its orthogonal record projection before
--- returning.  A known workflow/plugin failure remains authoritative if the
--- sink also fails; sink failure only replaces an otherwise successful result.
+-- returning.  Presentation and diagnostic projection are observations: a sink
+-- failure never replaces either a successful value or a known workflow/plugin
+-- failure.  The sink failure remains available as an internal runtime record.
 -- Asynchronous cancellation is rethrown immediately.
 runWorkflow :: forall value. Runtime -> Workflow value -> IO value
 runWorkflow runtime workflow = do
+  workflowId <- freshRuntimeId runtime
+  recordWorkflowTransition
+    runtime
+    workflowId
+    "ready"
+    "running"
+    RequestTrigger
+    "workflow.request.accepted"
+    "clef.runWorkflow"
+    "Workflow started."
+    "The runtime is initialized and the workflow value is ready."
+    "Clef accepted the workflow execution request."
+    mempty
   outcome <- try (executeWorkflow workflow runtime) :: IO (Either SomeException value)
   case outcome of
     Left exception -> case fromException exception :: Maybe AsyncException of
-      Just _ -> throwIO exception
+      Just _ -> do
+        recordWorkflowTransition
+          runtime
+          workflowId
+          "running"
+          "cancelled"
+          ControlTrigger
+          "workflow.control.cancelled"
+          "runtime"
+          "Workflow entered the cancelled state."
+          "An asynchronous cancellation was received."
+          "Cancellation has priority over continued workflow execution."
+          mempty
+        recordWorkflowMessage
+          runtime
+          workflowId
+          "workflow.cancelled"
+          WarningLevel
+          "Workflow execution was cancelled before it produced a terminal value."
+          mempty
+        throwIO exception
       Nothing -> do
+        case fromException exception :: Maybe WorkflowError of
+          Just workflowError ->
+            let (stateAfter, message) = case workflowError of
+                  PluginOutcomeUnknown {} ->
+                    ( "outcome_unknown",
+                      "Workflow entered the outcome-unknown state."
+                    )
+                  _ -> ("failed", "Workflow entered the failed state.")
+             in recordWorkflowTransition
+                  runtime
+                  workflowId
+                  "running"
+                  stateAfter
+                  InternalResultTrigger
+                  "workflow.result.error"
+                  "clef.workflow"
+                  message
+                  "Workflow execution returned a typed failure."
+                  "The failure determines the workflow terminal state."
+                  (KeyMap.singleton "error" (workflowErrorDiagnostic workflowError))
+          Nothing ->
+            recordWorkflowTransition
+              runtime
+              workflowId
+              "running"
+              "failed"
+              InternalResultTrigger
+              "workflow.result.exception"
+              "haskell.runtime"
+              "Workflow entered the failed state after an unexpected runtime error."
+              "Workflow execution raised an untyped exception."
+              "Clef cannot produce a successful value after the exception."
+              (KeyMap.singleton "exception" (toJSON (displayException exception)))
         _ <- flushRuntimeSink runtime
         throwIO exception
     Right value -> do
-      sinkOutcome <- flushRuntimeSink runtime
-      case sinkOutcome of
-        Left message -> throwIO (RuntimeSinkFailed message)
-        Right () -> pure value
+      recordWorkflowTransition
+        runtime
+        workflowId
+        "running"
+        "succeeded"
+        InternalResultTrigger
+        "workflow.result.success"
+        "clef.workflow"
+        "Workflow completed successfully."
+        "Workflow execution returned a typed value."
+        "The typed value is the authoritative terminal result."
+        mempty
+      _ <- flushRuntimeSink runtime
+      pure value
 
-runTactus :: Workflow value -> IO value
+recordWorkflowTransition :: Runtime -> Text -> Text -> Text -> TriggerKind -> Text -> Text -> Text -> Text -> Text -> Object -> IO ()
+recordWorkflowTransition runtime workflowId stateBefore stateAfter triggerKind triggerCode triggerSource message condition reason context =
+  recordRuntime
+    runtime
+    ( RuntimeTransitionRecord
+        ( RuntimeStateTransition
+            { stateTransitionCode = triggerCode,
+              stateTransitionMessage = message,
+              stateTransitionSubject = workflowId,
+              stateTransitionStateBefore = stateBefore,
+              stateTransitionTrigger =
+                TransitionTrigger
+                  { transitionTriggerKind = triggerKind,
+                    transitionTriggerSource = triggerSource,
+                    transitionTriggerCode = triggerCode,
+                    transitionTriggerDetails = Nothing
+                  },
+              stateTransitionGuard =
+                TransitionGuard
+                  { transitionGuardCondition = condition,
+                    transitionGuardPassed = True,
+                    transitionGuardReason = reason
+                  },
+              stateTransitionStateAfter = stateAfter,
+              stateTransitionContext = context
+            }
+        )
+    )
+
+recordWorkflowMessage :: Runtime -> Text -> Text -> PresentationLevel -> Text -> Object -> IO ()
+recordWorkflowMessage runtime workflowId messageCode level message context =
+  recordRuntime
+    runtime
+    ( RuntimeMessageRecord
+        RuntimeMessage
+          { runtimeMessageCode = messageCode,
+            runtimeMessageLevel = level,
+            runtimeMessageText = message,
+            runtimeMessageContext = KeyMap.insert "workflow_id" (toJSON workflowId) context
+          }
+    )
+
+-- | Standard executable entry point.  Synchronous failures are rendered once
+-- as concise tagged natural language and terminate without exposing JSON or
+-- GHC's uncaught-exception call stack.  Asynchronous exceptions are always
+-- rethrown.  Library users that need exception semantics should use
+-- 'runWorkflow' or 'runTactusWithRecords'.
+runTactus :: forall value. Workflow value -> IO value
 runTactus workflow = do
-  config <- Config.loadRuntimeConfigFromEnv
-  runtime <- newRuntime config
-  runWorkflow runtime workflow
+  runtimeOutcome <-
+    try (Config.loadRuntimeConfigFromEnv >>= newRuntime) :: IO (Either SomeException Runtime)
+  case runtimeOutcome of
+    Left exception -> handleTactusException Nothing exception
+    Right runtime -> do
+      outcome <- try (runWorkflow runtime workflow) :: IO (Either SomeException value)
+      case outcome of
+        Right value -> pure value
+        Left exception -> handleTactusException (Just runtime) exception
+
+handleTactusException :: Maybe Runtime -> SomeException -> IO value
+handleTactusException maybeRuntime exception =
+  case fromException exception :: Maybe AsyncException of
+    Just asyncException -> throwIO asyncException
+    Nothing -> case fromException exception :: Maybe WorkflowError of
+      Just workflowError -> do
+        alreadyPresented <- case maybeRuntime of
+          Nothing -> pure False
+          Just runtime -> workflowErrorWasPresented workflowError <$> readRuntimeRecords runtime
+        unless alreadyPresented (presentWorkflowError workflowError)
+        exitFailure
+      Nothing -> do
+        writeRuntimePresentation
+          ( renderPresentationLine
+              ErrorLevel
+              "Workflow execution stopped because of an unexpected Haskell runtime error. Inspect the diagnostic record for technical details."
+          )
+        exitFailure
+
+presentWorkflowError :: WorkflowError -> IO ()
+presentWorkflowError workflowError =
+  writeRuntimePresentation
+    (renderPresentationLine level (renderWorkflowError workflowError))
+  where
+    level = case workflowError of
+      PluginOutcomeUnknown {} -> WarningLevel
+      _ -> ErrorLevel
+
+workflowErrorWasPresented :: WorkflowError -> [RuntimeRecord] -> Bool
+workflowErrorWasPresented workflowError records =
+  not sinkFailed
+    && case workflowError of
+      PluginOutcomeUnknown {} -> hasMessageCode "plugin.outcome_unknown"
+      PluginReportedFailure {} -> hasMessageCode "plugin.failure.reported"
+      _ -> False
+  where
+    sinkFailed = hasInternalDiagnostic "runtime.sink_failed"
+    hasMessageCode expected =
+      any
+        (\record -> case record of
+          RuntimeMessageRecord message -> runtimeMessageCode message == expected
+          _ -> False
+        )
+        records
+    hasInternalDiagnostic expected =
+      any
+        (\record -> case record of
+          RuntimeInternalDiagnosticRecord message -> runtimeMessageCode message == expected
+          _ -> False
+        )
+        records
 
 -- | Retain provider events and effect evidence on both successful and failed
 -- workflow outcomes.  Invalid runtime configuration still fails before a

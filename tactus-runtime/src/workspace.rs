@@ -2,7 +2,8 @@
 
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -22,6 +23,15 @@ pub const PROMPT_NAME: &str = "PROMPT.md";
 pub const SCRIPTS_DIRECTORY: &str = "scripts";
 /// Directory containing immutable per-run records.
 pub const RUNS_DIRECTORY: &str = "runs";
+/// Directory containing runtime-owned agent guidance.
+pub const SKILLS_DIRECTORY: &str = "skills";
+/// Canonical Tactus skill directory name.
+pub const TACTUS_SKILL_DIRECTORY: &str = "tactus";
+
+const TACTUS_SKILL: &str = include_str!("../../skills/tactus/SKILL.md");
+const TACTUS_SKILL_COMMANDS: &str = include_str!("../../skills/tactus/references/commands.md");
+const TACTUS_SKILL_OUTCOMES: &str = include_str!("../../skills/tactus/references/outcomes.md");
+const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 
 const DEFAULT_CONFIG: &str = r#"api = "clef.runtime/v1"
 default_provider = "codex"
@@ -51,6 +61,8 @@ const DEFAULT_PROMPT: &str = r#"# Tactus workflow scripts
 - Helpers may use any valid Haskell filename and nested directory.
 - Each entry is an ordinary command-line Haskell program using `clef-sdk`.
 - Route external work through configured providers, effects, or generic plugins.
+- Before inspecting or changing existing workflows, follow
+  `.tactus/skills/tactus/SKILL.md`.
 - During generation, only create or update DSL sources. Do not invoke Cabal, GHC,
   tests, or the generated workflows; Tactus owns those later phases.
 "#;
@@ -234,6 +246,28 @@ impl Workspace {
             self.root.join(&config.instructions)
         };
         fs::read_to_string(path).map_err(WorkspaceError::Io)
+    }
+
+    /// Read the project-local Tactus skill, falling back to the embedded
+    /// version for workspaces initialized by an older runtime.
+    pub fn read_tactus_skill(&self) -> Result<String, WorkspaceError> {
+        let skill_root = self
+            .control
+            .join(SKILLS_DIRECTORY)
+            .join(TACTUS_SKILL_DIRECTORY);
+        let references = skill_root.join("references");
+        let skill =
+            read_contained_skill_file(&self.root, &self.control, &skill_root.join("SKILL.md"))?
+                .unwrap_or_else(|| TACTUS_SKILL.to_owned());
+        let commands =
+            read_contained_skill_file(&self.root, &self.control, &references.join("commands.md"))?
+                .unwrap_or_else(|| TACTUS_SKILL_COMMANDS.to_owned());
+        let outcomes =
+            read_contained_skill_file(&self.root, &self.control, &references.join("outcomes.md"))?
+                .unwrap_or_else(|| TACTUS_SKILL_OUTCOMES.to_owned());
+        Ok(format!(
+            "{skill}\n\n# Bundled command reference\n\n{commands}\n\n# Bundled outcome reference\n\n{outcomes}"
+        ))
     }
 
     /// Produce the language-neutral runtime JSON consumed by Clef.
@@ -428,12 +462,29 @@ pub fn initialize_workspace(
     let root = dunce::canonicalize(root.as_ref()).map_err(WorkspaceError::Io)?;
     let sdk = resolve_sdk(&root, supplied_sdk)?;
     let workspace = Workspace::at(&root);
+    let skill_root = workspace
+        .control
+        .join(SKILLS_DIRECTORY)
+        .join(TACTUS_SKILL_DIRECTORY);
+    let skill_references = skill_root.join("references");
+    reject_linked_skill_directories(&root, &skill_references)?;
+    fs::create_dir_all(&skill_references).map_err(WorkspaceError::Io)?;
+    require_contained_directory(&root, &workspace.control, &skill_references)?;
     fs::create_dir_all(&workspace.scripts_path).map_err(WorkspaceError::Io)?;
     fs::create_dir_all(&workspace.runs_path).map_err(WorkspaceError::Io)?;
 
     let mut files = vec![
         (workspace.config_path.clone(), DEFAULT_CONFIG.to_owned()),
         (workspace.prompt_path.clone(), DEFAULT_PROMPT.to_owned()),
+        (skill_root.join("SKILL.md"), TACTUS_SKILL.to_owned()),
+        (
+            skill_references.join("commands.md"),
+            TACTUS_SKILL_COMMANDS.to_owned(),
+        ),
+        (
+            skill_references.join("outcomes.md"),
+            TACTUS_SKILL_OUTCOMES.to_owned(),
+        ),
     ];
     let portable = sdk.to_string_lossy().replace('\\', "/");
     let quoted = serde_json::to_string(&portable).expect("a path string is valid JSON");
@@ -467,6 +518,103 @@ pub fn initialize_workspace(
         clef_sdk: sdk,
         created,
         preserved,
+    })
+}
+
+fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceError> {
+    let resolved_root = dunce::canonicalize(root).map_err(WorkspaceError::Io)?;
+    let relative = leaf.strip_prefix(root).map_err(|_| {
+        WorkspaceError::InvalidConfig("Tactus skill path escaped the workspace".to_owned())
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(WorkspaceError::InvalidConfig(format!(
+                    "Tactus skill directory must not be a link: {}",
+                    current.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(WorkspaceError::InvalidConfig(format!(
+                    "Tactus skill directory is not a directory: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {
+                // `symlink_metadata` does not classify Windows junctions as
+                // symbolic links.  Canonical containment catches those (and
+                // any other reparse-point directory) before `create_dir_all`
+                // can materialize skill files outside this workspace.
+                let resolved_current = dunce::canonicalize(&current).map_err(WorkspaceError::Io)?;
+                if !resolved_current.starts_with(&resolved_root) {
+                    return Err(WorkspaceError::InvalidConfig(format!(
+                        "Tactus skill directory resolved outside the workspace: {}",
+                        current.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn require_contained_directory(
+    root: &Path,
+    control: &Path,
+    directory: &Path,
+) -> Result<(), WorkspaceError> {
+    let resolved_root = dunce::canonicalize(root).map_err(WorkspaceError::Io)?;
+    let resolved_control = dunce::canonicalize(control).map_err(WorkspaceError::Io)?;
+    let resolved_directory = dunce::canonicalize(directory).map_err(WorkspaceError::Io)?;
+    if !resolved_control.starts_with(&resolved_root)
+        || !resolved_directory.starts_with(&resolved_control)
+    {
+        return Err(WorkspaceError::InvalidConfig(
+            "Tactus skill directory resolved outside the workspace".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_contained_skill_file(
+    root: &Path,
+    control: &Path,
+    path: &Path,
+) -> Result<Option<String>, WorkspaceError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(WorkspaceError::Io(error)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let resolved_root = dunce::canonicalize(root).map_err(WorkspaceError::Io)?;
+    let resolved_control = dunce::canonicalize(control).map_err(WorkspaceError::Io)?;
+    let resolved_path = dunce::canonicalize(path).map_err(WorkspaceError::Io)?;
+    if !resolved_control.starts_with(&resolved_root)
+        || !resolved_path.starts_with(&resolved_control)
+    {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(resolved_path)
+        .map_err(WorkspaceError::Io)?
+        .take(MAX_SKILL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(WorkspaceError::Io)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SKILL_FILE_BYTES {
+        return Err(WorkspaceError::InvalidConfig(format!(
+            "Tactus skill file exceeds {MAX_SKILL_FILE_BYTES} bytes: {}",
+            path.display()
+        )));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        WorkspaceError::InvalidConfig(format!("Tactus skill is not UTF-8: {}", path.display()))
     })
 }
 
@@ -903,5 +1051,42 @@ mod tests {
             .find(|check| check.name == "clef-sdk-link")
             .expect("link check");
         assert!(!linkage.ok);
+    }
+
+    #[test]
+    fn older_workspace_receives_complete_embedded_skill_guidance() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        fs::create_dir_all(root.join(CONTROL_DIRECTORY)).expect("control directory");
+        let workspace = Workspace::at(&root);
+
+        let guidance = workspace.read_tactus_skill().expect("embedded skill");
+        assert!(guidance.contains("Never blindly retry `OutcomeUnknown`"));
+        assert!(guidance.contains("# Bundled command reference"));
+        assert!(guidance.contains("# Bundled outcome reference"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_rejects_linked_skill_directories_before_writing_outside() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let sdk = temporary.path().join("sdk");
+        let outside = temporary.path().join("outside");
+        fs::create_dir_all(root.join(CONTROL_DIRECTORY)).expect("control directory");
+        fs::create_dir_all(&sdk).expect("sdk directory");
+        fs::create_dir_all(&outside).expect("outside directory");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk manifest");
+        symlink(
+            &outside,
+            root.join(CONTROL_DIRECTORY).join(SKILLS_DIRECTORY),
+        )
+        .expect("skill symlink");
+
+        let error = initialize_workspace(&root, Some(&sdk)).expect_err("linked skills rejected");
+        assert!(error.to_string().contains("must not be a link"));
+        assert!(!outside.join(TACTUS_SKILL_DIRECTORY).exists());
     }
 }

@@ -17,18 +17,18 @@ successful call to a live provider account.
 | --- | --- | --- | --- | --- |
 | Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build all` and `cabal test all`; fake JSONL plugins exercise typed tasks/plugins and incremental events |
 | Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | format, package-scoped check/test/clippy; commands are `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
-| Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, and exit behavior use local fakes |
-| Run journal | `agenstro.trace/v1` | Current gate | Current gate | ordered append-flushed events and atomic terminal summary are tested; no replay/rollback claim |
+| Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, low-priority observation loss, authoritative terminal preservation, and exit behavior use local fakes |
+| Run journal | `agenstro.trace/v1` | Current gate | Current gate | ordered append-flushed diagnostic events, atomic terminal summary, prompt/provider raw redaction, terminal-value summaries, and degraded-writer outcome preservation are tested; no replay/rollback claim |
 | Process supervision | Unix process group / Windows Job Object | Current gate | Current gate | deadline/cancellation/protocol failure terminate the owned group; deliberate Unix session escape remains outside process-group containment; remote completion is unknowable |
 | Codex adapter | Local `codex` executable | Adapter/fake tested | Adapter/fake tested | `describe`, offline smoke, dangerous-bypass argv, model/effort, and native output parsing; login/live behavior not a default gate |
 | Claude Code adapter | Local `claude` executable; registry key `claude-code` | Adapter/fake tested | Adapter/fake tested | print/stream argv and dangerous permission bypass are fake-tested; login/live behavior not a default gate |
 | OpenCode adapter | Local `opencode` executable | Adapter/fake tested | Adapter/fake tested | `--auto`, inline `permission=allow`, model/variant, and parsing are fake-tested; `full_bypass=false` because deny/managed policy may win |
 | `workspace.paths` effect | Metadata, size, and SHA-256 snapshots | Current gate | Current gate | snapshot/diff/forget and observer calls; no reads, transient-write detection, content retention, attribution, CAS, or rollback |
 | Generic `[plugins]` registry | Any one-shot executable | Current gate | Current gate | typed TOML/runtime JSON plus Clef `jsonPlugin`/`rawPlugin` and Tactus `plugin-call`; implementation language is unrestricted |
-| Tactus Studio control API | `tactus.control/v1` + `agenstro.studio/v1` | Current gate | Current gate | redacted inspect projection, decimal-string counters, bounded run-event pages, run-id/path validation, and trace integrity use Rust tests |
+| Tactus Studio control API | `tactus.control/v1` + `agenstro.studio/v1` | Current gate | Current gate | redacted inspect projection, four-category natural-language presentation, decimal-string counters, bounded run-event pages, run-id/path validation, and trace integrity use Rust tests |
 | `tactus smoke` | Offline unless `--live` | Current gate | Current gate | default sends no model prompt; CI uses fakes; live native/account compatibility is opt-in evidence |
 | Topology-holes example | Four Haskell workflow stages + offline Rust oracle | Current gate | Current gate | real Tactus -> runghc -> Clef -> dispatch acceptance runs 010 -> 040 with parallel reviews and observer journals; the oracle verifies holes/Euler independently |
-| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; fake Tactus only, no model credentials; packaged app requires external `tactus` |
+| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; four-label presentation and non-fatal raw-output projection loss use fake Tactus, with no model credentials; packaged app requires external `tactus` |
 | Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test all`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
 | Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
 | Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
@@ -57,6 +57,8 @@ successful call to a live provider account.
 | Direct `tactus check/run --timeout-seconds` | 1,800-second default; `0` disables the direct Tactus deadline |
 | `segno install/once/driver --task-timeout-seconds` | 1,800-second default for each Tactus build/run phase; accepted range 1 through 604,800; `0` is rejected |
 | `segno driver --poll-seconds` | Positive finite maximum idle wait; default 1 second; it is neither the trigger interval nor a task deadline |
+| Observation delivery | Bounded and non-authoritative; provider/UI layers may aggregate or coalesce progress, while Tactus drops excess low-priority callbacks into `events_dropped`; callback degradation becomes `observation_error`, and neither changes the authoritative invocation terminal |
+| Motivo action-output projection | A byte/frame overrun emits one `[warning]`, discards later raw projection, and continues draining Tactus without changing the child outcome |
 | Occurrence delivery | At least once; tasks should deduplicate external effects with the occurrence idempotency key |
 | Ambiguous execution | `OutcomeUnknown` is terminal and not automatically retried; successful checkpoints remain durable and require explicit external reconciliation |
 
@@ -75,11 +77,13 @@ successful call to a live provider account.
   external-effect rollback mechanism.
 - `workspace.paths` is final-state evidence only. Direct `IO`, reads, transient
   writes, and concurrent processes can fall outside or blur its evidence.
-- Run journals can contain sensitive provider output and are not automatically
-  redacted.
+- Run journals redact prompt/provider raw fields and summarize terminal values
+  and native stderr before persistence. Bounded errors, hashes, and path
+  metadata can still be sensitive.
 - The active-window example is model/network-free, but window titles can expose
-  documents, URLs, and account names. They remain in local Tactus run evidence
-  and Segno SQLite history until the user manages those files.
+  documents, URLs, and account names. Titles remain in Segno SQLite business
+  history until the user manages that state; Tactus retains only a redacted
+  diagnostic summary of the plugin result.
 
 ## Development tool boundary
 

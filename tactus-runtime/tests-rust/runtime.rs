@@ -155,6 +155,34 @@ fn concurrently_drains_and_bounds_stderr() {
 }
 
 #[test]
+fn progress_budget_drops_events_without_changing_terminal_outcome() {
+    let (_temporary, mut spec) = fixture_spec("flood");
+    spec.limits.max_frames = 8;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let outcome = ProcessSupervisor
+        .invoke(&spec, &request(), &CancellationToken::new(), move |frame| {
+            sink.lock().expect("event lock").push(frame.clone());
+        })
+        .expect("invoke");
+    assert_eq!(outcome.kind, InvocationKind::Succeeded);
+    assert!(outcome.frames_seen > 10_000);
+    assert!(outcome.events_dropped > 0);
+    assert!(matches!(
+        outcome.terminal,
+        Some(TerminalResult::Success { .. })
+    ));
+    assert!(
+        observed
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|frame| matches!(frame, PluginFrame::Result { .. })),
+        "terminal callback did not receive its reserved slot"
+    );
+}
+
+#[test]
 fn rejects_duplicate_terminal_and_invalid_utf8() {
     for mode in ["duplicate", "invalid-utf8", "missing"] {
         let (_temporary, spec) = fixture_spec(mode);
@@ -243,6 +271,25 @@ fn blocked_frame_sink_cannot_defeat_supervision() {
         started.elapsed() < Duration::from_secs(2),
         "a blocked event consumer froze supervision"
     );
+}
+
+#[test]
+fn stalled_observer_does_not_change_a_known_terminal_result() {
+    let (_temporary, mut spec) = fixture_spec("success");
+    spec.limits.deadline = None;
+    let outcome = ProcessSupervisor
+        .invoke(&spec, &request(), &CancellationToken::new(), |frame| {
+            if matches!(frame, PluginFrame::Event { .. }) {
+                thread::sleep(Duration::from_secs(5));
+            }
+        })
+        .expect("invoke");
+    assert_eq!(outcome.kind, InvocationKind::Succeeded);
+    assert!(matches!(
+        outcome.terminal,
+        Some(TerminalResult::Success { .. })
+    ));
+    assert!(outcome.observation_error.is_some());
 }
 
 #[test]
@@ -417,6 +464,31 @@ fn workspace_init_is_idempotent_and_scripts_are_ordered() {
     assert!(!first.created.is_empty());
     assert!(second.created.is_empty());
     assert_eq!(first.created.len(), second.preserved.len());
+    let materialized_skill = first
+        .workspace
+        .control
+        .join("skills")
+        .join("tactus")
+        .join("SKILL.md");
+    assert!(materialized_skill.is_file());
+    assert!(
+        fs::read_to_string(materialized_skill)
+            .expect("materialized Tactus skill")
+            .contains("Never blindly retry `OutcomeUnknown`")
+    );
+    for reference in ["commands.md", "outcomes.md"] {
+        assert!(
+            first
+                .workspace
+                .control
+                .join("skills")
+                .join("tactus")
+                .join("references")
+                .join(reference)
+                .is_file(),
+            "missing materialized skill reference {reference}"
+        );
+    }
 
     fs::write(
         first.workspace.scripts_path.join("020_compose.hs"),
@@ -593,10 +665,29 @@ fn invocation_journal_does_not_copy_plugin_arguments_or_credentials() {
     assert!(!journal.contains(secret));
     let started: serde_json::Value =
         serde_json::from_str(journal.lines().next().expect("started event")).expect("event");
-    assert_eq!(started["kind"], "invocation.started");
-    assert_eq!(started["data"]["namespace"], "plugin");
-    assert_eq!(started["data"]["argument_count"], 2);
-    assert!(started["data"].get("command").is_none());
+    assert_eq!(started["kind"], "runtime.state_transition");
+    assert_eq!(started["data"]["state_before"], "ready");
+    assert_eq!(started["data"]["trigger"]["kind"], "request");
+    assert_eq!(started["data"]["trigger"]["details"]["namespace"], "plugin");
+    assert_eq!(started["data"]["trigger"]["details"]["argument_count"], 2);
+    assert_eq!(started["data"]["guard"]["passed"], true);
+    assert_eq!(started["data"]["state_after"], "running");
+    assert!(
+        started["data"]["trigger"]["details"]
+            .get("command")
+            .is_none()
+    );
+    let transitions = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("event"))
+        .filter(|event| event["kind"] == "runtime.state_transition")
+        .collect::<Vec<_>>();
+    assert_eq!(transitions.len(), 2);
+    let completed = transitions.last().expect("completed transition");
+    assert_eq!(completed["data"]["state_before"], "running");
+    assert_eq!(completed["data"]["trigger"]["kind"], "internal_result");
+    assert_eq!(completed["data"]["guard"]["passed"], true);
+    assert_eq!(completed["data"]["state_after"], "succeeded");
 }
 
 #[test]
@@ -765,7 +856,7 @@ fn generate_distinguishes_provider_success_from_a_script_delta() {
 }
 
 #[test]
-fn generate_text_mode_prints_structured_provider_failure() {
+fn generate_text_mode_prints_only_tagged_natural_language() {
     let (_temporary, project) = initialized_project();
     set_command(
         &project,
@@ -780,9 +871,20 @@ fn generate_text_mode_prints_structured_provider_failure() {
         .expect("generate");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("generation_rejected"), "{stderr}");
+    assert!(!stderr.contains("generation_rejected"), "{stderr}");
     assert!(
         stderr.contains("the requested workflow could not be generated"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("provider.raw"), "{stderr}");
+    assert!(!stderr.contains("{\""), "{stderr}");
+    assert!(stderr.lines().count() <= 12, "{stderr}");
+    assert!(
+        stderr.lines().all(|line| {
+            ["[state] ", "[info] ", "[warning] ", "[error] "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        }),
         "{stderr}"
     );
 }

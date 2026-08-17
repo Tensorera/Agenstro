@@ -60,10 +60,13 @@ describe("Motivo Studio renderer", () => {
         actionId,
         sequence: "1",
         stream: "stdout",
-        text: "010_contract.hs written\n",
+        text: "[info] Wrote 010_contract.hs.\n",
+        presentation: { category: "info", message: "Wrote 010_contract.hs." },
       });
     });
-    expect(await screen.findByText(/010_contract\.hs written/)).toBeVisible();
+    expect(await screen.findByText("Wrote 010_contract.hs.")).toBeVisible();
+    expect(screen.getByText("[info]")).toBeVisible();
+    expect(screen.getByText("[info] Wrote 010_contract.hs.", { exact: false })).not.toBeVisible();
 
     act(() => {
       publish({
@@ -121,6 +124,115 @@ describe("Motivo Studio renderer", () => {
     });
   });
 
+  it("prefers canonical action messages and keeps raw failure diagnostics collapsed", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+
+    act(() => {
+      publish({
+        type: "started",
+        actionId,
+        kind: "check",
+        startedAtUnixMs: "1786853010000",
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "1",
+        stream: "stdout",
+        text: "[state] Workflow check started.\n",
+        presentation: { category: "state", message: "Workflow check started." },
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "2",
+        stream: "stdout",
+        text: "[error] GHC rejected the selected source.\n",
+        presentation: { category: "error", message: "GHC rejected the selected source." },
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "3",
+        stream: "stdout",
+        text: "[info] Diagnostic capture finished.\n",
+        presentation: { category: "info", message: "Diagnostic capture finished." },
+      });
+      publish({
+        type: "finished",
+        actionId,
+        sequence: "4",
+        status: "failed",
+        exitCode: 1,
+        finishedAtUnixMs: "1786853020000",
+        message: '{"raw":"compiler diagnostic"}',
+      });
+    });
+
+    expect(await screen.findByText("Workflow check started.")).toBeVisible();
+    expect(screen.getAllByText("Workflow check started.")).toHaveLength(1);
+    expect(screen.getByText("GHC rejected the selected source.")).toBeVisible();
+    expect(screen.queryByText(/Type-check workflow failed/)).not.toBeInTheDocument();
+    expect(screen.getByText(/compiler diagnostic/)).not.toBeVisible();
+
+    await user.click(screen.getByText(/Technical details · stdout 3/));
+    expect(screen.getByText(/compiler diagnostic/)).toBeVisible();
+  });
+
+  it("does not append a fallback terminal after a canonical state terminal", async () => {
+    render(<App />);
+    await screen.findByText("Workflow entries");
+
+    act(() => {
+      publish({
+        type: "started",
+        actionId,
+        kind: "check",
+        startedAtUnixMs: "1786853010000",
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "1",
+        stream: "stderr",
+        text: "[state] Workflow check started.\n",
+        presentation: { category: "state", message: "Workflow check started." },
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "2",
+        stream: "stderr",
+        text: "[state] Workflow check succeeded.\n",
+        presentation: { category: "state", message: "Workflow check succeeded." },
+      });
+      publish({
+        type: "output",
+        actionId,
+        sequence: "3",
+        stream: "stderr",
+        text: "[info] Run evidence was recorded.\n",
+        presentation: { category: "info", message: "Run evidence was recorded." },
+      });
+      publish({
+        type: "finished",
+        actionId,
+        sequence: "4",
+        status: "succeeded",
+        exitCode: 0,
+        finishedAtUnixMs: "1786853020000",
+      });
+    });
+
+    expect(await screen.findByText("Workflow check succeeded.")).toBeVisible();
+    expect(screen.getByText("Run evidence was recorded.")).toBeVisible();
+    expect(
+      screen.queryByText("Type-check workflow completed successfully."),
+    ).not.toBeInTheDocument();
+  });
+
   it("pages events for the selected run without reading trace files in the renderer", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -134,7 +246,10 @@ describe("Motivo Studio renderer", () => {
         limit: 100,
       }),
     );
-    expect(await screen.findByText("generation.started")).toBeVisible();
+    expect(await screen.findByText("Generation started.")).toBeVisible();
+    expect(screen.getByText("generation.started")).not.toBeVisible();
+    await user.click(screen.getByText("Technical details · event #1"));
+    expect(screen.getByText("generation.started")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Load more events" }));
     await waitFor(() =>
@@ -144,8 +259,39 @@ describe("Motivo Studio renderer", () => {
         limit: 100,
       }),
     );
-    expect(await screen.findByText("provider.completed")).toBeVisible();
+    expect(await screen.findByText("Provider completed.")).toBeVisible();
+    expect(screen.getByText("provider.completed")).not.toBeVisible();
     expect(screen.getByRole("button", { name: "End of trace" })).toBeDisabled();
+  });
+
+  it("keeps legacy event payloads inside collapsed technical details", async () => {
+    const user = userEvent.setup();
+    const legacyPage = eventPage(true);
+    vi.mocked(bridge.runs.events)
+      .mockReset()
+      .mockResolvedValue({
+        ...legacyPage,
+        events: [
+          {
+            seq: "9",
+            atUnixMs: "1786853000100",
+            kind: "legacy.raw_event",
+            data: { diagnostic: "technical value" },
+          },
+        ],
+        nextAfter: "9",
+      });
+
+    render(<App />);
+    await screen.findByText("Workflow entries");
+    await user.click(screen.getByRole("button", { name: "Runs" }));
+
+    const summary = await screen.findByText("Technical details · event #9");
+    expect(screen.getByText("legacy.raw_event")).not.toBeVisible();
+    expect(screen.getByText(/technical value/)).not.toBeVisible();
+    await user.click(summary);
+    expect(screen.getByText("legacy.raw_event")).toBeVisible();
+    expect(screen.getByText(/technical value/)).toBeVisible();
   });
 
   it("keeps one global action and exposes cancellation", async () => {
@@ -178,6 +324,7 @@ function fakeBridge(): {
         atUnixMs: "1786853000600",
         kind: "provider.completed",
         data: { provider: "codex", status: "ok" },
+        presentation: { category: "info", message: "Provider completed." },
       },
     ],
     nextAfter: "2",
@@ -309,6 +456,7 @@ function eventPage(complete: boolean): StudioEventPage {
         atUnixMs: "1786853000100",
         kind: "generation.started",
         data: { provider: "codex" },
+        presentation: { category: "state", message: "Generation started." },
       },
     ],
     nextAfter: "1",

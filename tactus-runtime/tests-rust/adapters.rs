@@ -584,6 +584,39 @@ fn provider_host_drains_but_bounds_large_native_stderr() {
 }
 
 #[test]
+fn claude_twenty_thousand_thinking_events_are_aggregated() {
+    let workspace = tempdir().expect("workspace");
+    let (code, frames, diagnostics) = call_provider(
+        "claude-code",
+        "invoke",
+        json!({
+            "prompt":"count holes",
+            "workspace":workspace.path(),
+            "options":{
+                "command_prefix":[
+                    env!("CARGO_BIN_EXE_tactus-plugin-fixture"),
+                    "native-claude-flood"
+                ],
+                "timeout_seconds":10
+            }
+        }),
+    );
+    assert_eq!(code, 0, "{diagnostics}");
+    assert_eq!(frames.len(), 2, "raw native events leaked: {frames:?}");
+    assert_eq!(frames[0]["type"], "event");
+    assert_eq!(frames[0]["event"]["type"], "provider.diagnostic");
+    assert_eq!(frames[0]["event"]["native_events"], 20_001);
+    assert_eq!(frames[0]["event"]["thinking_events_suppressed"], 20_000);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["event"]["type"] != "provider.raw")
+    );
+    assert_eq!(frames[1]["ok"], true);
+    assert_eq!(frames[1]["value"]["text"], "TACTUS_OK");
+}
+
+#[test]
 fn provider_deadline_kills_pipe_holding_descendant_after_leader_exit() {
     let workspace = tempdir().expect("workspace");
     let marker_directory = tempdir().expect("marker directory");

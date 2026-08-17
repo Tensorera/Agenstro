@@ -1,8 +1,12 @@
-import type { ActionState } from "../shared/contracts";
+import type { ActionState, StudioPresentation } from "../shared/contracts";
 
 export type NavigationView = "overview" | "workflow" | "plugins" | "runs";
 export type ActionStatus = "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
 export type OutputStream = "stdout" | "stderr";
+
+export interface ActionPresentation extends StudioPresentation {
+  readonly sequence: string;
+}
 
 export interface ActiveAction extends ActionState {
   readonly status: ActionStatus;
@@ -10,6 +14,7 @@ export interface ActiveAction extends ActionState {
   readonly stderr: string;
   readonly stdoutChunks: number;
   readonly stderrChunks: number;
+  readonly presentations: readonly ActionPresentation[];
   readonly exitCode?: number | null;
   readonly message?: string | undefined;
 }

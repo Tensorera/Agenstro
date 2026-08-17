@@ -211,7 +211,11 @@ where
             "invalid_json",
             format!("cannot read the single plugin request: {error}"),
         );
-        let _ = writeln!(diagnostics, "plugin protocol: {}", failure.message);
+        let _ = writeln!(
+            diagnostics,
+            "[error] Plugin protocol error: {}",
+            failure.message
+        );
         return finish_failure(&mut writer, &failure, 2);
     }
     if bytes.len() > MAX_REQUEST_BYTES {
@@ -221,7 +225,11 @@ where
             format!("plugin request exceeds {MAX_REQUEST_BYTES} bytes"),
         )
         .with_details(json!({"max_bytes":MAX_REQUEST_BYTES}));
-        let _ = writeln!(diagnostics, "plugin protocol: {}", failure.message);
+        let _ = writeln!(
+            diagnostics,
+            "[error] Plugin protocol error: {}",
+            failure.message
+        );
         return finish_failure(&mut writer, &failure, 2);
     }
 
@@ -234,7 +242,7 @@ where
                 "stdin must contain exactly one strict JSON plugin request",
             )
             .with_details(json!({"reason": error.to_string()}));
-            let _ = writeln!(diagnostics, "plugin protocol: {error}");
+            let _ = writeln!(diagnostics, "[error] Plugin protocol error: {error}");
             return finish_failure(&mut writer, &failure, 2);
         }
     };
@@ -244,12 +252,20 @@ where
         Ok(value) => match writer.success(value) {
             Ok(()) => 0,
             Err(error) => {
-                let _ = writeln!(diagnostics, "plugin: {}: {}", error.code, error.message);
+                let _ = writeln!(
+                    diagnostics,
+                    "[error] Plugin failed with {}: {}",
+                    error.code, error.message
+                );
                 1
             }
         },
         Err(error) => {
-            let _ = writeln!(diagnostics, "plugin: {}: {}", error.code, error.message);
+            let _ = writeln!(
+                diagnostics,
+                "[error] Plugin failed with {}: {}",
+                error.code, error.message
+            );
             finish_failure(&mut writer, &error, 1)
         }
     }
@@ -882,6 +898,93 @@ struct ProviderCompletion {
     text: String,
 }
 
+#[derive(Default)]
+struct ProviderEventDiagnostics {
+    native_events: u64,
+    json_events: u64,
+    plain_lines: u64,
+    thinking_events_suppressed: u64,
+    raw_bytes: u64,
+    stderr_bytes: u64,
+    stderr_lines: u64,
+    stderr_truncated: bool,
+    stderr_sha256: Option<String>,
+    event_types: BTreeMap<String, u64>,
+}
+
+impl ProviderEventDiagnostics {
+    fn observe_json(&mut self, provider: Provider, raw: &Value, bytes: usize) {
+        self.native_events = self.native_events.saturating_add(1);
+        self.json_events = self.json_events.saturating_add(1);
+        self.raw_bytes = self
+            .raw_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        let event_type = raw
+            .as_object()
+            .and_then(|event| event.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let subtype = raw
+            .as_object()
+            .and_then(|event| event.get("subtype"))
+            .and_then(Value::as_str);
+        if provider == Provider::ClaudeCode
+            && (subtype == Some("thinking_tokens")
+                || event_type == "thinking"
+                || event_type == "thinking_delta")
+        {
+            self.thinking_events_suppressed = self.thinking_events_suppressed.saturating_add(1);
+        }
+        if self.event_types.len() < 64 || self.event_types.contains_key(event_type) {
+            let count = self.event_types.entry(event_type.to_owned()).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    fn observe_plain(&mut self, bytes: usize) {
+        self.native_events = self.native_events.saturating_add(1);
+        self.plain_lines = self.plain_lines.saturating_add(1);
+        self.raw_bytes = self
+            .raw_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    fn observe_stderr(&mut self, bytes: &[u8], truncated: bool) {
+        self.stderr_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.stderr_lines = if bytes.is_empty() {
+            0
+        } else {
+            u64::try_from(bytes.split(|byte| *byte == b'\n').count()).unwrap_or(u64::MAX)
+        };
+        self.stderr_truncated = truncated;
+        if !bytes.is_empty() {
+            self.stderr_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
+        }
+    }
+
+    fn payload(&self, provider: Provider) -> Map<String, Value> {
+        Map::from_iter([
+            (
+                "provider".to_owned(),
+                Value::String(provider.name().to_owned()),
+            ),
+            ("native_events".to_owned(), json!(self.native_events)),
+            ("json_events".to_owned(), json!(self.json_events)),
+            ("plain_lines".to_owned(), json!(self.plain_lines)),
+            (
+                "thinking_events_suppressed".to_owned(),
+                json!(self.thinking_events_suppressed),
+            ),
+            ("raw_bytes".to_owned(), json!(self.raw_bytes)),
+            ("stderr_bytes".to_owned(), json!(self.stderr_bytes)),
+            ("stderr_lines".to_owned(), json!(self.stderr_lines)),
+            ("stderr_truncated".to_owned(), json!(self.stderr_truncated)),
+            ("stderr_sha256".to_owned(), json!(self.stderr_sha256)),
+            ("event_types".to_owned(), json!(self.event_types)),
+        ])
+    }
+}
+
 enum NativeChildInner {
     Group(GroupChild),
     #[cfg(unix)]
@@ -1018,6 +1121,7 @@ fn run_provider_command<W: Write, E: Write>(
     let mut fragments = Vec::new();
     let mut final_text = None;
     let mut plain_lines = Vec::new();
+    let mut event_diagnostics = ProviderEventDiagnostics::default();
     while status.is_none()
         || !output_done
         || !input_worker.is_finished()
@@ -1031,16 +1135,7 @@ fn run_provider_command<W: Write, E: Write>(
                 }
                 match serde_json::from_str::<Value>(&text) {
                     Ok(raw) => {
-                        writer.event(
-                            "provider.raw",
-                            Map::from_iter([
-                                (
-                                    "provider".to_owned(),
-                                    Value::String(provider.name().to_owned()),
-                                ),
-                                ("raw".to_owned(), raw.clone()),
-                            ]),
-                        )?;
+                        event_diagnostics.observe_json(provider, &raw, line.len());
                         let (event_fragments, event_final) = provider_event_text(provider, &raw);
                         fragments.extend(event_fragments);
                         if event_final.is_some() {
@@ -1048,16 +1143,7 @@ fn run_provider_command<W: Write, E: Write>(
                         }
                     }
                     Err(_) => {
-                        writer.event(
-                            "provider.output",
-                            Map::from_iter([
-                                (
-                                    "provider".to_owned(),
-                                    Value::String(provider.name().to_owned()),
-                                ),
-                                ("text".to_owned(), Value::String(text.clone())),
-                            ]),
-                        )?;
+                        event_diagnostics.observe_plain(line.len());
                         plain_lines.push(text);
                     }
                 }
@@ -1145,15 +1231,21 @@ fn run_provider_command<W: Write, E: Write>(
         ));
     }
     let captured = join_capture(diagnostics_worker, "provider stderr")?;
+    event_diagnostics.observe_stderr(&captured.bytes, captured.truncated);
     forward_diagnostics(provider, &captured.bytes, diagnostics);
     if captured.truncated {
         let _ = writeln!(
             diagnostics,
-            "[{}] stderr truncated after {} bytes",
+            "[warning] {} stderr truncated after {} bytes.",
             provider.name(),
             MAX_NATIVE_STDERR_BYTES
         );
     }
+    // Native provider formats are intentionally not part of plugin-v1. Keep
+    // one bounded diagnostic aggregate instead of forwarding token-level raw
+    // JSON. This protects both the durable trace and human observers while
+    // retaining enough evidence to diagnose event-shape changes.
+    writer.event("provider.diagnostic", event_diagnostics.payload(provider))?;
     let text = final_text.unwrap_or_else(|| {
         if fragments.is_empty() {
             plain_lines.join("\n")
@@ -1290,7 +1382,7 @@ fn run_health_command<E: Write>(
     if stderr.truncated {
         let _ = writeln!(
             diagnostics,
-            "[{}] health stderr truncated after {} bytes",
+            "[warning] {} health stderr truncated after {} bytes.",
             provider.name(),
             MAX_NATIVE_STDERR_BYTES
         );
@@ -1471,10 +1563,17 @@ fn join_capture(
 }
 
 fn forward_diagnostics<E: Write>(provider: Provider, bytes: &[u8], diagnostics: &mut E) {
-    let value = String::from_utf8_lossy(bytes);
-    for line in value.split_terminator('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let _ = writeln!(diagnostics, "[{}] {line}", provider.name());
+    if !bytes.is_empty() {
+        let lines = bytes.split(|byte| *byte == b'\n').count();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let _ = writeln!(
+            diagnostics,
+            "[warning] {} produced {} bytes across {} native diagnostic lines; raw content was withheld (sha256 {}).",
+            provider.name(),
+            bytes.len(),
+            lines,
+            digest
+        );
     }
     let _ = diagnostics.flush();
 }

@@ -13,14 +13,13 @@ clap.workspace = true
 command-group.workspace = true
 ctrlc.workspace = true
 dunce.workspace = true
+fs4.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg.workspace = true
