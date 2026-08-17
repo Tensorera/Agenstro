@@ -825,26 +825,56 @@ fn resolve_on_path(executable: &str) -> Option<String> {
     }
     let path = env::var_os("PATH")?;
     #[cfg(windows)]
-    let extensions: Vec<String> = env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
-        .split(';')
-        .map(str::to_owned)
-        .collect();
-    #[cfg(not(windows))]
-    let extensions = vec![String::new()];
-    for directory in env::split_paths(&path) {
-        let direct = directory.join(executable);
-        if direct.is_file() {
-            return Some(direct.to_string_lossy().into_owned());
-        }
-        for extension in &extensions {
-            let extended = directory.join(format!("{executable}{extension}"));
-            if extended.is_file() {
-                return Some(extended.to_string_lossy().into_owned());
+    {
+        let extensions: Vec<String> = env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for directory in env::split_paths(&path) {
+            if let Some(resolved) = resolve_windows_command(&directory, executable, &extensions) {
+                return Some(resolved.to_string_lossy().into_owned());
             }
         }
+        None
     }
-    None
+    #[cfg(not(windows))]
+    {
+        for directory in env::split_paths(&path) {
+            let direct = directory.join(executable);
+            if direct.is_file() {
+                return Some(direct.to_string_lossy().into_owned());
+            }
+        }
+        None
+    }
+}
+
+/// Resolve a bare command using Windows `PATHEXT` semantics. In particular,
+/// do not select an extensionless npm POSIX shim before its `.cmd` launcher.
+#[cfg(windows)]
+fn resolve_windows_command(
+    directory: &Path,
+    executable: &str,
+    extensions: &[String],
+) -> Option<PathBuf> {
+    let supplied_extension = Path::new(executable)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"));
+    if supplied_extension.as_ref().is_some_and(|supplied| {
+        extensions
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(supplied))
+    }) {
+        let direct = directory.join(executable);
+        return direct.is_file().then_some(direct);
+    }
+    extensions.iter().find_map(|extension| {
+        let candidate = directory.join(format!("{executable}{extension}"));
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 struct ProviderCompletion {
@@ -2769,6 +2799,46 @@ fn remove_empty_state_directory(workspace: &Path) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_resolution_skips_extensionless_npm_shims() {
+        let temporary = tempfile::tempdir().expect("temporary command directory");
+        let unix_shim = temporary.path().join("claude");
+        let windows_launcher = temporary.path().join("claude.cmd");
+        fs::write(&unix_shim, "#!/bin/sh\nexit 0\n").expect("npm POSIX shim");
+        fs::write(
+            &windows_launcher,
+            "@echo off\r\nif \"%~1\"==\"--version\" echo fake-claude 1.0\r\n",
+        )
+        .expect("npm Windows launcher");
+
+        let extensions = vec![
+            ".COM".to_owned(),
+            ".EXE".to_owned(),
+            ".BAT".to_owned(),
+            ".CMD".to_owned(),
+        ];
+        let resolved = resolve_windows_command(temporary.path(), "claude", &extensions)
+            .expect("Windows launcher");
+        assert!(
+            resolved
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&windows_launcher.to_string_lossy())
+        );
+
+        let output = Command::new(&resolved)
+            .arg("--version")
+            .output()
+            .expect("spawn resolved cmd launcher");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .expect("launcher stdout")
+                .trim(),
+            "fake-claude 1.0"
+        );
+    }
 
     #[test]
     fn snapshot_budgets_fail_closed_before_unbounded_work() {
