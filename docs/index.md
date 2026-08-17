@@ -28,6 +28,7 @@ $env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
 cabal install segno-flow:exe:segno `
+  --builddir=Build/cabal `
   --installdir $toolBin `
   --overwrite-policy=always
 tactus check --help | Select-String -Pattern '--package'
@@ -45,11 +46,9 @@ only a bounded diagnostic summary.
 From the repository root, the source gates are:
 
 ```powershell
-cabal build all --enable-tests
-cabal test all --test-show-details=direct
+cabal build --builddir=Build/cabal all --enable-tests
+cabal test --builddir=Build/cabal all --test-show-details=direct
 
-$target = Join-Path $env:TEMP ("agenstro-tactus-" + [guid]::NewGuid().ToString("N"))
-$env:CARGO_TARGET_DIR = $target
 $env:CARGO_INCREMENTAL = "0"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
 $env:CARGO_PROFILE_TEST_DEBUG = "0"
@@ -58,8 +57,7 @@ try {
   cargo test -p tactus-runtime --locked
   cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
 } finally {
-  cargo clean --target-dir $target
-  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  cargo clean
   Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue

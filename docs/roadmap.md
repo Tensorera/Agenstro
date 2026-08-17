@@ -57,10 +57,9 @@ The source gate includes Clef and Segno Haskell build/tests, Rust
 format/check/test/clippy, protocol/adaptor tests with local fakes, offline
 Tactus-to-GHC paths, virtual-clock Segno scheduling with a fake active-window
 source, the multi-step topology example, Motivo
-format/lint/typecheck/Vitest/package, and a strict documentation build. Rust
-verification must use a temporary
-`CARGO_TARGET_DIR` and clean it afterward so the repository does not accumulate
-gigabytes of build output.
+format/lint/typecheck/Vitest/package, and a strict documentation build. Build
+artifacts are centralized below ignored `Build/`; full Rust verification ends
+with `cargo clean` so the checkout does not accumulate gigabytes of output.
 
 A green source gate does not imply a signed installer, stable public API, live
 provider certification, hostile-code sandbox, or production-service readiness.

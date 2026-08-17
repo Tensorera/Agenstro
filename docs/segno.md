@@ -39,8 +39,9 @@ Set-Location $repoRoot
 
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
-cabal build all --enable-tests
+cabal build --builddir=Build/cabal all --enable-tests
 cabal install segno-flow:exe:segno `
+  --builddir=Build/cabal `
   --installdir $toolBin `
   --overwrite-policy=always
 
@@ -288,8 +289,8 @@ model; CI separately type-checks the active-window task without capturing the
 desktop:
 
 ```powershell
-cabal build all --enable-tests
-cabal test segno-flow:test:segno-flow-tests --test-show-details=direct
+cabal build --builddir=Build/cabal all --enable-tests
+cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --test-show-details=direct
 ```
 
 The suite covers strict plugin request identities, pure interval catch-up,

@@ -77,8 +77,9 @@ Set-Location $repoRoot
 
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
-cabal build all --enable-tests
+cabal build --builddir=Build/cabal all --enable-tests
 cabal install segno-flow:exe:segno `
+  --builddir=Build/cabal `
   --installdir $toolBin `
   --overwrite-policy=always
 
@@ -382,23 +383,24 @@ clef-sdk/haskell/       current Haskell EDSL and contract tests
 tactus-runtime/src/     current Rust runtime, CLI, adapters, and journal
 examples/topology-holes multi-step workflow plus deterministic oracle
 docs/                   current docs and selected migration material
-archive/                frozen historical source snapshots
-crates/, proto/         retained legacy foundation code, outside the 0.3 gate
 motivo-studio/          current TypeScript/React Tactus visualizer
 segno-flow/             current Haskell persistent-task driver and plugins
+skills/                 bundled agent guidance for working with Tactus
+Test/                   repository-level cases, fixtures, and contract checks
+Build/                  ignored build output, recreated by project tools
 ```
 
 Private design notes under `secretdoc/`, `.tactus/` target-project state, model
-transcripts, and generated build directories do not belong in Git.
+transcripts, and generated `Build/` content do not belong in Git. Removed 0.2
+implementations and foundation crates remain available through Git history.
 
-## Verify without growing the workspace
+## Verify with centralized build output
 
-Keep Rust artifacts in a unique system temporary directory and clean it even if
-a command fails:
+Repository configuration directs Cargo to `Build/cargo`, Cabal to
+`Build/cabal`, MkDocs to `Build/site`, and Electron Forge to `Build/motivo`.
+The directory is ignored and can be removed or recreated at any time:
 
 ```powershell
-$targetDir = Join-Path $env:TEMP ("agenstro-target-" + [guid]::NewGuid().ToString("N"))
-$env:CARGO_TARGET_DIR = $targetDir
 $env:CARGO_INCREMENTAL = "0"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
 $env:CARGO_PROFILE_TEST_DEBUG = "0"
@@ -408,15 +410,14 @@ try {
   cargo test -p tactus-runtime --locked
   cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
 } finally {
-  cargo clean --target-dir $targetDir
-  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  cargo clean
   Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
 }
 
-cabal build all --enable-tests
-cabal test all --test-show-details=direct
+cabal build --builddir=Build/cabal all --enable-tests
+cabal test --builddir=Build/cabal all --test-show-details=direct
 
 npm --prefix motivo-studio ci
 npm --prefix motivo-studio run format:check

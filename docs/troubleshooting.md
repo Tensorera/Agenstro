@@ -156,14 +156,12 @@ Later checks reuse Cabal's store and build cache. Direct Tactus
 continues to later sources after a source-specific failure; it cannot make a
 failed Clef or Segno package build usable.
 
-## Rust validation fills the repository
+## Rust validation uses substantial disk space
 
-Do not build into the default workspace `target/`. Use a unique system
-temporary target and always clean it:
+The repository's `.cargo/config.toml` redirects Cargo output to the ignored
+`Build/cargo` directory. Clean that configured target after validation:
 
 ```powershell
-$targetDir = Join-Path $env:TEMP ("agenstro-target-" + [guid]::NewGuid().ToString("N"))
-$env:CARGO_TARGET_DIR = $targetDir
 $env:CARGO_INCREMENTAL = "0"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
 $env:CARGO_PROFILE_TEST_DEBUG = "0"
@@ -171,17 +169,15 @@ try {
   cargo check -p tactus-runtime --all-targets --locked
   cargo test -p tactus-runtime --locked
 } finally {
-  cargo clean --target-dir $targetDir
-  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  cargo clean
   Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
 }
 ```
 
-Use `cargo clean --target-dir <exact-temp-path>` for cleanup; verify the target
-path before cleaning it. Package-scoped commands are usually sufficient while
-iterating on Tactus.
+`cargo clean` honors the configured target path. Package-scoped commands are
+usually sufficient while iterating on Tactus.
 
 ## Chinese text or emoji produces a protocol error
 
@@ -431,6 +427,7 @@ $env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
 Set-Location $repoRoot
 
 cabal install segno-flow:exe:segno `
+  --builddir=Build/cabal `
   --installdir $toolBin `
   --overwrite-policy=always
 

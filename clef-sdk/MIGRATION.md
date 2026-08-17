@@ -1,10 +1,9 @@
 # Clef 0.2 to Haskell 0.3 migration
 
-Clef `0.3.0.0` starts a new Haskell execution path. The previous Python builder
-and tests moved to `../archive/clef-sdk-python-0.2/`. The old Rust product core
-was removed from the current tree and can be inspected in Git history at
-`c679f45`; retained shared Protobuf/foundation code is not the authoritative
-model for new workflow code.
+Clef `0.3.0.0` starts a new Haskell execution path. The previous Python builder,
+tests, Rust product core, and shared Protobuf/foundation code were removed from
+the current tree. They can still be inspected in Git history, including
+snapshots `3eef756` and `c679f45`, but do not define the current workflow model.
 
 ## What changes
 

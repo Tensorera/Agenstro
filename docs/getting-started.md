@@ -54,8 +54,9 @@ Set-Location $repoRoot
 
 cargo install --path tactus-runtime --bin tactus --locked --force
 cabal update
-cabal build all --enable-tests
+cabal build --builddir=Build/cabal all --enable-tests
 cabal install segno-flow:exe:segno `
+  --builddir=Build/cabal `
   --installdir $toolBin `
   --overwrite-policy=always
 

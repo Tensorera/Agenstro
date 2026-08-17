@@ -1,9 +1,9 @@
 # Python environments and build output
 .venv/
 venv/
+/Build/
 build/
 dist/
-site/
 target/
 dist-newstyle/
 .ghc.environment.*
@@ -43,12 +43,8 @@ tmp*/
 secretdoc/
 
 # Internal rewrite logs and generated model transcripts are not release inputs
-rewrite-evidence/
 **/rewrite-report/
 **/runtime-check/
-
-# Generated legacy UI bundle; the maintained Motivo source is kept separately
-archive/**/_motivo_ui/assets/
 
 # Clef case-study runtime state and generated deliveries
 **/.clef-state/
@@ -57,11 +53,9 @@ archive/**/_motivo_ui/assets/
 **/.adapter-probe/
 **/.run-control/
 **/.test-work/
-PelicanRide/runs/
-Test2/.env
-Test2/tmp/
-Test2/reproduction/output*/
-Test2/reproduction/live-*.log
-Test2/review-work/
-# Local legacy benchmark corpus (targets a superseded effect-policy API)
-TestFolder/
+Test/cases/PelicanRide/runs/
+Test/cases/Test2/.env
+Test/cases/Test2/tmp/
+Test/cases/Test2/reproduction/output*/
+Test/cases/Test2/reproduction/live-*.log
+Test/cases/Test2/review-work/

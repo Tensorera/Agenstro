@@ -16,13 +16,13 @@ revive the removed Python/Rust Segno stack or a legacy daemon path.
 | `tactus-runtime/tests-rust/` | Current Tactus and adapter tests |
 | `examples/topology-holes/` | Current four-stage integration example |
 | `docs/` | Current documentation plus clearly marked migration history |
-| `archive/` | Read-only historical snapshots |
-| `crates/`, `proto/` | Retained legacy foundation code; not the Tactus `0.3` kernel |
 | `motivo-studio/` | Current Electron main/preload/React projection over Tactus control DTOs |
 | `segno-flow/haskell/src/` | Current Segno driver, lifecycle, plugin hosts, and SQLite backend |
 | `segno-flow/haskell/test/` | Offline virtual-clock, persistence, and protocol tests |
 | `segno-flow/examples/` | Explicit opt-in persistent-task examples; default gates use fakes |
 | `segno-flow/segno-flow.cabal` | Current Haskell package and `segno` executable |
+| `Test/` | Repository-level case studies, fixtures, and publication contract tests |
+| `Build/` | Ignored generated output; tools recreate their own subdirectories |
 
 Old Segno Python/Rust packages and their independent desktop surface are not
 current compatibility targets. Git history is the migration record.
@@ -75,8 +75,8 @@ The Cabal package uses GHC2021 and the `base` bounds in
 Run from the repository root:
 
 ```powershell
-cabal build all --enable-tests
-cabal test all --test-show-details=direct
+cabal build --builddir=Build/cabal all --enable-tests
+cabal test --builddir=Build/cabal all --test-show-details=direct
 ```
 
 ## Rust Tactus changes
@@ -134,14 +134,13 @@ Version one does not implement exactly-once execution, distributed drivers,
 serialized Haskell continuations, arbitrary workflow replay, or rollback of
 external effects.
 
-### Keep Cargo artifacts out of the checkout
+### Keep generated output centralized
 
-Do not use the repository's default `target/` for validation. Allocate a unique
-system-temporary target and clean it in `finally`:
+The checked-in Cargo configuration writes to `Build/cargo`; Cabal, MkDocs, and
+Electron Forge use sibling directories under the same ignored `Build/` root.
+Clean Cargo's configured directory in `finally` after a full validation run:
 
 ```powershell
-$targetDir = Join-Path $env:TEMP ("agenstro-target-" + [guid]::NewGuid().ToString("N"))
-$env:CARGO_TARGET_DIR = $targetDir
 $env:CARGO_INCREMENTAL = "0"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
 $env:CARGO_PROFILE_TEST_DEBUG = "0"
@@ -151,8 +150,7 @@ try {
   cargo test -p tactus-runtime --locked
   cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
 } finally {
-  cargo clean --target-dir $targetDir
-  Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  cargo clean
   Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
   Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
@@ -225,8 +223,8 @@ Never commit:
 - provider credentials, `.env` files, private keys, or machine-local registry
   configuration;
 - `secretdoc/` private design notes;
-- `target/`, `dist-newstyle/`, `node_modules/`, Electron `out/`/`.vite/`,
-  caches, generated site output, or model transcripts; or
+- `Build/`, package-local `node_modules/`/`.vite/`, Python caches, generated
+  output, or model transcripts; or
 - target-project artifacts that are not deliberate test fixtures.
 
 Before committing, inspect the staged scope:

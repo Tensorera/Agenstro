@@ -10,7 +10,8 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 $studioRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$sourceRoot = [IO.Path]::GetFullPath((Join-Path $studioRoot "out\Motivo Studio-win32-x64"))
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $studioRoot ".."))
+$sourceRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot "Build\motivo\Motivo Studio-win32-x64"))
 $sourceExe = Join-Path $sourceRoot "motivo-studio.exe"
 $sourceResources = Join-Path $sourceRoot "resources"
 if (-not [IO.File]::Exists($sourceExe) -or -not [IO.Directory]::Exists($sourceResources)) {

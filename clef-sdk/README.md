@@ -7,10 +7,10 @@ input output` calls. Runtime provider, effect, and plugin availability stays
 dynamic.
 
 The Haskell implementation under `haskell/` is authoritative for new
-development. The Python `0.2` package has moved to
-`../archive/clef-sdk-python-0.2/`; the Rust `0.2` product core was removed from
-the current tree and remains available in Git history at `c679f45`. Neither is
-a dependency or release artifact of the Haskell package.
+development. The Python and Rust `0.2` implementations were removed from the
+current tree and remain available in Git history (including snapshots
+`3eef756` and `c679f45`). Neither is a dependency or release artifact of the
+Haskell package.
 
 ## Build and test
 
@@ -18,8 +18,8 @@ From the repository root:
 
 ```powershell
 $env:PATH = 'C:\ghcup\bin;C:\cabal\bin;' + $env:PATH
-cabal build all
-cabal test all --test-show-details=direct
+cabal build --builddir=Build/cabal all
+cabal test --builddir=Build/cabal all --test-show-details=direct
 ```
 
 The package uses GHC2021 and has no custom parser or code generator. See

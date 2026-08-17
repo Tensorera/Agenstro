@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/haskell-tactus.yml"
+      - ".cargo/**"
       - "Cargo.lock"
       - "Cargo.toml"
       - "cabal.project"
@@ -14,12 +15,14 @@ on:
       - "segno-flow/**"
       - "skills/**"
       - "tactus-runtime/**"
+      - "Test/**"
       - "README.md"
       - "docs/**"
       - "mkdocs.yml"
   push:
     paths:
       - ".github/workflows/haskell-tactus.yml"
+      - ".cargo/**"
       - "Cargo.lock"
       - "Cargo.toml"
       - "cabal.project"
@@ -30,6 +33,7 @@ on:
       - "segno-flow/**"
       - "skills/**"
       - "tactus-runtime/**"
+      - "Test/**"
       - "README.md"
       - "docs/**"
       - "mkdocs.yml"
@@ -51,7 +55,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CARGO_TARGET_DIR: target/ci-tactus
+      CARGO_TARGET_DIR: Build/ci-tactus
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -67,6 +71,24 @@ jobs:
         run: cargo +stable test -p tactus-runtime --locked
       - name: Test the topology reference program
         run: cargo +stable test --manifest-path examples/topology-holes/reference/Cargo.toml --locked
+      - name: Remove Rust build artifacts
+        if: always()
+        run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
+
+  tactus-msrv:
+    name: Tactus Rust 1.88 MSRV
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: Build/ci-tactus-msrv
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install MSRV
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check Tactus at MSRV
+        run: cargo +1.88.0 check -p tactus-runtime --all-targets --locked
+      - name: Test Tactus at MSRV
+        run: cargo +1.88.0 test -p tactus-runtime --locked
       - name: Remove Rust build artifacts
         if: always()
         run: cargo clean --target-dir "${{ env.CARGO_TARGET_DIR }}"
@@ -88,7 +110,7 @@ jobs:
             ghc: "9.14.1"
             cabal: "3.18.1.0"
     env:
-      CARGO_TARGET_DIR: target/ci-tactus-e2e
+      CARGO_TARGET_DIR: Build/ci-tactus-e2e
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -107,14 +129,14 @@ jobs:
       - name: Update Hackage index
         run: cabal update
       - name: Build Clef and Segno
-        run: cabal build all --enable-tests
+        run: cabal build --builddir=Build/cabal all --enable-tests
       - name: Test Clef with fake streaming plugins
-        run: cabal test clef-sdk:test:clef-sdk-tests --test-show-details=direct
+        run: cabal test --builddir=Build/cabal clef-sdk:test:clef-sdk-tests --test-show-details=direct
       - name: Test Segno with virtual time and fake process boundaries
-        run: cabal test segno-flow:test:segno-flow-tests --test-show-details=direct
+        run: cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --test-show-details=direct
       - name: Type-check the model-free active-window persistent task
         run: >-
-          cabal exec -- ghc -fno-code -package clef-sdk -package segno-flow
+          cabal exec --builddir=Build/cabal -- ghc -fno-code -package clef-sdk -package segno-flow
           segno-flow/examples/active-window/900_record_active_window.hs
       - name: Exercise Segno through Tactus package resolution
         shell: bash
@@ -122,7 +144,7 @@ jobs:
           smoke="$RUNNER_TEMP/segno-package-e2e"
           script="$smoke/.tactus/scripts/900_record_active_window.hs"
           manifest="$smoke/task-manifest.json"
-          segno_bin="$(cabal list-bin segno-flow:exe:segno)"
+          segno_bin="$(cabal list-bin --builddir=Build/cabal segno-flow:exe:segno)"
           tactus init "$smoke" --sdk "$GITHUB_WORKSPACE/clef-sdk"
           "$segno_bin" init --root "$smoke" --sdk "$GITHUB_WORKSPACE/segno-flow"
           cp segno-flow/examples/active-window/900_record_active_window.hs "$script"
@@ -145,13 +167,13 @@ jobs:
         run: |
           cd clef-sdk
           cabal check
-          cabal sdist
+          cabal sdist --builddir=Build/cabal
       - name: Validate the Segno source distribution
         shell: bash
         run: |
           cd segno-flow
           cabal check
-          cabal sdist
+          cabal sdist --builddir=Build/cabal
       - name: Run the real Tactus-to-GHC path
         shell: bash
         run: |
@@ -167,7 +189,7 @@ jobs:
         shell: bash
         run: |
           for script in examples/topology-holes/workflow/*.hs; do
-            cabal exec -- ghc -fno-code -package clef-sdk "$script"
+            cabal exec --builddir=Build/cabal -- ghc -fno-code -package clef-sdk "$script"
           done
       - name: Remove Rust build artifacts
         if: always()
@@ -187,6 +209,8 @@ jobs:
         run: |
           python -m pip install "mkdocs>=1.6,<2"
           python -m mkdocs build --strict --site-dir "${{ runner.temp }}/agenstro-site"
+      - name: Validate documentation contracts
+        run: python Test/repository/test_documentation_contract.py
 
   motivo-studio:
     name: Motivo Studio (${{ matrix.os }})

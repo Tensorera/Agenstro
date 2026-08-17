@@ -5,7 +5,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: [".vite/**", "out/**", "coverage/**"] },
+  { ignores: [".vite/**", "coverage/**"] },
   eslint.configs.recommended,
   ...tseslint.configs.strict,
   {

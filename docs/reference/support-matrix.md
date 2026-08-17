@@ -15,7 +15,7 @@ successful call to a live provider account.
 
 | Surface | Version/target | Windows | Ubuntu | Evidence boundary |
 | --- | --- | --- | --- | --- |
-| Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build all` and `cabal test all`; fake JSONL plugins exercise typed tasks/plugins and incremental events |
+| Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; fake JSONL plugins exercise typed tasks/plugins and incremental events |
 | Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | format, package-scoped check/test/clippy; commands are `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
 | Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, low-priority observation loss, authoritative terminal preservation, and exit behavior use local fakes |
 | Run journal | `agenstro.trace/v1` | Current gate | Current gate | ordered append-flushed diagnostic events, atomic terminal summary, prompt/provider raw redaction, terminal-value summaries, and degraded-writer outcome preservation are tested; no replay/rollback claim |
@@ -29,7 +29,7 @@ successful call to a live provider account.
 | `tactus smoke` | Offline unless `--live` | Current gate | Current gate | default sends no model prompt; CI uses fakes; live native/account compatibility is opt-in evidence |
 | Topology-holes example | Four Haskell workflow stages + offline Rust oracle | Current gate | Current gate | real Tactus -> runghc -> Clef -> dispatch acceptance runs 010 -> 040 with parallel reviews and observer journals; the oracle verifies holes/Euler independently |
 | Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; four-label presentation and non-fatal raw-output projection loss use fake Tactus, with no model credentials; packaged app requires external `tactus` |
-| Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test all`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
+| Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
 | Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
 | Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
 | Segno SQLite state/lifecycle | business and lifecycle databases below `.tactus/segno/state` | Current gate | Current gate | local tests cover cross-job occurrence identity, checkpoint scoping, stale fences, trigger-failure isolation, and unknown non-retry; single-node only |
@@ -96,9 +96,10 @@ store and build cache. Motivo development additionally requires Node.js 22.12
 or newer. Python is not a runtime dependency of Tactus, Segno, or Motivo; it is
 used only if a third-party plugin chooses it or when MkDocs is built.
 
-Rust gate commands must use a system-temporary `CARGO_TARGET_DIR`, and validation
-must finish with `cargo clean --target-dir <that-exact-path>` to avoid a large
-repository-local build tree.
+The checked-in Cargo configuration directs Rust gate output to ignored
+`Build/cargo`; validation must finish with `cargo clean` to remove that large
+rebuildable tree. Cabal, MkDocs, and Electron Forge likewise use dedicated
+subdirectories below `Build/`.
 
 ## Version combination
 
