@@ -2935,6 +2935,19 @@ fn render_presentation(presentation: &Presentation) {
 
 fn presentation_for_frame(name: &str, frame: &PluginFrame) -> Option<Presentation> {
     match frame {
+        PluginFrame::Event { event, .. } if event.kind == "effect.warning" => {
+            let skipped = event
+                .payload
+                .get("skipped_paths")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            Some(Presentation::new(
+                PresentationCategory::Warning,
+                format!(
+                    "{name} skipped {skipped} workspace path(s) that could not be inspected; execution continued."
+                ),
+            ))
+        }
         PluginFrame::Event { event, .. }
             if matches!(
                 event.kind.as_str(),
@@ -3278,6 +3291,28 @@ mod tests {
         let error =
             parse_params(r#"{"region":{"holes":1,"holes":2}}"#).expect_err("duplicate params");
         assert!(error.to_string().contains("duplicate object key"));
+    }
+
+    #[test]
+    fn workspace_effect_warning_has_a_natural_language_projection() {
+        let frame = serde_json::from_value::<PluginFrame>(serde_json::json!({
+            "type":"event",
+            "id":"warning-test",
+            "event":{
+                "type":"effect.warning",
+                "skipped_paths":3,
+                "examples":[{"path":"private.txt", "reason":"permission denied"}]
+            }
+        }))
+        .expect("warning frame");
+
+        let presentation = presentation_for_frame("workspace.paths", &frame).expect("presentation");
+        assert_eq!(presentation.category, PresentationCategory::Warning);
+        assert_eq!(
+            presentation.message,
+            "workspace.paths skipped 3 workspace path(s) that could not be inspected; execution continued."
+        );
+        assert!(!presentation.message.contains("private.txt"));
     }
 
     #[test]

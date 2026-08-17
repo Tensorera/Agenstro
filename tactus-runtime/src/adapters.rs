@@ -6,7 +6,7 @@
 //! native command.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
@@ -47,6 +47,7 @@ const NATIVE_OUTPUT_QUEUE: usize = 128;
 const MAX_SNAPSHOT_PATHS: usize = 100_000;
 const MAX_SNAPSHOT_HASH_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SNAPSHOT_DURATION: Duration = Duration::from_secs(30);
+const MAX_SNAPSHOT_WARNING_EXAMPLES: usize = 16;
 const OBSERVATION_COMPLETION_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_COMPLETION_CLEANUP_ENTRIES: usize = 1_024;
 const MAX_COMPLETION_CLEANUP_DURATION: Duration = Duration::from_millis(100);
@@ -91,8 +92,8 @@ where
     W: Write,
     E: Write,
 {
-    run_host(stdin, stdout, stderr, |request, _writer, _diagnostics| {
-        handle_workspace_paths(request)
+    run_host(stdin, stdout, stderr, |request, writer, _diagnostics| {
+        handle_workspace_paths(request, writer)
     })
 }
 
@@ -1724,6 +1725,46 @@ impl Drop for TemporaryDirectory {
 struct WorkspaceSnapshot {
     workspace: String,
     paths: BTreeMap<String, PathMetadata>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    skipped_paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotWarnings {
+    skipped_paths: BTreeSet<String>,
+    examples: Vec<SnapshotWarning>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotWarning {
+    path: String,
+    reason: String,
+}
+
+impl SnapshotWarnings {
+    fn record(&mut self, root: &Path, path: &Path, reason: impl Into<String>) {
+        let relative = path
+            .strip_prefix(root)
+            .map(slash_relative)
+            .unwrap_or_else(|_| "<unresolved>".to_owned());
+        if self.skipped_paths.insert(relative.clone())
+            && self.examples.len() < MAX_SNAPSHOT_WARNING_EXAMPLES
+        {
+            self.examples.push(SnapshotWarning {
+                path: relative,
+                reason: reason.into(),
+            });
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.skipped_paths.is_empty()
+    }
+}
+
+struct SnapshotCapture {
+    snapshot: WorkspaceSnapshot,
+    warnings: SnapshotWarnings,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1825,17 +1866,24 @@ impl SnapshotBudget {
     }
 }
 
-fn handle_workspace_paths(request: &PluginRequest) -> Result<Value, AdapterError> {
-    match request.method.as_str() {
-        "describe" => Ok(workspace_paths_description()),
-        "smoke" => Ok(json!({
-            "name":"workspace.paths",
-            "text":"workspace.paths ok",
-            "live":false
-        })),
+fn handle_workspace_paths<W: Write>(
+    request: &PluginRequest,
+    writer: &mut HostWriter<W>,
+) -> Result<Value, AdapterError> {
+    let (value, warnings) = match request.method.as_str() {
+        "describe" => Ok((workspace_paths_description(), SnapshotWarnings::default())),
+        "smoke" => Ok((
+            json!({
+                "name":"workspace.paths",
+                "text":"workspace.paths ok",
+                "live":false
+            }),
+            SnapshotWarnings::default(),
+        )),
         "snapshot" => persist_snapshot(&request.params),
-        "diff" => diff_persisted_snapshots(&request.params),
-        "forget" => forget_state(&request.params),
+        "diff" => diff_persisted_snapshots(&request.params)
+            .map(|value| (value, SnapshotWarnings::default())),
+        "forget" => forget_state(&request.params).map(|value| (value, SnapshotWarnings::default())),
         "observe.begin" => observe_begin(&request.params),
         "observe.end" => observe_end(&request.params),
         method => Err(AdapterError::new(
@@ -1848,7 +1896,36 @@ fn handle_workspace_paths(request: &PluginRequest) -> Result<Value, AdapterError
                 "observe.begin", "observe.end"
             ]
         }))),
+    }?;
+    emit_snapshot_warning(writer, &warnings)?;
+    Ok(value)
+}
+
+fn emit_snapshot_warning<W: Write>(
+    writer: &mut HostWriter<W>,
+    warnings: &SnapshotWarnings,
+) -> Result<(), AdapterError> {
+    if warnings.is_empty() {
+        return Ok(());
     }
+    let skipped = warnings.skipped_paths.len();
+    writer.event(
+        "effect.warning",
+        Map::from_iter([
+            (
+                "code".to_owned(),
+                Value::String("workspace.paths.skipped_paths".to_owned()),
+            ),
+            (
+                "message".to_owned(),
+                Value::String(format!(
+                    "workspace.paths skipped {skipped} path(s) that could not be inspected; execution continued."
+                )),
+            ),
+            ("skipped_paths".to_owned(), json!(skipped)),
+            ("examples".to_owned(), json!(warnings.examples)),
+        ]),
+    )
 }
 
 fn workspace_paths_description() -> Value {
@@ -1886,9 +1963,12 @@ fn workspace_paths_description() -> Value {
     })
 }
 
-fn persist_snapshot(params: &Map<String, Value>) -> Result<Value, AdapterError> {
+fn persist_snapshot(
+    params: &Map<String, Value>,
+) -> Result<(Value, SnapshotWarnings), AdapterError> {
     let workspace = required_workspace(params)?;
-    let snapshot = snapshot_workspace(&workspace)?;
+    let capture = snapshot_workspace(&workspace)?;
+    let snapshot = capture.snapshot;
     let snapshot_id = unique_token();
     let record = EffectState {
         api: PLUGIN_API.to_owned(),
@@ -1900,7 +1980,7 @@ fn persist_snapshot(params: &Map<String, Value>) -> Result<Value, AdapterError> 
     };
     let path = snapshot_state_path(&workspace, &snapshot_id, true)?;
     write_state_atomic(&path, &record)?;
-    Ok(json!({"snapshot_id":snapshot_id}))
+    Ok((json!({"snapshot_id":snapshot_id}), capture.warnings))
 }
 
 fn diff_persisted_snapshots(params: &Map<String, Value>) -> Result<Value, AdapterError> {
@@ -1912,14 +1992,15 @@ fn diff_persisted_snapshots(params: &Map<String, Value>) -> Result<Value, Adapte
     Ok(snapshot_delta(&before, &after))
 }
 
-fn observe_begin(params: &Map<String, Value>) -> Result<Value, AdapterError> {
+fn observe_begin(params: &Map<String, Value>) -> Result<(Value, SnapshotWarnings), AdapterError> {
     let workspace = required_workspace(params)?;
     cleanup_expired_observation_files(&workspace)?;
     let invocation = params
         .get("invocation")
         .cloned()
         .ok_or_else(|| AdapterError::new("invalid_params", "invocation is required"))?;
-    let snapshot = snapshot_workspace(&workspace)?;
+    let capture = snapshot_workspace(&workspace)?;
+    let snapshot = capture.snapshot;
     let path_count = snapshot.paths.len();
     let token = unique_token();
     let record = EffectState {
@@ -1932,10 +2013,13 @@ fn observe_begin(params: &Map<String, Value>) -> Result<Value, AdapterError> {
     };
     let path = observation_state_path(&workspace, &token, true)?;
     write_state_atomic(&path, &record)?;
-    Ok(json!({"token":token, "path_count":path_count}))
+    Ok((
+        json!({"token":token, "path_count":path_count}),
+        capture.warnings,
+    ))
 }
 
-fn observe_end(params: &Map<String, Value>) -> Result<Value, AdapterError> {
+fn observe_end(params: &Map<String, Value>) -> Result<(Value, SnapshotWarnings), AdapterError> {
     let workspace = required_workspace(params)?;
     let invocation = params
         .get("invocation")
@@ -1949,7 +2033,7 @@ fn observe_end(params: &Map<String, Value>) -> Result<Value, AdapterError> {
     let original = observation_state_path(&workspace, &token, false)?;
     if let Some(value) = load_observation_completion(&original, &workspace, Some(&invocation))? {
         cleanup_completed_observation(&original)?;
-        return Ok(value);
+        return Ok((value, SnapshotWarnings::default()));
     }
     recover_interrupted_observation(&original)?;
     // Keep the durable token in its original location during the expensive
@@ -1963,7 +2047,7 @@ fn observe_end(params: &Map<String, Value>) -> Result<Value, AdapterError> {
                 load_observation_completion(&original, &workspace, Some(&invocation))?
             {
                 cleanup_completed_observation(&original)?;
-                return Ok(value);
+                return Ok((value, SnapshotWarnings::default()));
             }
             return Err(error);
         }
@@ -1976,7 +2060,8 @@ fn observe_end(params: &Map<String, Value>) -> Result<Value, AdapterError> {
             "observation invocation does not match",
         ));
     }
-    let after = snapshot_workspace(&workspace)?;
+    let capture = snapshot_workspace(&workspace)?;
+    let after = capture.snapshot;
     let value = json!({
         "invocation":invocation,
         "outcome":outcome,
@@ -1986,7 +2071,7 @@ fn observe_end(params: &Map<String, Value>) -> Result<Value, AdapterError> {
     });
     let value = commit_observation(&original, &workspace, &invocation, &value)?;
     remove_empty_state_directory(&workspace);
-    Ok(value)
+    Ok((value, capture.warnings))
 }
 
 fn observation_completion_path(original: &Path) -> Result<PathBuf, AdapterError> {
@@ -2334,7 +2419,7 @@ fn forget_state(params: &Map<String, Value>) -> Result<Value, AdapterError> {
     Ok(json!({"forgotten":true}))
 }
 
-fn snapshot_workspace(workspace: &Path) -> Result<WorkspaceSnapshot, AdapterError> {
+fn snapshot_workspace(workspace: &Path) -> Result<SnapshotCapture, AdapterError> {
     let workspace = dunce::canonicalize(workspace).map_err(|error| {
         AdapterError::new(
             "snapshot_failed",
@@ -2349,10 +2434,21 @@ fn snapshot_workspace(workspace: &Path) -> Result<WorkspaceSnapshot, AdapterErro
     }
     let mut paths = BTreeMap::new();
     let mut budget = SnapshotBudget::new();
-    scan_directory(&workspace, &workspace, &mut paths, &mut budget)?;
-    Ok(WorkspaceSnapshot {
-        workspace: workspace.to_string_lossy().into_owned(),
-        paths,
+    let mut warnings = SnapshotWarnings::default();
+    scan_directory(
+        &workspace,
+        &workspace,
+        &mut paths,
+        &mut budget,
+        &mut warnings,
+    )?;
+    Ok(SnapshotCapture {
+        snapshot: WorkspaceSnapshot {
+            workspace: workspace.to_string_lossy().into_owned(),
+            paths,
+            skipped_paths: warnings.skipped_paths.clone(),
+        },
+        warnings,
     })
 }
 
@@ -2361,6 +2457,7 @@ fn scan_directory(
     directory: &Path,
     paths: &mut BTreeMap<String, PathMetadata>,
     budget: &mut SnapshotBudget,
+    warnings: &mut SnapshotWarnings,
 ) -> Result<(), AdapterError> {
     budget
         .check_time()
@@ -2374,14 +2471,21 @@ fn scan_directory(
         budget
             .check_time()
             .map_err(|error| snapshot_io_error(root, directory, error))?;
-        let entry = entry.map_err(|error| snapshot_io_error(root, directory, error))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                warnings.record(root, directory, "directory_entry_unreadable");
+                continue;
+            }
+        };
         let absolute = entry.path();
-        let relative_path = absolute.strip_prefix(root).map_err(|error| {
-            AdapterError::new(
-                "snapshot_failed",
-                format!("workspace traversal escaped its root: {error}"),
-            )
-        })?;
+        let relative_path = match absolute.strip_prefix(root) {
+            Ok(relative) => relative,
+            Err(_) => {
+                warnings.record(root, &absolute, "path_outside_workspace");
+                continue;
+            }
+        };
         let relative = slash_relative(relative_path);
         if is_excluded(&relative) {
             continue;
@@ -2396,16 +2500,34 @@ fn scan_directory(
     entries.sort_by_key(|(entry, _)| entry.file_name());
     for (entry, relative) in entries {
         let absolute = entry.path();
-        let metadata = fs::symlink_metadata(&absolute)
-            .map_err(|error| snapshot_io_error(root, &absolute, error))?;
-        let path_metadata = read_path_metadata(root, &absolute, &metadata, budget)
-            .map_err(|error| snapshot_io_error(root, &absolute, error))?;
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                warnings.record(root, &absolute, snapshot_warning_reason(&error));
+                continue;
+            }
+        };
+        let path_metadata = match read_path_metadata(root, &absolute, &metadata, budget) {
+            Ok(metadata) => metadata,
+            Err(error) if is_snapshot_budget_error(&error) => {
+                return Err(snapshot_io_error(root, &absolute, error));
+            }
+            Err(error) => {
+                warnings.record(root, &absolute, snapshot_warning_reason(&error));
+                continue;
+            }
+        };
         let transparent = normalize_relative(&relative) == normalize_relative(".tactus");
         if !transparent {
             paths.insert(relative, path_metadata.clone());
         }
-        if path_metadata.kind == PathKind::Directory {
-            scan_directory(root, &absolute, paths, budget)?;
+        if path_metadata.kind == PathKind::Directory
+            && let Err(error) = scan_directory(root, &absolute, paths, budget, warnings)
+        {
+            if error.code == "snapshot_budget_exceeded" {
+                return Err(error);
+            }
+            warnings.record(root, &absolute, "directory_unreadable");
         }
     }
     Ok(())
@@ -2486,20 +2608,55 @@ fn read_path_metadata(
 }
 
 fn ensure_real_path_within(root: &Path, path: &Path) -> io::Result<()> {
-    let resolved = dunce::canonicalize(path)?;
-    if !resolved.starts_with(root) {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        io::Error::other(format!(
+            "path is lexically outside workspace: {}",
+            path.display()
+        ))
+    })?;
+    // `dunce::canonicalize` intentionally preserves the Windows `\\?\` prefix
+    // for paths longer than MAX_PATH. Comparing that value with a short,
+    // prefix-free root rejects a valid descendant. Use the standard canonical
+    // representation for both sides, then derive the expected lexical path from
+    // the same canonical root. This keeps the symlink/junction escape check while
+    // treating long and short descendants consistently.
+    let resolved_root = fs::canonicalize(root)?;
+    let resolved = fs::canonicalize(path)?;
+    if !resolved.starts_with(&resolved_root) {
         return Err(io::Error::other(format!(
             "path resolved outside workspace: {}",
             resolved.display()
         )));
     }
-    if resolved != path {
+    let expected = resolved_root.join(relative);
+    if resolved != expected {
         return Err(io::Error::other(format!(
             "path changed into a symlink or alias during snapshot: {}",
             path.display()
         )));
     }
     Ok(())
+}
+
+fn is_snapshot_budget_error(error: &io::Error) -> bool {
+    error.to_string().starts_with("snapshot budget exceeded:")
+}
+
+fn snapshot_warning_reason(error: &io::Error) -> &'static str {
+    let message = error.to_string();
+    if message.contains("outside workspace") {
+        "path_outside_workspace"
+    } else if message.contains("symlink or alias") {
+        "path_alias_changed"
+    } else if message.contains("changed") {
+        "path_changed_during_snapshot"
+    } else {
+        match error.kind() {
+            io::ErrorKind::NotFound => "path_disappeared",
+            io::ErrorKind::PermissionDenied => "permission_denied",
+            _ => "path_unreadable",
+        }
+    }
 }
 
 fn mutation_identity(metadata: &fs::Metadata) -> (u64, Option<SystemTime>, Option<SystemTime>) {
@@ -2585,6 +2742,9 @@ fn snapshot_delta(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -> Valu
     let mut deleted = Vec::new();
     let mut type_changed = Vec::new();
     for (path, new) in &after.paths {
+        if snapshot_path_was_skipped(before, after, path) {
+            continue;
+        }
         match before.paths.get(path) {
             None => added.push(path.clone()),
             Some(old) if old.kind != new.kind => type_changed.push(path.clone()),
@@ -2593,7 +2753,7 @@ fn snapshot_delta(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -> Valu
         }
     }
     for path in before.paths.keys() {
-        if !after.paths.contains_key(path) {
+        if !snapshot_path_was_skipped(before, after, path) && !after.paths.contains_key(path) {
             deleted.push(path.clone());
         }
     }
@@ -2603,6 +2763,22 @@ fn snapshot_delta(before: &WorkspaceSnapshot, after: &WorkspaceSnapshot) -> Valu
         "deleted":deleted,
         "type_changed":type_changed
     })
+}
+
+fn snapshot_path_was_skipped(
+    before: &WorkspaceSnapshot,
+    after: &WorkspaceSnapshot,
+    path: &str,
+) -> bool {
+    let path = normalize_relative(path);
+    before
+        .skipped_paths
+        .iter()
+        .chain(&after.skipped_paths)
+        .any(|skipped| {
+            let skipped = normalize_relative(skipped);
+            path == skipped || path.starts_with(&format!("{skipped}/"))
+        })
 }
 
 fn state_directory(workspace: &Path, create: bool) -> Result<PathBuf, AdapterError> {
@@ -2937,6 +3113,81 @@ mod tests {
                 .trim(),
             "fake-claude 1.0"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_snapshot_accepts_valid_paths_longer_than_max_path() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let nested = workspace.path().join("a".repeat(90)).join("b".repeat(90));
+        fs::create_dir_all(&nested).expect("long nested directory");
+        let file = nested.join(format!("{}.txt", "c".repeat(90)));
+        fs::write(&file, b"long path content").expect("long path file");
+        assert!(file.as_os_str().encode_wide().count() > 260);
+
+        let capture = snapshot_workspace(workspace.path()).expect("long path snapshot");
+        let relative = slash_relative(
+            file.strip_prefix(workspace.path())
+                .expect("relative long path"),
+        );
+        assert!(capture.snapshot.paths.contains_key(&relative));
+        assert!(capture.warnings.is_empty());
+    }
+
+    #[test]
+    fn skipped_paths_do_not_become_false_workspace_deltas() {
+        let metadata = PathMetadata {
+            kind: PathKind::File,
+            size: 4,
+            sha256: Some("old".to_owned()),
+        };
+        let before = WorkspaceSnapshot {
+            workspace: "/workspace".to_owned(),
+            paths: BTreeMap::from([
+                ("blocked/file.txt".to_owned(), metadata.clone()),
+                ("visible.txt".to_owned(), metadata),
+            ]),
+            skipped_paths: BTreeSet::new(),
+        };
+        let after = WorkspaceSnapshot {
+            workspace: "/workspace".to_owned(),
+            paths: BTreeMap::new(),
+            skipped_paths: BTreeSet::from(["blocked".to_owned()]),
+        };
+
+        let delta = snapshot_delta(&before, &after);
+        assert_eq!(delta["deleted"], json!(["visible.txt"]));
+    }
+
+    #[test]
+    fn skipped_paths_emit_one_non_terminal_warning_before_success() {
+        let mut output = Vec::new();
+        let mut writer = HostWriter::new(&mut output, json!("warning-test"));
+        let mut warnings = SnapshotWarnings::default();
+        warnings.record(
+            Path::new("/workspace"),
+            Path::new("/workspace/blocked.txt"),
+            "permission denied",
+        );
+        emit_snapshot_warning(&mut writer, &warnings).expect("warning event");
+        writer
+            .success(json!({"ok":true}))
+            .expect("terminal success");
+        drop(writer);
+
+        let frames = std::str::from_utf8(&output)
+            .expect("UTF-8 frames")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("JSON frame"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["type"], "event");
+        assert_eq!(frames[0]["event"]["type"], "effect.warning");
+        assert_eq!(frames[0]["event"]["skipped_paths"], 1);
+        assert_eq!(frames[1]["type"], "result");
+        assert_eq!(frames[1]["ok"], true);
     }
 
     #[test]
