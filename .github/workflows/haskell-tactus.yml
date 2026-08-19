@@ -129,17 +129,17 @@ jobs:
       - name: Update Hackage index
         run: cabal update
       - name: Build Clef and Segno
-        run: cabal build --builddir=Build/cabal all --enable-tests
+        run: cabal build --builddir=Build/cabal all --enable-tests --ghc-options=-Werror
       - name: Type-check Clef documentation examples
         shell: pwsh
         run: ./Test/repository/test-clef-documentation-examples.ps1
       - name: Test Clef with fake streaming plugins
-        run: cabal test --builddir=Build/cabal clef-sdk:test:clef-sdk-tests --test-show-details=direct
+        run: cabal test --builddir=Build/cabal clef-sdk:test:clef-sdk-tests --ghc-options=-Werror --test-show-details=direct
       - name: Test Segno with virtual time and fake process boundaries
-        run: cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --test-show-details=direct
+        run: cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --ghc-options=-Werror --test-show-details=direct
       - name: Type-check the model-free active-window persistent task
         run: >-
-          cabal exec --builddir=Build/cabal -- ghc -fno-code -package clef-sdk -package segno-flow
+          cabal exec --builddir=Build/cabal -- ghc -fno-code -Wall -Werror -package clef-sdk -package segno-flow
           segno-flow/examples/active-window/900_record_active_window.hs
       - name: Exercise Segno through Tactus package resolution
         shell: bash
@@ -192,7 +192,7 @@ jobs:
         shell: bash
         run: |
           for script in examples/topology-holes/workflow/*.hs; do
-            cabal exec --builddir=Build/cabal -- ghc -fno-code -package clef-sdk "$script"
+            cabal exec --builddir=Build/cabal -- ghc -fno-code -Wall -Werror -package clef-sdk "$script"
           done
       - name: Remove Rust build artifacts
         if: always()
