@@ -12,6 +12,7 @@ import Clef.Plugin.Protocol
     parsePluginOutput,
   )
 import Control.Concurrent (forkIO, threadDelay)
+import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
 import Control.Exception
   ( AsyncException (ThreadKilled),
@@ -87,6 +88,7 @@ runTests = do
           ("plugin pipes drain concurrently", testPluginPipeBackpressure workspace executable),
           ("plugin events stream before terminal across UTF-8 chunks", testPluginEventStreaming workspace executable),
           ("runtime transitions explain state, trigger, guard, and result", testRuntimeTransitions workspace executable),
+          ("timeout and async cancellation remain cancelled", testCancellationClassification workspace executable),
           ("default presentation excludes raw structured diagnostics", testHumanProjection),
           ("outcome unknown is natural language with a structured cause", testOutcomeUnknownRendering),
           ("runTactus renders expected errors without a call stack", testRunTactusPresentation workspace executable),
@@ -477,6 +479,43 @@ testRuntimeTransitions workspace executable = do
         other -> failTest $ "transition did not encode as an object: " <> show other
     _ -> failTest $ "expected start and terminal transitions, received " <> show transitions
 
+testCancellationClassification :: FilePath -> FilePath -> IO ()
+testCancellationClassification workspace executable = do
+  timeoutRuntime <- newRuntime (testConfig workspace executable)
+  timeoutOutcome <-
+    timeout 100000 (runWorkflow timeoutRuntime (liftIO (threadDelay 5000000)))
+  assertEqual "timeout returns Nothing" Nothing timeoutOutcome
+  timeoutRecords <- readRuntimeRecords timeoutRuntime
+  assertCancelledOnly "timeout" timeoutRecords
+
+  asyncRuntime <- newRuntime (testConfig workspace executable)
+  started <- newEmptyMVar
+  worker <-
+    Async.async
+      (runWorkflow asyncRuntime (liftIO (putMVar started () >> threadDelay 5000000)))
+  takeMVar started
+  Async.cancel worker
+  asyncOutcome <- Async.waitCatch worker
+  case asyncOutcome of
+    Left exception ->
+      case fromException exception :: Maybe Async.AsyncCancelled of
+        Just Async.AsyncCancelled -> pure ()
+        Nothing -> failTest $ "async cancellation changed exception: " <> show exception
+    Right () -> failTest "async cancellation produced a successful workflow"
+  asyncRecords <- readRuntimeRecords asyncRuntime
+  assertCancelledOnly "Async.cancel" asyncRecords
+  where
+    assertCancelledOnly label records = do
+      let transitionCodes =
+            [ stateTransitionCode transition
+              | RuntimeTransitionRecord transition <- records
+            ]
+      unless ("workflow.control.cancelled" `elem` transitionCodes) $
+        failTest $ label <> " did not record the cancelled transition"
+      unless
+        (not (any (`elem` transitionCodes) ["workflow.result.error", "workflow.result.exception"])) $
+        failTest $ label <> " also recorded a failed transition"
+
 testHumanProjection :: IO ()
 testHumanProjection = do
   let rawEvent =
@@ -550,7 +589,8 @@ testRunTactusPresentation workspace executable = do
     (unknownExit, _, unknownError),
     (unexpectedExit, _, unexpectedError),
     diagnosticRecords,
-    asyncOutcome
+    asyncOutcome,
+    timeoutOutcome
     ) <-
     ( do
         (failed, succeeded, unknown, unexpected, records) <-
@@ -571,7 +611,10 @@ testRunTactusPresentation workspace executable = do
         asynchronous <-
           withEnvironment [("TACTUS_RUNTIME_CONFIG", configPath)] $
             (try (runTactus (liftIO (throwIO ThreadKilled))) :: IO (Either SomeException ()))
-        pure (failed, succeeded, unknown, unexpected, records, asynchronous)
+        timedOut <-
+          withEnvironment [("TACTUS_RUNTIME_CONFIG", configPath)] $
+            timeout 100000 (runTactus (liftIO (threadDelay 5000000)))
+        pure (failed, succeeded, unknown, unexpected, records, asynchronous, timedOut)
     )
       `finally` mapM_ removeIfPresent [configPath, unknownConfigPath, diagnosticPath]
   assertEqual "expected workflow error exit" (ExitFailure 1) failureExit
@@ -636,6 +679,7 @@ testRunTactusPresentation workspace executable = do
       Just ThreadKilled -> pure ()
       other -> failTest $ "runTactus changed the asynchronous exception: " <> show other
     Right () -> failTest "runTactus swallowed an asynchronous exception"
+  assertEqual "runTactus preserves timeout cancellation" Nothing timeoutOutcome
 
 fakeCliError :: FilePath -> IO ()
 fakeCliError configPath = do

@@ -31,6 +31,8 @@ library
       Clef.Runtime.Config
       Clef.Segno
       Clef.Workflow
+  other-modules:
+      Clef.Internal.Exception
   build-depends:
       aeson >=2.2 && <2.3,
       async >=2.2 && <2.3,
@@ -52,6 +54,7 @@ test-suite clef-sdk-tests
   main-is: Main.hs
   build-depends:
       aeson,
+      async,
       base,
       bytestring,
       clef-sdk,

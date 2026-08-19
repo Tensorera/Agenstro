@@ -49,12 +49,10 @@ import Control.Concurrent.STM
     writeTVar,
   )
 import Control.Exception
-  ( AsyncException,
-    IOException,
+  ( IOException,
     SomeException,
     displayException,
     finally,
-    fromException,
     throwIO,
     try,
   )
@@ -103,6 +101,7 @@ import Clef.Error
     WorkflowError (..),
     workflowErrorDiagnostic,
   )
+import Clef.Internal.Exception (isAsynchronousException)
 import Clef.Plugin.Protocol
   ( ParsedPluginOutput (..),
     PluginFailure (..),
@@ -278,9 +277,9 @@ projectSinkRecords sink queue failure = forever $ do
           projected <- try (emitRuntimeRecord sink record) :: IO (Either SomeException ())
           case projected of
             Right () -> pure ()
-            Left exception -> case fromException exception :: Maybe AsyncException of
-              Just _ -> throwIO exception
-              Nothing -> atomically $ do
+            Left exception
+              | isAsynchronousException exception -> throwIO exception
+              | otherwise -> atomically $ do
                 let failureMessage = Text.pack ("event sink failed: " <> displayException exception)
                 writeTVar failure (Just failureMessage)
     FlushProjection acknowledgement -> do

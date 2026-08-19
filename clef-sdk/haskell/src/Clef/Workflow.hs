@@ -35,8 +35,7 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Exception
-  ( AsyncException,
-    SomeException,
+  ( SomeException,
     displayException,
     fromException,
     mask,
@@ -75,6 +74,7 @@ import Clef.Error
     renderWorkflowError,
     workflowErrorDiagnostic,
   )
+import Clef.Internal.Exception (isAsynchronousException)
 import Clef.Plugin.Protocol (decodeStrictJSON)
 import Clef.Runtime
   ( PluginCallResult (..),
@@ -342,8 +342,8 @@ runWorkflow runtime workflow = do
     mempty
   outcome <- try (executeWorkflow workflow runtime) :: IO (Either SomeException value)
   case outcome of
-    Left exception -> case fromException exception :: Maybe AsyncException of
-      Just _ -> do
+    Left exception
+      | isAsynchronousException exception -> do
         recordWorkflowTransition
           runtime
           workflowId
@@ -364,7 +364,7 @@ runWorkflow runtime workflow = do
           "Workflow execution was cancelled before it produced a terminal value."
           mempty
         throwIO exception
-      Nothing -> do
+      | otherwise -> do
         case fromException exception :: Maybe WorkflowError of
           Just workflowError ->
             let (stateAfter, message) = case workflowError of
@@ -477,9 +477,9 @@ runTactus workflow = do
 
 handleTactusException :: Maybe Runtime -> SomeException -> IO value
 handleTactusException maybeRuntime exception =
-  case fromException exception :: Maybe AsyncException of
-    Just asyncException -> throwIO asyncException
-    Nothing -> case fromException exception :: Maybe WorkflowError of
+  if isAsynchronousException exception
+    then throwIO exception
+    else case fromException exception :: Maybe WorkflowError of
       Just workflowError -> do
         alreadyPresented <- case maybeRuntime of
           Nothing -> pure False
