@@ -47,6 +47,14 @@ the nested tree; on Unix, a process that deliberately creates a new session can
 escape process-group containment. Local termination cannot prove that a remote
 provider did not already complete work.
 
+Direct Clef process calls also apply hard defaults: a 1 MiB request, 1 MiB
+JSONL frame, 64 MiB total stdout, 10,000 event frames, 1 MiB retained stderr,
+and a 1,800-second wall-clock deadline. Lower-level embedders can replace these
+as one validated `PluginTransportLimits` value through `callPluginWithLimits`;
+`callPlugin`, `invoke`, `perform`, and `call` use the safe defaults. A direct
+post-spawn limit or deadline failure remains outcome-unknown because external
+work may already have happened.
+
 ## Request
 
 ```json

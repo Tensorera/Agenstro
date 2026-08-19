@@ -11,8 +11,10 @@ module Clef.Plugin.Protocol
     initialPluginOutputStreamParser,
     parsePluginFrame,
     feedPluginOutputChunk,
+    feedPluginOutputChunkWithLimit,
     finishPluginOutput,
     finishPluginOutputStream,
+    pluginOutputEventCount,
     decodeStrictJSON,
     encodePluginRequest,
     parsePluginOutput,
@@ -141,7 +143,12 @@ parsePluginOutput pluginName expectedId output = do
 -- | Feed an arbitrary process-read chunk and return complete event frames in
 -- arrival order.  Partial lines remain buffered until a later chunk or EOF.
 feedPluginOutputChunk :: Text -> Text -> PluginOutputStreamParser -> ByteString -> Either WorkflowError (PluginOutputStreamParser, [Value])
-feedPluginOutputChunk pluginName expectedId parser chunk =
+feedPluginOutputChunk = feedPluginOutputChunkWithLimit maxBound
+
+-- | Feed a chunk while rejecting a partial or complete JSONL frame that
+-- exceeds the supplied byte limit.
+feedPluginOutputChunkWithLimit :: Int -> Text -> Text -> PluginOutputStreamParser -> ByteString -> Either WorkflowError (PluginOutputStreamParser, [Value])
+feedPluginOutputChunkWithLimit maxFrameBytes pluginName expectedId parser chunk =
   consumeCompleteFrames
     (streamFrameParser parser)
     (streamBufferedBytes parser <> chunk)
@@ -149,16 +156,27 @@ feedPluginOutputChunk pluginName expectedId parser chunk =
   where
     consumeCompleteFrames frameParser buffered events =
       case ByteString.elemIndex 10 buffered of
-        Nothing ->
-          Right
-            ( PluginOutputStreamParser frameParser buffered,
-              reverse events
-            )
-        Just delimiter -> do
-          let frame = ByteString.take delimiter buffered
-              remaining = ByteString.drop (delimiter + 1) buffered
-          (nextParser, maybeEvent) <- parsePluginFrame pluginName expectedId frameParser frame
-          consumeCompleteFrames nextParser remaining (maybe events (: events) maybeEvent)
+        Nothing
+          | ByteString.length buffered > maxFrameBytes -> frameLimitFailure
+          | otherwise ->
+              Right
+                ( PluginOutputStreamParser frameParser buffered,
+                  reverse events
+                )
+        Just delimiter
+          | delimiter > maxFrameBytes -> frameLimitFailure
+          | otherwise -> do
+              let frame = ByteString.take delimiter buffered
+                  remaining = ByteString.drop (delimiter + 1) buffered
+              (nextParser, maybeEvent) <- parsePluginFrame pluginName expectedId frameParser frame
+              consumeCompleteFrames nextParser remaining (maybe events (: events) maybeEvent)
+
+    frameLimitFailure =
+      Left . PluginProtocolFailed pluginName $
+        "stdout JSONL frame exceeds " <> Text.pack (show maxFrameBytes) <> " bytes"
+
+pluginOutputEventCount :: PluginOutputStreamParser -> Int
+pluginOutputEventCount = length . parserEventsReversed . streamFrameParser
 
 -- | Finish a byte stream at EOF, accepting a final frame without LF and then
 -- requiring exactly one terminal result.

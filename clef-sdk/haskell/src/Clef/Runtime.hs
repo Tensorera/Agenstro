@@ -7,6 +7,8 @@ module Clef.Runtime
     EventSink (..),
     RuntimeSink,
     PluginCallResult (..),
+    PluginTransportLimits (..),
+    defaultPluginTransportLimits,
     newRuntime,
     newRuntimeWithSink,
     runtimeConfig,
@@ -18,6 +20,7 @@ module Clef.Runtime
     flushRuntimeSink,
     freshRuntimeId,
     callPlugin,
+    callPluginWithLimits,
   )
 where
 
@@ -108,8 +111,9 @@ import Clef.Plugin.Protocol
     decodeStrictJSON,
     encodePluginRequest,
     finishPluginOutputStream,
-    feedPluginOutputChunk,
+    feedPluginOutputChunkWithLimit,
     initialPluginOutputStreamParser,
+    pluginOutputEventCount,
   )
 import Clef.Runtime.Config (RuntimeConfig (runtimeWorkspace))
 
@@ -215,6 +219,29 @@ data PluginCallResult = PluginCallResult
     pluginCallEvents :: [Value]
   }
   deriving (Eq, Show)
+
+-- | Hard bounds for a direct Clef-to-plugin process.  The normal Tactus path
+-- applies its own independently configured supervisor bounds as well.
+data PluginTransportLimits = PluginTransportLimits
+  { transportDeadlineSeconds :: Maybe Int,
+    transportMaxRequestBytes :: Int,
+    transportMaxFrameBytes :: Int,
+    transportMaxStdoutBytes :: Int,
+    transportMaxEventFrames :: Int,
+    transportMaxStderrBytes :: Int
+  }
+  deriving (Eq, Show)
+
+defaultPluginTransportLimits :: PluginTransportLimits
+defaultPluginTransportLimits =
+  PluginTransportLimits
+    { transportDeadlineSeconds = Just (30 * 60),
+      transportMaxRequestBytes = 1024 * 1024,
+      transportMaxFrameBytes = 1024 * 1024,
+      transportMaxStdoutBytes = 64 * 1024 * 1024,
+      transportMaxEventFrames = 10000,
+      transportMaxStderrBytes = 1024 * 1024
+    }
 
 newRuntime :: RuntimeConfig -> IO Runtime
 newRuntime config = do
@@ -373,7 +400,13 @@ flushRuntimeSink runtime = do
       pure (Left message)
 
 callPlugin :: Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
-callPlugin runtime pluginName command method params = do
+callPlugin = callPluginWithLimits defaultPluginTransportLimits
+
+callPluginWithLimits :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
+callPluginWithLimits transportLimits runtime pluginName command method params = do
+  case validatePluginTransportLimits transportLimits of
+    Left message -> throwWorkflow (PluginProtocolFailed pluginName message)
+    Right () -> pure ()
   when (Text.null method) . throwWorkflow $
     PluginProtocolFailed pluginName "request method must be non-empty"
   requestId <- freshRuntimeId runtime
@@ -384,6 +417,13 @@ callPlugin runtime pluginName command method params = do
       throwWorkflow . PluginProtocolFailed pluginName $
         "request is outside the agenstro.plugin/v1 JSON domain: " <> Text.pack message
     Right _ -> pure ()
+  when (ByteString.length encodedRequest > transportMaxRequestBytes transportLimits) . throwWorkflow $
+    PluginProtocolFailed
+      pluginName
+      ( "encoded request exceeds "
+          <> Text.pack (show (transportMaxRequestBytes transportLimits))
+          <> " bytes"
+      )
   let requestInput = encodedRequest <> ByteString.singleton 10
   (executable, arguments) <- case command of
     [] -> throwWorkflow $ PluginProcessFailed pluginName "empty command"
@@ -403,17 +443,31 @@ callPlugin runtime pluginName command method params = do
     "The method is non-empty, the request is valid JSON, and a command is configured."
     "Clef accepted the plugin invocation request."
     Nothing
-  processResult <-
-    try
-      ( readPluginProcess
-          (proc executable arguments) {cwd = Just (runtimeWorkspace (internalRuntimeConfig runtime))}
-          requestInput
-          pluginName
-          requestId
-          (emitEvent runtime pluginName requestId)
-      ) :: IO (Either IOException (ExitCode, Either WorkflowError ParsedPluginOutput, ByteString.ByteString))
-  (exitCode, parsedOutput, standardErrorBytes) <- case processResult of
-    Left exception -> do
+  let processAction =
+        try
+          ( readPluginProcess
+              transportLimits
+              (proc executable arguments) {cwd = Just (runtimeWorkspace (internalRuntimeConfig runtime))}
+              requestInput
+              pluginName
+              requestId
+              (emitEvent runtime pluginName requestId)
+          ) :: IO (Either IOException (ExitCode, Either WorkflowError ParsedPluginOutput, ByteString.ByteString, Bool))
+  processResult <- case transportDeadlineSeconds transportLimits of
+    Nothing -> Just <$> processAction
+    Just seconds -> timeout (seconds * 1000000) processAction
+  (exitCode, parsedOutput, standardErrorBytes, standardErrorTruncated) <- case processResult of
+    Nothing -> do
+      let cause =
+            WorkflowCause
+              { workflowCauseCode = "plugin.deadline_exceeded",
+                workflowCauseMessage = "plugin invocation exceeded its configured deadline",
+                workflowCauseDetails =
+                  Just (object ["seconds" .= transportDeadlineSeconds transportLimits])
+              }
+      recordPluginOutcomeUnknown runtime pluginName method requestId cause
+      throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+    Just (Left exception) -> do
       let cause =
             WorkflowCause
               { workflowCauseCode = "plugin.transport_failed",
@@ -422,8 +476,16 @@ callPlugin runtime pluginName command method params = do
               }
       recordPluginOutcomeUnknown runtime pluginName method requestId cause
       throwWorkflow (PluginOutcomeUnknown pluginName method cause)
-    Right result -> pure result
-  let standardError = decodeUtf8With lenientDecode standardErrorBytes
+    Just (Right result) -> pure result
+  let decodedStandardError = decodeUtf8With lenientDecode standardErrorBytes
+      standardError =
+        decodedStandardError
+          <> if standardErrorTruncated
+            then
+              "\n[truncated after "
+                <> Text.pack (show (transportMaxStderrBytes transportLimits))
+                <> " bytes]"
+            else ""
   unlessEmpty standardError $ \diagnostic -> do
     recordRuntime runtime (PluginDiagnosticRecord pluginName diagnostic)
   case parsedOutput of
@@ -518,6 +580,21 @@ callPlugin runtime pluginName command method params = do
                   pluginCallValue = value,
                   pluginCallEvents = pluginOutputEvents parsed
                 }
+
+validatePluginTransportLimits :: PluginTransportLimits -> Either Text ()
+validatePluginTransportLimits limits
+  | any
+      (<= 0)
+      [ transportMaxRequestBytes limits,
+        transportMaxFrameBytes limits,
+        transportMaxStdoutBytes limits,
+        transportMaxEventFrames limits,
+        transportMaxStderrBytes limits
+      ] = Left "plugin transport byte and frame limits must be positive"
+  | Just seconds <- transportDeadlineSeconds limits,
+    seconds <= 0 || seconds > maxBound `div` 1000000 =
+      Left "plugin transport deadline must be positive and representable in microseconds"
+  | otherwise = Right ()
 
 freshRuntimeId :: Runtime -> IO Text
 freshRuntimeId runtime =
@@ -682,8 +759,8 @@ renderRuntimeRecord record = case record of
   RuntimeMessageRecord message -> Just (renderRuntimeMessage message)
   _ -> Nothing
 
-readPluginProcess :: CreateProcess -> ByteString.ByteString -> Text -> Text -> (Value -> IO ()) -> IO (ExitCode, Either WorkflowError ParsedPluginOutput, ByteString.ByteString)
-readPluginProcess process requestInput pluginName requestId onEvent =
+readPluginProcess :: PluginTransportLimits -> CreateProcess -> ByteString.ByteString -> Text -> Text -> (Value -> IO ()) -> IO (ExitCode, Either WorkflowError ParsedPluginOutput, ByteString.ByteString, Bool)
+readPluginProcess transportLimits process requestInput pluginName requestId onEvent =
   withCreateProcess
     process
       { std_in = CreatePipe,
@@ -698,33 +775,81 @@ readPluginProcess process requestInput pluginName requestId onEvent =
             concurrently
               (ByteString.hPut inputHandle requestInput `finally` hClose inputHandle)
               ( concurrently
-                  (readPluginOutput outputHandle pluginName requestId onEvent)
-                  (ByteString.hGetContents errorHandle)
+                  (readPluginOutput transportLimits outputHandle pluginName requestId onEvent)
+                  (readBoundedAndDrain errorHandle (transportMaxStderrBytes transportLimits))
               )
           exitCode <- waitForProcess processHandle
-          pure (exitCode, standardOutput, standardError)
+          let (standardErrorBytes, standardErrorTruncated) = standardError
+          pure (exitCode, standardOutput, standardErrorBytes, standardErrorTruncated)
         _ -> ioError (userError "plugin process pipes were not created")
 
 -- Read bytes rather than Text so a UTF-8 code point may span arbitrary OS
 -- pipe chunks.  Only complete LF-delimited frames enter the strict protocol
 -- decoder.  After the first protocol error we still drain stdout, allowing the
 -- child and its stderr pipe to finish without deadlock.
-readPluginOutput :: Handle -> Text -> Text -> (Value -> IO ()) -> IO (Either WorkflowError ParsedPluginOutput)
-readPluginOutput handle pluginName requestId onEvent =
-  go (Right initialPluginOutputStreamParser)
+readPluginOutput :: PluginTransportLimits -> Handle -> Text -> Text -> (Value -> IO ()) -> IO (Either WorkflowError ParsedPluginOutput)
+readPluginOutput transportLimits handle pluginName requestId onEvent =
+  go (Right initialPluginOutputStreamParser) 0
   where
-    go parser = do
+    go parser totalBytes = do
       chunk <- ByteString.hGetSome handle 32768
       if ByteString.null chunk
         then case parser >>= finishPluginOutputStream pluginName requestId of
           Left workflowError -> pure (Left workflowError)
-          Right (events, output) -> mapM_ onEvent events >> pure (Right output)
+          Right (events, output)
+            | length (pluginOutputEvents output) > transportMaxEventFrames transportLimits ->
+                pure . Left . PluginProtocolFailed pluginName $
+                  "plugin emitted more than "
+                    <> Text.pack (show (transportMaxEventFrames transportLimits))
+                    <> " event frames"
+            | otherwise -> mapM_ onEvent events >> pure (Right output)
         else case parser of
-          Left workflowError -> go (Left workflowError)
-          Right streamParser ->
-            case feedPluginOutputChunk pluginName requestId streamParser chunk of
-              Left workflowError -> go (Left workflowError)
-              Right (nextParser, events) -> mapM_ onEvent events >> go (Right nextParser)
+          Left workflowError -> go (Left workflowError) totalBytes
+          Right streamParser -> do
+            let nextTotalBytes = totalBytes + ByteString.length chunk
+            if nextTotalBytes > transportMaxStdoutBytes transportLimits
+              then
+                go
+                  ( Left . PluginProtocolFailed pluginName $
+                      "plugin stdout exceeds "
+                        <> Text.pack (show (transportMaxStdoutBytes transportLimits))
+                        <> " bytes"
+                  )
+                  nextTotalBytes
+              else
+                case
+                    feedPluginOutputChunkWithLimit
+                      (transportMaxFrameBytes transportLimits)
+                      pluginName
+                      requestId
+                      streamParser
+                      chunk
+                  of
+                    Left workflowError -> go (Left workflowError) nextTotalBytes
+                    Right (nextParser, events)
+                      | pluginOutputEventCount nextParser > transportMaxEventFrames transportLimits ->
+                          go
+                            ( Left . PluginProtocolFailed pluginName $
+                                "plugin emitted more than "
+                                  <> Text.pack (show (transportMaxEventFrames transportLimits))
+                                  <> " event frames"
+                            )
+                            nextTotalBytes
+                      | otherwise -> mapM_ onEvent events >> go (Right nextParser) nextTotalBytes
+
+readBoundedAndDrain :: Handle -> Int -> IO (ByteString.ByteString, Bool)
+readBoundedAndDrain handle maxRetainedBytes = go [] 0 False
+  where
+    go chunks retainedBytes truncated = do
+      chunk <- ByteString.hGetSome handle 32768
+      if ByteString.null chunk
+        then pure (ByteString.concat (reverse chunks), truncated)
+        else do
+          let remaining = maxRetainedBytes - retainedBytes
+              retained = ByteString.take remaining chunk
+              nextRetainedBytes = retainedBytes + ByteString.length retained
+              nextTruncated = truncated || ByteString.length retained < ByteString.length chunk
+          go (retained : chunks) nextRetainedBytes nextTruncated
 
 unlessEmpty :: Text -> (Text -> IO ()) -> IO ()
 unlessEmpty value action =

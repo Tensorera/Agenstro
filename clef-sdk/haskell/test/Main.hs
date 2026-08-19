@@ -81,6 +81,9 @@ main = do
     ["--fake-reported-exit"] -> fakeReportedExit
     ["--fake-outcome-unknown"] -> fakeOutcomeUnknown
     ["--fake-backpressure"] -> fakeBackpressure
+    ["--fake-oversized-line"] -> fakeOversizedLine
+    ["--fake-stderr-flood"] -> fakeStderrFlood
+    ["--fake-event-flood"] -> fakeEventFlood
     ["--fake-stream"] -> fakeStream
     ["--fake-block"] -> fakeBlock
     ["--fake-block-end"] -> fakeBlockEnd
@@ -103,6 +106,7 @@ runTests = do
           ("shared Rust and Haskell protocol conformance vectors", testProtocolConformance workspace),
           ("incremental protocol parsing is chunk-boundary independent", testProtocolChunkBoundaries),
           ("plugin process exit is checked", testPluginExit workspace executable),
+          ("direct Clef plugin transport is bounded", testDirectPluginTransportBounds workspace executable),
           ("plugin pipes drain concurrently", testPluginPipeBackpressure workspace executable),
           ("plugin events stream before terminal across UTF-8 chunks", testPluginEventStreaming workspace executable),
           ("runtime transitions explain state, trigger, guard, and result", testRuntimeTransitions workspace executable),
@@ -470,10 +474,108 @@ testPluginExit workspace executable = do
         (KeyMap.singleton "number" (Number (scientific (10 ^ (1000 :: Int) + 1) (-1))))
     )
 
+testDirectPluginTransportBounds :: FilePath -> FilePath -> IO ()
+testDirectPluginTransportBounds workspace executable = do
+  runtime <- newRuntime (testConfig workspace executable)
+  let command mode = [Text.pack executable, mode]
+      baseLimits =
+        defaultPluginTransportLimits
+          { transportDeadlineSeconds = Nothing,
+            transportMaxRequestBytes = 1024 * 1024,
+            transportMaxFrameBytes = 512,
+            transportMaxStdoutBytes = 2048,
+            transportMaxEventFrames = 100,
+            transportMaxStderrBytes = 64
+          }
+  assertWorkflowError
+    "request byte limit is checked before spawn"
+    (\case PluginProtocolFailed "request-limit" message -> "encoded request exceeds" `Text.isInfixOf` message; _ -> False)
+    ( callPluginWithLimits
+        baseLimits {transportMaxRequestBytes = 64}
+        runtime
+        "request-limit"
+        ["executable-that-must-not-be-started"]
+        "probe"
+        (KeyMap.singleton "payload" (String (Text.replicate 200 "x")))
+    )
+  assertWorkflowError
+    "stdout frame byte limit"
+    (\case
+      PluginOutcomeUnknown "frame-limit" "probe" cause -> "JSONL frame exceeds" `Text.isInfixOf` workflowCauseMessage cause
+      _ -> False
+    )
+    ( callPluginWithLimits
+        baseLimits {transportMaxFrameBytes = 128}
+        runtime
+        "frame-limit"
+        (command "--fake-oversized-line")
+        "probe"
+        mempty
+    )
+  assertWorkflowError
+    "total stdout byte limit"
+    (\case
+      PluginOutcomeUnknown "stdout-limit" "probe" cause -> "stdout exceeds" `Text.isInfixOf` workflowCauseMessage cause
+      _ -> False
+    )
+    ( callPluginWithLimits
+        baseLimits {transportMaxStdoutBytes = 128}
+        runtime
+        "stdout-limit"
+        (command "--fake-oversized-line")
+        "probe"
+        mempty
+    )
+  assertWorkflowError
+    "event frame count limit"
+    (\case
+      PluginOutcomeUnknown "event-limit" "probe" cause -> "event frames" `Text.isInfixOf` workflowCauseMessage cause
+      _ -> False
+    )
+    ( callPluginWithLimits
+        baseLimits {transportMaxEventFrames = 2}
+        runtime
+        "event-limit"
+        (command "--fake-event-flood")
+        "probe"
+        mempty
+    )
+  stderrResult <-
+    callPluginWithLimits
+      baseLimits
+      runtime
+      "stderr-limit"
+      (command "--fake-stderr-flood")
+      "probe"
+      mempty
+  assertEqual "stderr truncation preserves terminal success" (String "ok") (pluginCallValue stderrResult)
+  stderrRecords <- readRuntimeRecords runtime
+  unless
+    (any (\case PluginDiagnosticRecord "stderr-limit" message -> "truncated after 64 bytes" `Text.isInfixOf` message; _ -> False) stderrRecords)
+    (failTest "stderr truncation was not recorded")
+  deadlineOutcome <-
+    timeout
+      3000000
+      ( try
+          ( callPluginWithLimits
+              baseLimits {transportDeadlineSeconds = Just 1}
+              runtime
+              "deadline"
+              (command "--fake-block")
+              "probe"
+              mempty
+          ) :: IO (Either WorkflowError PluginCallResult)
+      )
+  case deadlineOutcome of
+    Just (Left (PluginOutcomeUnknown "deadline" "probe" cause)) ->
+      assertEqual "deadline cause code" "plugin.deadline_exceeded" (workflowCauseCode cause)
+    Just other -> failTest $ "deadline returned the wrong outcome: " <> show other
+    Nothing -> failTest "direct Clef deadline did not terminate the plugin"
+
 testPluginPipeBackpressure :: FilePath -> FilePath -> IO ()
 testPluginPipeBackpressure workspace executable = do
   runtime <- newRuntime (testConfig workspace executable)
-  let largeInput = Text.replicate (1024 * 1024) "x"
+  let largeInput = Text.replicate (512 * 1024) "x"
   result <-
     timeout 5000000 $
       callPlugin
@@ -1493,7 +1595,7 @@ fakeReportedExit = do
 
 fakeBackpressure :: IO ()
 fakeBackpressure = do
-  ByteString.Char8.hPutStr IO.stdout (ByteString.replicate (1024 * 1024) 32)
+  ByteString.Char8.hPutStr IO.stdout (ByteString.replicate (256 * 1024) 32)
   IO.hFlush IO.stdout
   requestLine <- ByteString.Char8.getLine
   request <- case eitherDecodeStrict' requestLine of
@@ -1507,6 +1609,47 @@ fakeBackpressure = do
         "id" .= requestId,
         "ok" .= True,
         "value" .= ("ok" :: Text)
+      ]
+
+fakeOversizedLine :: IO ()
+fakeOversizedLine = do
+  _ <- ByteString.Char8.getLine
+  ByteString.hPut IO.stdout (ByteString.replicate 256 120 <> ByteString.singleton 10)
+  IO.hFlush IO.stdout
+
+fakeStderrFlood :: IO ()
+fakeStderrFlood = do
+  requestLine <- ByteString.Char8.getLine
+  request <- either (failTest . ("fake stderr plugin received invalid JSON: " <>)) pure (eitherDecodeStrict' requestLine)
+  requestId <- parseFakeParams (withObject "plugin request" (.: "id")) request :: IO Text
+  ByteString.hPut IO.stderr (ByteString.replicate 512 101)
+  IO.hFlush IO.stderr
+  LazyChar8.putStrLn . encode $
+    object
+      [ "type" .= ("result" :: Text),
+        "id" .= requestId,
+        "ok" .= True,
+        "value" .= ("ok" :: Text)
+      ]
+
+fakeEventFlood :: IO ()
+fakeEventFlood = do
+  requestLine <- ByteString.Char8.getLine
+  request <- either (failTest . ("fake event plugin received invalid JSON: " <>)) pure (eitherDecodeStrict' requestLine)
+  requestId <- parseFakeParams (withObject "plugin request" (.: "id")) request :: IO Text
+  forM_ [1 .. (3 :: Int)] $ \index ->
+    LazyChar8.putStrLn . encode $
+      object
+        [ "type" .= ("event" :: Text),
+          "id" .= requestId,
+          "event" .= object ["type" .= ("progress" :: Text), "index" .= index]
+        ]
+  LazyChar8.putStrLn . encode $
+    object
+      [ "type" .= ("result" :: Text),
+        "id" .= requestId,
+        "ok" .= True,
+        "value" .= Null
       ]
 
 fakeStream :: IO ()
