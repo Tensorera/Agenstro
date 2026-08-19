@@ -43,6 +43,7 @@ import Control.Exception
     try,
   )
 import Control.Monad (unless)
+import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -111,6 +112,9 @@ instance Monad Workflow where
   workflow >>= next = Workflow $ \runtime -> do
     value <- executeWorkflow workflow runtime
     executeWorkflow (next value) runtime
+
+instance MonadIO Workflow where
+  liftIO action = Workflow $ \_ -> action
 
 data Task input output = Task
   { internalTaskName :: Text,
@@ -319,11 +323,6 @@ requireBecause message predicate value =
   if predicate value
     then pure value
     else Workflow $ \_ -> throwIO (RequirementFailed message)
-
--- | Embed arbitrary IO.  This is convenience, not a sandbox or a claim that
--- Clef can intercept every side effect performed by a Haskell script.
-liftIO :: IO value -> Workflow value
-liftIO action = Workflow $ \_ -> action
 
 -- | Capture ordinary workflow failures as values without swallowing
 -- asynchronous cancellation.

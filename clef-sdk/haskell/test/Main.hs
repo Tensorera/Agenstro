@@ -55,6 +55,7 @@ import System.IO (hClose, openBinaryTempFile, stderr)
 import qualified System.IO as IO
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
+import MonadIOCompatibility (standardLiftIO)
 
 main :: IO ()
 main = do
@@ -123,7 +124,7 @@ testWorkflowMonad workspace executable = do
   runtime <- newRuntime (testConfig workspace executable)
   result <- runWorkflow runtime $ do
     first <- pure (20 :: Int)
-    second <- pure 22
+    second <- standardLiftIO (pure 22)
     require (== 42) (first + second)
   assertEqual "monadic result" 42 result
   assertWorkflowError

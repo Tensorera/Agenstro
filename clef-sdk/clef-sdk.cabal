@@ -45,13 +45,16 @@ library
       scientific >=0.3.8 && <0.4,
       stm >=2.5 && <2.6,
       text >=2.1 && <2.2,
-      time >=1.12 && <1.16
+      time >=1.12 && <1.16,
+      transformers >=0.6.1 && <0.7
 
 test-suite clef-sdk-tests
   import: warnings
   type: exitcode-stdio-1.0
   hs-source-dirs: haskell/test
   main-is: Main.hs
+  other-modules:
+      MonadIOCompatibility
   build-depends:
       aeson,
       async,
@@ -62,7 +65,8 @@ test-suite clef-sdk-tests
       directory,
       process,
       scientific,
-      text
+      text,
+      transformers
 
 executable clef-typed-example
   import: warnings
