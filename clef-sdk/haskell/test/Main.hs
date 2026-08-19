@@ -13,7 +13,17 @@ import Clef.Plugin.Protocol
   )
 import Control.Concurrent (forkIO, threadDelay)
 import qualified Control.Concurrent.Async as Async
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
+import Control.Concurrent.MVar
+  ( modifyMVar_,
+    newEmptyMVar,
+    newMVar,
+    putMVar,
+    readMVar,
+    takeMVar,
+    tryPutMVar,
+    tryReadMVar,
+    tryTakeMVar,
+  )
 import Control.Exception
   ( AsyncException (ThreadKilled),
     SomeException,
@@ -94,6 +104,7 @@ runTests = do
           ("outcome unknown is natural language with a structured cause", testOutcomeUnknownRendering),
           ("runTactus renders expected errors without a call stack", testRunTactusPresentation workspace executable),
           ("blocked event sinks fail boundedly without hiding plugin outcome", testBlockedEventSink workspace executable),
+          ("sink overload drops events but preserves terminal records", testEventSinkOverload workspace executable),
           ("runWorkflow flushes the final typed value projection", testFinalSinkProjection workspace executable),
           ("generic plugin call is statically typed", testGenericPlugin workspace executable),
           ("runtime-owned plugin parameters cannot be shadowed", testPluginParameterConflicts workspace executable),
@@ -734,6 +745,48 @@ testBlockedEventSink workspace executable = do
     Just (Left other) -> failTest $ "blocked sink returned the wrong failure: " <> show other
     Just (Right value) -> failTest $ "blocked sink changed the typed value to " <> show value
     Nothing -> failTest "blocked sink did not fail within its bounded flush deadline"
+
+testEventSinkOverload :: FilePath -> FilePath -> IO ()
+testEventSinkOverload workspace executable = do
+  blockFirstEvent <- newMVar ()
+  releaseSink <- newEmptyMVar
+  deliveredEvents <- newMVar (0 :: Int)
+  terminalSeen <- newEmptyMVar
+  degradationSeen <- newEmptyMVar
+  runtime <-
+    newRuntimeWithSink (testConfig workspace executable) . EventSink $ \record ->
+      case record of
+        PluginEventRecord "overload" _ _ -> do
+          firstEvent <- tryTakeMVar blockFirstEvent
+          case firstEvent of
+            Just () -> takeMVar releaseSink
+            Nothing -> pure ()
+          modifyMVar_ deliveredEvents (pure . (+ 1))
+        PluginValueRecord _ "overload" "complete" _ -> do
+          _ <- tryPutMVar terminalSeen ()
+          pure ()
+        RuntimeMessageRecord message
+          | runtimeMessageCode message == "runtime.sink_degraded" -> do
+              _ <- tryPutMVar degradationSeen ()
+              pure ()
+        _ -> pure ()
+
+  mapM_
+    (\index -> recordRuntime runtime (PluginEventRecord "overload" "request" (toJSON index)))
+    [1 .. (300 :: Int)]
+  recordRuntime runtime (PluginValueRecord "request" "overload" "complete" Null)
+  putMVar releaseSink ()
+  flushResult <- timeout 2500000 (flushRuntimeSink runtime)
+  assertEqual "overloaded sink flush" (Just (Right ())) flushResult
+  deliveredCount <- readMVar deliveredEvents
+  unless (deliveredCount < 300) $ failTest "overloaded sink did not drop low-priority events"
+  assertEqual "terminal record reached overloaded sink" (Just ()) =<< tryReadMVar terminalSeen
+  assertEqual "sink degradation reached overloaded sink" (Just ()) =<< tryReadMVar degradationSeen
+  records <- readRuntimeRecords runtime
+  assertEqual
+    "sink degradation retained in runtime records"
+    1
+    (length [() | RuntimeMessageRecord message <- records, runtimeMessageCode message == "runtime.sink_degraded"])
 
 testFinalSinkProjection :: FilePath -> FilePath -> IO ()
 testFinalSinkProjection workspace executable = do

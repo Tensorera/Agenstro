@@ -147,7 +147,9 @@ they are not part of `Workflow`'s return type. `newRuntime` keeps the default
 stderr projection, while `newRuntimeWithSink config (EventSink handler)` installs
 a caller-defined projection without losing in-memory records. Clef serializes
 the handler on a bounded worker queue and boundedly flushes it at the
-`runWorkflow` boundary; a blocked or failed sink is retained as a
+`runWorkflow` boundary. Under load, low-priority plugin events may be dropped
+with a `runtime.sink_degraded` record and `events_dropped` count while terminal
+records retain reserved capacity. A blocked or failed sink is retained as a
 `runtime.sink_failed` internal diagnostic without changing a successful value
 or known plugin failure. Typed general-plugin terminal values
 are retained as `PluginValueRecord` before

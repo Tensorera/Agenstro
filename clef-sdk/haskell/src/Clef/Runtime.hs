@@ -33,19 +33,16 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.STM
   ( STM,
-    TBQueue,
     TMVar,
     TVar,
     atomically,
+    modifyTVar',
     newEmptyTMVarIO,
-    newTBQueueIO,
     newTVarIO,
     putTMVar,
-    readTBQueue,
     readTVar,
+    retry,
     takeTMVar,
-    isFullTBQueue,
-    writeTBQueue,
     writeTVar,
   )
 import Control.Exception
@@ -68,12 +65,13 @@ import Data.Aeson
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Sequence (Seq, ViewL (..), (|>))
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
-import Numeric.Natural (Natural)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose, hSetBinaryMode, stderr)
@@ -121,16 +119,20 @@ data Runtime = Runtime
     internalNextRequestId :: MVar Integer,
     internalRecords :: MVar [RuntimeRecord],
     internalShouldProject :: RuntimeRecord -> Bool,
-    internalSinkQueue :: TBQueue SinkMessage,
-    internalSinkFailure :: TVar (Maybe Text)
+    internalSinkQueue :: TVar (Seq SinkMessage),
+    internalSinkFailure :: TVar (Maybe Text),
+    internalSinkDroppedEvents :: TVar Int
   }
 
 data SinkMessage
   = ProjectRecord RuntimeRecord
   | FlushProjection (TMVar (Either Text ()))
 
-sinkQueueCapacity :: Natural
+sinkQueueCapacity :: Int
 sinkQueueCapacity = 128
+
+sinkEventQueueCapacity :: Int
+sinkEventQueueCapacity = 112
 
 sinkFlushTimeoutMicros :: Int
 sinkFlushTimeoutMicros = 1000000
@@ -227,10 +229,11 @@ newRuntimeWithSinkPolicy :: RuntimeConfig -> (RuntimeRecord -> Bool) -> EventSin
 newRuntimeWithSinkPolicy config shouldProject sink = do
   nextRequestId <- newMVar 1
   records <- newMVar []
-  queue <- newTBQueueIO sinkQueueCapacity
+  queue <- newTVarIO Seq.empty
   failure <- newTVarIO Nothing
+  droppedEvents <- newTVarIO 0
   _ <- forkIO (projectSinkRecords sink queue failure)
-  pure (Runtime config nextRequestId records shouldProject queue failure)
+  pure (Runtime config nextRequestId records shouldProject queue failure droppedEvents)
 
 runtimeConfig :: Runtime -> RuntimeConfig
 runtimeConfig = internalRuntimeConfig
@@ -256,18 +259,50 @@ enqueueSinkRecord :: Runtime -> RuntimeRecord -> STM ()
 enqueueSinkRecord runtime record
   | not (internalShouldProject runtime record) = pure ()
   | otherwise = do
-      failure <- readTVar (internalSinkFailure runtime)
-      case failure of
-        Just _ -> pure ()
-        Nothing -> do
-          full <- isFullTBQueue (internalSinkQueue runtime)
-          if full
-            then writeTVar (internalSinkFailure runtime) (Just "event sink queue exceeded 128 records")
-            else writeTBQueue (internalSinkQueue runtime) (ProjectRecord record)
+      _ <- enqueueSinkMessage runtime (ProjectRecord record)
+      pure ()
 
-projectSinkRecords :: EventSink -> TBQueue SinkMessage -> TVar (Maybe Text) -> IO ()
+enqueueSinkMessage :: Runtime -> SinkMessage -> STM Bool
+enqueueSinkMessage runtime message = do
+  failure <- readTVar (internalSinkFailure runtime)
+  case failure of
+    Just _ -> pure False
+    Nothing -> do
+      queue <- readTVar (internalSinkQueue runtime)
+      if isLowPrioritySinkMessage message && Seq.length queue >= sinkEventQueueCapacity
+        then dropLowPriorityMessage >> pure True
+        else
+          if Seq.length queue < sinkQueueCapacity
+            then writeTVar (internalSinkQueue runtime) (queue |> message) >> pure True
+            else case Seq.findIndexL isLowPrioritySinkMessage queue of
+              Just index -> do
+                dropLowPriorityMessage
+                writeTVar (internalSinkQueue runtime) (Seq.deleteAt index queue |> message)
+                pure True
+              Nothing -> do
+                writeTVar
+                  (internalSinkFailure runtime)
+                  (Just "event sink queue exhausted its high-priority capacity")
+                pure False
+  where
+    dropLowPriorityMessage = modifyTVar' (internalSinkDroppedEvents runtime) (+ 1)
+
+isLowPrioritySinkMessage :: SinkMessage -> Bool
+isLowPrioritySinkMessage (ProjectRecord PluginEventRecord {}) = True
+isLowPrioritySinkMessage _ = False
+
+readSinkMessage :: TVar (Seq SinkMessage) -> STM SinkMessage
+readSinkMessage queueVariable = do
+  queue <- readTVar queueVariable
+  case Seq.viewl queue of
+    EmptyL -> retry
+    message :< remaining -> do
+      writeTVar queueVariable remaining
+      pure message
+
+projectSinkRecords :: EventSink -> TVar (Seq SinkMessage) -> TVar (Maybe Text) -> IO ()
 projectSinkRecords sink queue failure = forever $ do
-  message <- atomically (readTBQueue queue)
+  message <- atomically (readSinkMessage queue)
   case message of
     ProjectRecord record -> do
       currentFailure <- atomically (readTVar failure)
@@ -288,6 +323,7 @@ projectSinkRecords sink queue failure = forever $ do
 
 flushRuntimeSink :: Runtime -> IO (Either Text ())
 flushRuntimeSink runtime = do
+  reportSinkDegradation
   result <- flushProjection
   case result of
     Right () -> pure ()
@@ -302,22 +338,36 @@ flushRuntimeSink runtime = do
           }
   pure result
   where
+    reportSinkDegradation = do
+      droppedEvents <- atomically $ do
+        count <- readTVar (internalSinkDroppedEvents runtime)
+        writeTVar (internalSinkDroppedEvents runtime) 0
+        pure count
+      when (droppedEvents > 0) . recordRuntime runtime . RuntimeMessageRecord $
+        RuntimeMessage
+          { runtimeMessageCode = "runtime.sink_degraded",
+            runtimeMessageLevel = WarningLevel,
+            runtimeMessageText =
+              "The runtime sink dropped low-priority plugin events under load; terminal records were preserved.",
+            runtimeMessageContext = KeyMap.singleton "events_dropped" (toJSON droppedEvents)
+          }
+
     flushProjection = do
       existingFailure <- atomically (readTVar (internalSinkFailure runtime))
       case existingFailure of
         Just message -> pure (Left message)
         Nothing -> do
           acknowledgement <- newEmptyTMVarIO
-          queued <-
-            timeout sinkFlushTimeoutMicros . atomically $
-              writeTBQueue (internalSinkQueue runtime) (FlushProjection acknowledgement)
-          case queued of
-            Nothing -> failFlush "event sink queue did not accept a flush marker"
-            Just () -> do
+          queued <- atomically (enqueueSinkMessage runtime (FlushProjection acknowledgement))
+          if queued
+            then do
               completed <- timeout sinkFlushTimeoutMicros (atomically (takeTMVar acknowledgement))
               case completed of
                 Nothing -> failFlush "event sink did not finish within one second"
                 Just projectionResult -> pure projectionResult
+            else do
+              failure <- atomically (readTVar (internalSinkFailure runtime))
+              pure (Left (maybe "event sink queue did not accept a flush marker" id failure))
 
     failFlush message = do
       atomically (writeTVar (internalSinkFailure runtime) (Just message))
