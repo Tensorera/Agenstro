@@ -130,6 +130,9 @@ jobs:
         run: cabal update
       - name: Build Clef and Segno
         run: cabal build --builddir=Build/cabal all --enable-tests
+      - name: Type-check Clef documentation examples
+        shell: pwsh
+        run: ./Test/repository/test-clef-documentation-examples.ps1
       - name: Test Clef with fake streaming plugins
         run: cabal test --builddir=Build/cabal clef-sdk:test:clef-sdk-tests --test-show-details=direct
       - name: Test Segno with virtual time and fake process boundaries

@@ -17,13 +17,12 @@ recoverable workflow failures.
 ordinary `Functor`, `Applicative`, and `Monad`, so normal Haskell `do` notation
 defines sequencing and GHC checks every value passed between steps.
 
-```haskell
+```haskell compile
 workflow :: Workflow Int
 workflow = do
   left <- pure 19
   right <- pure 23
-  requireBecause "sum must be positive" (left + right > 0)
-  pure (left + right)
+  requireBecause "sum must be positive" (> 0) (left + right)
 ```
 
 The constructor is intentionally hidden. Use the public combinators rather
