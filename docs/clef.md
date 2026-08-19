@@ -200,6 +200,10 @@ without a Haskell call stack. Use lower-level runners when embedding Clef:
 `newRuntimeWithSink` accepts an `EventSink` for an embedding that needs every
 runtime record. A sink is an observation channel: degradation is recorded and
 does not change a provider's authoritative terminal result.
+Long-lived embedders should acquire runtimes with `withRuntime` or
+`withRuntimeWithSink`; both boundedly flush and stop the sink worker on normal
+return, exceptions, and cancellation. If manual ownership is necessary,
+`closeRuntime` is idempotent.
 
 ## State transitions and presentation
 

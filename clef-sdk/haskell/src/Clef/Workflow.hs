@@ -37,6 +37,7 @@ import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Exception
   ( SomeException,
     displayException,
+    finally,
     fromException,
     mask,
     throwIO,
@@ -83,6 +84,7 @@ import Clef.Runtime
     Runtime,
     RuntimeRecord (..),
     callPlugin,
+    closeRuntime,
     flushRuntimeSink,
     freshRuntimeId,
     newRuntime,
@@ -479,10 +481,12 @@ runTactus workflow = do
   case runtimeOutcome of
     Left exception -> handleTactusException Nothing exception
     Right runtime -> do
-      outcome <- try (runWorkflow runtime workflow) :: IO (Either SomeException value)
-      case outcome of
-        Right value -> pure value
-        Left exception -> handleTactusException (Just runtime) exception
+      let execute = do
+            outcome <- try (runWorkflow runtime workflow) :: IO (Either SomeException value)
+            case outcome of
+              Right value -> pure value
+              Left exception -> handleTactusException (Just runtime) exception
+      finally execute (closeRuntime runtime)
 
 handleTactusException :: Maybe Runtime -> SomeException -> IO value
 handleTactusException maybeRuntime exception =
@@ -543,9 +547,11 @@ runTactusWithRecords :: Workflow value -> IO (Either WorkflowError value, [Runti
 runTactusWithRecords workflow = do
   config <- Config.loadRuntimeConfigFromEnv
   runtime <- newRuntime config
-  outcome <- try (runWorkflow runtime workflow)
-  records <- readRuntimeRecords runtime
-  pure (outcome, records)
+  let execute = do
+        outcome <- try (runWorkflow runtime workflow)
+        records <- readRuntimeRecords runtime
+        pure (outcome, records)
+  finally execute (closeRuntime runtime)
 
 invokeTask :: Runtime -> ProviderRef -> Task input output -> input -> IO output
 invokeTask runtime selectedProvider selectedTask input = do

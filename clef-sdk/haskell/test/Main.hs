@@ -116,6 +116,7 @@ runTests = do
           ("runTactus renders expected errors without a call stack", testRunTactusPresentation workspace executable),
           ("blocked event sinks fail boundedly without hiding plugin outcome", testBlockedEventSink workspace executable),
           ("sink overload drops events but preserves terminal records", testEventSinkOverload workspace executable),
+          ("runtime lifecycle closes sink workers idempotently", testRuntimeLifecycle workspace executable),
           ("runWorkflow flushes the final typed value projection", testFinalSinkProjection workspace executable),
           ("generic plugin call is statically typed", testGenericPlugin workspace executable),
           ("runtime-owned plugin parameters cannot be shadowed", testPluginParameterConflicts workspace executable),
@@ -980,6 +981,28 @@ testEventSinkOverload workspace executable = do
     "sink degradation retained in runtime records"
     1
     (length [() | RuntimeMessageRecord message <- records, runtimeMessageCode message == "runtime.sink_degraded"])
+
+testRuntimeLifecycle :: FilePath -> FilePath -> IO ()
+testRuntimeLifecycle workspace executable = do
+  projected <- newMVar ([] :: [Text])
+  runtimeReference <- newEmptyMVar
+  withRuntimeWithSink
+    (testConfig workspace executable)
+    ( EventSink $ \case
+        PluginDiagnosticRecord _ message -> modifyMVar_ projected (pure . (message :))
+        _ -> pure ()
+    )
+    (\runtime -> do
+      putMVar runtimeReference runtime
+      recordRuntime runtime (PluginDiagnosticRecord "lifecycle" "inside")
+      _ <- flushRuntimeSink runtime
+      pure ()
+    )
+  runtime <- takeMVar runtimeReference
+  closeRuntime runtime
+  recordRuntime runtime (PluginDiagnosticRecord "lifecycle" "after-close")
+  assertEqual "flush after close is harmless" (Right ()) =<< flushRuntimeSink runtime
+  assertEqual "closed runtime stops projection" ["inside"] . reverse =<< readMVar projected
 
 testFinalSinkProjection :: FilePath -> FilePath -> IO ()
 testFinalSinkProjection workspace executable = do

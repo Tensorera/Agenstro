@@ -11,6 +11,9 @@ module Clef.Runtime
     defaultPluginTransportLimits,
     newRuntime,
     newRuntimeWithSink,
+    withRuntime,
+    withRuntimeWithSink,
+    closeRuntime,
     runtimeConfig,
     readRuntimeRecords,
     recordRuntime,
@@ -32,7 +35,7 @@ import Control.Concurrent.MVar
     readMVar,
     withMVar,
   )
-import Control.Concurrent (forkIO)
+import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.STM
   ( STM,
@@ -51,6 +54,7 @@ import Control.Concurrent.STM
 import Control.Exception
   ( IOException,
     SomeException,
+    bracket,
     displayException,
     finally,
     throwIO,
@@ -124,7 +128,10 @@ data Runtime = Runtime
     internalShouldProject :: RuntimeRecord -> Bool,
     internalSinkQueue :: TVar (Seq SinkMessage),
     internalSinkFailure :: TVar (Maybe Text),
-    internalSinkDroppedEvents :: TVar Int
+    internalSinkDroppedEvents :: TVar Int,
+    internalSinkWorker :: ThreadId,
+    internalRuntimeClosed :: TVar Bool,
+    internalCloseLock :: MVar ()
   }
 
 data SinkMessage
@@ -251,6 +258,12 @@ newRuntime config = do
 newRuntimeWithSink :: RuntimeConfig -> EventSink -> IO Runtime
 newRuntimeWithSink config = newRuntimeWithSinkPolicy config (const True)
 
+withRuntime :: RuntimeConfig -> (Runtime -> IO value) -> IO value
+withRuntime config = bracket (newRuntime config) closeRuntime
+
+withRuntimeWithSink :: RuntimeConfig -> EventSink -> (Runtime -> IO value) -> IO value
+withRuntimeWithSink config sink = bracket (newRuntimeWithSink config sink) closeRuntime
+
 newRuntimeWithSinkPolicy :: RuntimeConfig -> (RuntimeRecord -> Bool) -> EventSink -> IO Runtime
 newRuntimeWithSinkPolicy config shouldProject sink = do
   nextRequestId <- newMVar 1
@@ -258,8 +271,25 @@ newRuntimeWithSinkPolicy config shouldProject sink = do
   queue <- newTVarIO Seq.empty
   failure <- newTVarIO Nothing
   droppedEvents <- newTVarIO 0
-  _ <- forkIO (projectSinkRecords sink queue failure)
-  pure (Runtime config nextRequestId records shouldProject queue failure droppedEvents)
+  worker <- forkIO (projectSinkRecords sink queue failure)
+  closed <- newTVarIO False
+  closeLock <- newMVar ()
+  pure (Runtime config nextRequestId records shouldProject queue failure droppedEvents worker closed closeLock)
+
+-- | Boundedly flush and stop the sink worker.  Repeated calls are harmless.
+-- Records retained after closure remain readable but are no longer projected.
+closeRuntime :: Runtime -> IO ()
+closeRuntime runtime =
+  withMVar (internalCloseLock runtime) $ \_ -> do
+    closed <- atomically (readTVar (internalRuntimeClosed runtime))
+    unless closed $
+      ( do
+          _ <- flushRuntimeSink runtime
+          pure ()
+      )
+        `finally` do
+          atomically (writeTVar (internalRuntimeClosed runtime) True)
+          killThread (internalSinkWorker runtime)
 
 runtimeConfig :: Runtime -> RuntimeConfig
 runtimeConfig = internalRuntimeConfig
@@ -285,8 +315,10 @@ enqueueSinkRecord :: Runtime -> RuntimeRecord -> STM ()
 enqueueSinkRecord runtime record
   | not (internalShouldProject runtime record) = pure ()
   | otherwise = do
-      _ <- enqueueSinkMessage runtime (ProjectRecord record)
-      pure ()
+      closed <- readTVar (internalRuntimeClosed runtime)
+      unless closed $ do
+        _ <- enqueueSinkMessage runtime (ProjectRecord record)
+        pure ()
 
 enqueueSinkMessage :: Runtime -> SinkMessage -> STM Bool
 enqueueSinkMessage runtime message = do
@@ -349,20 +381,24 @@ projectSinkRecords sink queue failure = forever $ do
 
 flushRuntimeSink :: Runtime -> IO (Either Text ())
 flushRuntimeSink runtime = do
-  reportSinkDegradation
-  result <- flushProjection
-  case result of
-    Right () -> pure ()
-    Left message ->
-      recordRuntimeDiagnostic
-        runtime
-        RuntimeMessage
-          { runtimeMessageCode = "runtime.sink_failed",
-            runtimeMessageLevel = WarningLevel,
-            runtimeMessageText = "The runtime presentation sink failed; the workflow outcome was preserved.",
-            runtimeMessageContext = KeyMap.singleton "cause" (toJSON message)
-          }
-  pure result
+  closed <- atomically (readTVar (internalRuntimeClosed runtime))
+  if closed
+    then pure (Right ())
+    else do
+      reportSinkDegradation
+      result <- flushProjection
+      case result of
+        Right () -> pure ()
+        Left message ->
+          recordRuntimeDiagnostic
+            runtime
+            RuntimeMessage
+              { runtimeMessageCode = "runtime.sink_failed",
+                runtimeMessageLevel = WarningLevel,
+                runtimeMessageText = "The runtime presentation sink failed; the workflow outcome was preserved.",
+                runtimeMessageContext = KeyMap.singleton "cause" (toJSON message)
+              }
+      pure result
   where
     reportSinkDegradation = do
       droppedEvents <- atomically $ do
