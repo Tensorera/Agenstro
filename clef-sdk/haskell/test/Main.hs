@@ -95,6 +95,7 @@ runTests = do
           ("blocked event sinks fail boundedly without hiding plugin outcome", testBlockedEventSink workspace executable),
           ("runWorkflow flushes the final typed value projection", testFinalSinkProjection workspace executable),
           ("generic plugin call is statically typed", testGenericPlugin workspace executable),
+          ("runtime-owned plugin parameters cannot be shadowed", testPluginParameterConflicts workspace executable),
           ("invoke records provider value and observer evidence separately", testInvokeAndObserve workspace executable),
           ("observer begin cancellation cleans up earlier observers", testObserverBeginCancellation workspace executable),
           ("observer end cancellation does not skip remaining observers", testObserverEndCancellation workspace executable),
@@ -760,6 +761,35 @@ testGenericPlugin workspace executable = do
     "generic plugin value retained"
     1
     (length [() | PluginValueRecord _ "calculator" "add" _ <- records])
+
+testPluginParameterConflicts :: FilePath -> FilePath -> IO ()
+testPluginParameterConflicts workspace executable = do
+  pluginRuntime <- newRuntime (testConfig workspace executable)
+  let conflictingPlugin = rawPlugin "calculator" "probe"
+  assertWorkflowError
+    "generic plugin reserved fields"
+    (\case
+      PluginParameterConflict "plugin:calculator" "probe" ["workspace", "options"] -> True
+      _ -> False
+    )
+    ( runWorkflow
+        pluginRuntime
+        (call conflictingPlugin (object ["workspace" .= ("caller" :: Text), "options" .= object []]))
+    )
+
+  effectRuntime <- newRuntime (testConfig workspace executable)
+  let conflictingEffect =
+        operation
+          "workspace.paths"
+          "snapshot"
+          (object ["options" .= object []]) :: Operation Value
+  assertWorkflowError
+    "effect reserved fields"
+    (\case
+      PluginParameterConflict "effect:workspace.paths" "snapshot" ["options"] -> True
+      _ -> False
+    )
+    (runWorkflow effectRuntime (perform conflictingEffect))
 
 testInvokeAndObserve :: FilePath -> FilePath -> IO ()
 testInvokeAndObserve workspace executable = do

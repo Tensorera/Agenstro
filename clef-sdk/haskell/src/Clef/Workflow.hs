@@ -52,6 +52,7 @@ import Data.Aeson
     (.:),
     (.=),
   )
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
 import qualified Data.Map.Strict as Map
@@ -229,11 +230,15 @@ perform selectedOperation = Workflow $ \runtime -> do
   effectConfig <- case Map.lookup effectName (Config.runtimeEffects config) of
     Nothing -> throwIO (UnknownEffect effectName)
     Just found -> pure found
-  let pluginParams =
-        augmentPluginParams
+  pluginParams <-
+    either
+      (throwIO . PluginParameterConflict ("effect:" <> effectName) method)
+      pure
+      ( augmentPluginParams
           (Config.runtimeWorkspace config)
           (Config.effectOptions effectConfig)
           (internalEffectParams selectedOperation)
+      )
   pluginResult <-
     callPlugin
       runtime
@@ -259,11 +264,15 @@ call selectedPlugin input = Workflow $ \runtime -> do
   pluginConfig <- case Map.lookup pluginName (Config.runtimePlugins config) of
     Nothing -> throwIO (UnknownPlugin pluginName)
     Just found -> pure found
-  let params =
-        augmentPluginParams
+  params <-
+    either
+      (throwIO . PluginParameterConflict ("plugin:" <> pluginName) method)
+      pure
+      ( augmentPluginParams
           (Config.runtimeWorkspace config)
           (Config.pluginOptions pluginConfig)
           (internalEncodePluginInput selectedPlugin input)
+      )
   result <-
     callPlugin
       runtime
@@ -278,7 +287,7 @@ call selectedPlugin input = Workflow $ \runtime -> do
     Left message -> throwIO (PluginDecodeFailed pluginName method message)
     Right value -> pure value
 
-augmentPluginParams :: FilePath -> Object -> Value -> Object
+augmentPluginParams :: FilePath -> Object -> Value -> Either [Text] Object
 augmentPluginParams workspace options input =
   let commonParams =
         KeyMap.fromList
@@ -286,10 +295,11 @@ augmentPluginParams workspace options input =
             ("options", Object options)
           ]
    in case input of
-        -- Runtime-owned workspace/options win on key collisions.  User fields
-        -- otherwise stay top-level for simple cross-language plugins.
-        Object inputFields -> KeyMap.union commonParams inputFields
-        other -> KeyMap.insert "input" other commonParams
+        Object inputFields ->
+          case [Key.toText field | field <- ["workspace", "options"], KeyMap.member field inputFields] of
+            [] -> Right (KeyMap.union commonParams inputFields)
+            collisions -> Left collisions
+        other -> Right (KeyMap.insert "input" other commonParams)
 
 parallel :: Workflow left -> Workflow right -> Workflow (left, right)
 parallel leftWorkflow rightWorkflow = Workflow $ \runtime ->

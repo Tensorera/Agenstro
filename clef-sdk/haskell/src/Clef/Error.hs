@@ -52,6 +52,7 @@ data WorkflowError
   | TaskDecodeFailed Text Text
   | OperationDecodeFailed Text Text Text
   | PluginDecodeFailed Text Text Text
+  | PluginParameterConflict Text Text [Text]
   | PluginProtocolFailed Text Text
   | PluginProcessFailed Text Text
   | PluginOutcomeUnknown Text Text WorkflowCause
@@ -75,6 +76,13 @@ renderWorkflowError workflowError = case workflowError of
     "effect '" <> effectName <> "' method '" <> method <> "' returned an invalid result: " <> message
   PluginDecodeFailed pluginName method message ->
     "plugin '" <> pluginName <> "' method '" <> method <> "' returned an invalid result: " <> message
+  PluginParameterConflict pluginName method fields ->
+    "plugin '"
+      <> pluginName
+      <> "' method '"
+      <> method
+      <> "' input conflicts with runtime-owned parameter(s): "
+      <> Text.intercalate ", " fields
   PluginProtocolFailed pluginName message ->
     "plugin '" <> pluginName <> "' violated agenstro.plugin/v1: " <> message
   PluginProcessFailed pluginName message ->
@@ -107,6 +115,7 @@ workflowErrorCode workflowError = case workflowError of
   TaskDecodeFailed _ _ -> "workflow.task_decode_failed"
   OperationDecodeFailed _ _ _ -> "workflow.operation_decode_failed"
   PluginDecodeFailed _ _ _ -> "workflow.plugin_decode_failed"
+  PluginParameterConflict _ _ _ -> "plugin.parameter_conflict"
   PluginProtocolFailed _ _ -> "plugin.protocol_failed"
   PluginProcessFailed _ _ -> "plugin.process_failed"
   PluginOutcomeUnknown _ _ _ -> "plugin.outcome_unknown"
