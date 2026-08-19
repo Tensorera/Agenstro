@@ -103,14 +103,13 @@ import Clef.Internal.Exception (isAsynchronousException)
 import Clef.Plugin.Protocol
   ( ParsedPluginOutput (..),
     PluginFailure (..),
-    PluginOutputParser,
     PluginRequest (..),
     PluginTerminal (..),
     decodeStrictJSON,
     encodePluginRequest,
-    finishPluginOutput,
-    initialPluginOutputParser,
-    parsePluginFrame,
+    finishPluginOutputStream,
+    feedPluginOutputChunk,
+    initialPluginOutputStreamParser,
   )
 import Clef.Runtime.Config (RuntimeConfig (runtimeWorkspace))
 
@@ -712,38 +711,20 @@ readPluginProcess process requestInput pluginName requestId onEvent =
 -- child and its stderr pipe to finish without deadlock.
 readPluginOutput :: Handle -> Text -> Text -> (Value -> IO ()) -> IO (Either WorkflowError ParsedPluginOutput)
 readPluginOutput handle pluginName requestId onEvent =
-  go (Right initialPluginOutputParser) ByteString.empty
+  go (Right initialPluginOutputStreamParser)
   where
-    go parser buffered = do
+    go parser = do
       chunk <- ByteString.hGetSome handle 32768
       if ByteString.null chunk
-        then do
-          finalParser <-
-            if ByteString.null buffered
-              then pure parser
-              else consumeFrame parser buffered
-          pure $ finalParser >>= finishPluginOutput pluginName
-        else do
-          (nextParser, remaining) <- consumeCompleteFrames parser (buffered <> chunk)
-          go nextParser remaining
-
-    consumeCompleteFrames parser buffered =
-      case ByteString.elemIndex 10 buffered of
-        Nothing -> pure (parser, buffered)
-        Just delimiter -> do
-          let frame = ByteString.take delimiter buffered
-              remaining = ByteString.drop (delimiter + 1) buffered
-          nextParser <- consumeFrame parser frame
-          consumeCompleteFrames nextParser remaining
-
-    consumeFrame :: Either WorkflowError PluginOutputParser -> ByteString.ByteString -> IO (Either WorkflowError PluginOutputParser)
-    consumeFrame failed@(Left _) _ = pure failed
-    consumeFrame (Right parser) frame =
-      case parsePluginFrame pluginName requestId parser frame of
-        Left workflowError -> pure (Left workflowError)
-        Right (nextParser, maybeEvent) -> do
-          maybe (pure ()) onEvent maybeEvent
-          pure (Right nextParser)
+        then case parser >>= finishPluginOutputStream pluginName requestId of
+          Left workflowError -> pure (Left workflowError)
+          Right (events, output) -> mapM_ onEvent events >> pure (Right output)
+        else case parser of
+          Left workflowError -> go (Left workflowError)
+          Right streamParser ->
+            case feedPluginOutputChunk pluginName requestId streamParser chunk of
+              Left workflowError -> go (Left workflowError)
+              Right (nextParser, events) -> mapM_ onEvent events >> go (Right nextParser)
 
 unlessEmpty :: Text -> (Text -> IO ()) -> IO ()
 unlessEmpty value action =

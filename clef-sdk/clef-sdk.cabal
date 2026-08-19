@@ -63,6 +63,7 @@ test-suite clef-sdk-tests
       clef-sdk,
       containers,
       directory,
+      filepath,
       process,
       scientific,
       text,

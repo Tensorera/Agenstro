@@ -498,6 +498,66 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct ConformanceDocument {
+        api: String,
+        cases: Vec<ConformanceCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct ConformanceCase {
+        name: String,
+        expected_id: String,
+        frames: Vec<String>,
+        accepted: bool,
+        terminal: Option<String>,
+        event_count: Option<usize>,
+    }
+
+    #[test]
+    fn matches_shared_haskell_protocol_conformance_vectors() {
+        let document: ConformanceDocument = serde_json::from_str(include_str!(
+            "../../Test/fixtures/plugin-protocol-v1/cases.json"
+        ))
+        .expect("shared protocol conformance fixture");
+        assert_eq!(document.api, "agenstro.plugin.conformance/v1");
+
+        for case in document.cases {
+            let outcome = (|| -> Result<(usize, TerminalResult), ProtocolFault> {
+                let mut sequence = FrameSequence::new(RequestId::Text(case.expected_id.clone()));
+                let mut event_count = 0;
+                for encoded in &case.frames {
+                    let frame = decode_frame(encoded.as_bytes())?;
+                    if matches!(frame, PluginFrame::Event { .. }) {
+                        event_count += 1;
+                    }
+                    sequence.accept(&frame)?;
+                }
+                Ok((event_count, sequence.finish()?))
+            })();
+
+            assert_eq!(
+                outcome.is_ok(),
+                case.accepted,
+                "shared conformance case {:?}: {outcome:?}",
+                case.name
+            );
+            if let Ok((event_count, terminal)) = outcome {
+                assert_eq!(Some(event_count), case.event_count, "{}", case.name);
+                let terminal_kind = match terminal {
+                    TerminalResult::Success { .. } => "success",
+                    TerminalResult::Failure { .. } => "failure",
+                };
+                assert_eq!(
+                    Some(terminal_kind),
+                    case.terminal.as_deref(),
+                    "{}",
+                    case.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn accepts_unicode_event_and_terminal() {
         let event = decode_frame(

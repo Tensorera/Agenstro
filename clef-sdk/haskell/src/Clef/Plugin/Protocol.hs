@@ -6,9 +6,13 @@ module Clef.Plugin.Protocol
     PluginTerminal (..),
     ParsedPluginOutput (..),
     PluginOutputParser,
+    PluginOutputStreamParser,
     initialPluginOutputParser,
+    initialPluginOutputStreamParser,
     parsePluginFrame,
+    feedPluginOutputChunk,
     finishPluginOutput,
+    finishPluginOutputStream,
     decodeStrictJSON,
     encodePluginRequest,
     parsePluginOutput,
@@ -104,6 +108,18 @@ data PluginOutputParser = PluginOutputParser
 initialPluginOutputParser :: PluginOutputParser
 initialPluginOutputParser = PluginOutputParser 1 [] Nothing
 
+-- | Byte-stream state above the complete-frame parser.  Keeping the partial
+-- line as bytes makes arbitrary UTF-8 and JSON token chunking harmless.
+data PluginOutputStreamParser = PluginOutputStreamParser
+  { streamFrameParser :: PluginOutputParser,
+    streamBufferedBytes :: ByteString
+  }
+  deriving (Eq, Show)
+
+initialPluginOutputStreamParser :: PluginOutputStreamParser
+initialPluginOutputStreamParser =
+  PluginOutputStreamParser initialPluginOutputParser ByteString.empty
+
 instance ToJSON PluginRequest where
   toJSON request =
     object
@@ -118,20 +134,49 @@ encodePluginRequest = encode
 
 parsePluginOutput :: Text -> Text -> Text -> Either WorkflowError ParsedPluginOutput
 parsePluginOutput pluginName expectedId output = do
-  parser <- foldFrames initialPluginOutputParser frames
-  finishPluginOutput pluginName parser
-  where
-    encoded = encodeUtf8 output
-    splitFrames = ByteString.split 10 encoded
-    frames = case reverse splitFrames of
-      [] -> []
-      empty : remaining | ByteString.null empty -> reverse remaining
-      _ -> splitFrames
+  (parser, _) <-
+    feedPluginOutputChunk pluginName expectedId initialPluginOutputStreamParser (encodeUtf8 output)
+  snd <$> finishPluginOutputStream pluginName expectedId parser
 
-    foldFrames parser [] = Right parser
-    foldFrames parser (frame : remaining) = do
-      (next, _) <- parsePluginFrame pluginName expectedId parser frame
-      foldFrames next remaining
+-- | Feed an arbitrary process-read chunk and return complete event frames in
+-- arrival order.  Partial lines remain buffered until a later chunk or EOF.
+feedPluginOutputChunk :: Text -> Text -> PluginOutputStreamParser -> ByteString -> Either WorkflowError (PluginOutputStreamParser, [Value])
+feedPluginOutputChunk pluginName expectedId parser chunk =
+  consumeCompleteFrames
+    (streamFrameParser parser)
+    (streamBufferedBytes parser <> chunk)
+    []
+  where
+    consumeCompleteFrames frameParser buffered events =
+      case ByteString.elemIndex 10 buffered of
+        Nothing ->
+          Right
+            ( PluginOutputStreamParser frameParser buffered,
+              reverse events
+            )
+        Just delimiter -> do
+          let frame = ByteString.take delimiter buffered
+              remaining = ByteString.drop (delimiter + 1) buffered
+          (nextParser, maybeEvent) <- parsePluginFrame pluginName expectedId frameParser frame
+          consumeCompleteFrames nextParser remaining (maybe events (: events) maybeEvent)
+
+-- | Finish a byte stream at EOF, accepting a final frame without LF and then
+-- requiring exactly one terminal result.
+finishPluginOutputStream :: Text -> Text -> PluginOutputStreamParser -> Either WorkflowError ([Value], ParsedPluginOutput)
+finishPluginOutputStream pluginName expectedId parser = do
+  (frameParser, finalEvents) <-
+    if ByteString.null (streamBufferedBytes parser)
+      then Right (streamFrameParser parser, [])
+      else do
+        (nextParser, maybeEvent) <-
+          parsePluginFrame
+            pluginName
+            expectedId
+            (streamFrameParser parser)
+            (streamBufferedBytes parser)
+        Right (nextParser, maybe [] pure maybeEvent)
+  output <- finishPluginOutput pluginName frameParser
+  Right (finalEvents, output)
 
 -- | Validate one complete JSONL frame.  Event frames are returned immediately
 -- so the runtime can publish them before the terminal result arrives.

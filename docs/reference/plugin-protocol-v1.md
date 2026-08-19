@@ -19,6 +19,10 @@ Version 1 is deliberately one-shot. There is no daemon, socket discovery,
 authentication handshake, persistent session, or service registry hidden in
 the ABI.
 
+The Rust and Haskell decoders are checked against the same conformance vectors
+in `Test/fixtures/plugin-protocol-v1/cases.json`, including recursive duplicate
+keys, numeric boundaries, correlation, event ordering, and terminal shape.
+
 In the normal Tactus/Clef path, generated runtime configuration points Clef at
 the Rust `tactus dispatch` subcommand. Tactus then starts the real plugin in a
 Unix process group or Windows Job Object, validates and forwards frames as they

@@ -1,0 +1,135 @@
+{
+  "api": "agenstro.plugin.conformance/v1",
+  "cases": [
+    {
+      "name": "unicode event followed by success",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"event\",\"id\":\"shared-1\",\"event\":{\"type\":\"future.progress\",\"message\":\"跨语言🌊\"}}",
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":{\"answer\":42}}"
+      ],
+      "accepted": true,
+      "terminal": "success",
+      "event_count": 1
+    },
+    {
+      "name": "structured failure with details",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":false,\"error\":{\"code\":\"denied\",\"message\":\"not allowed\",\"details\":{\"retryable\":false}}}"
+      ],
+      "accepted": true,
+      "terminal": "failure",
+      "event_count": 0
+    },
+    {
+      "name": "shared numeric boundaries",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":[1.7976931348623157e308,5e-324,-0.0,18446744073709551615,-9223372036854775808]}"
+      ],
+      "accepted": true,
+      "terminal": "success",
+      "event_count": 0
+    },
+    {
+      "name": "correlation mismatch",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"other\",\"ok\":true,\"value\":null}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "missing terminal",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"event\",\"id\":\"shared-1\",\"event\":{\"type\":\"progress\"}}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "duplicate terminal",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":null}",
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":null}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "event after terminal",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":null}",
+        "{\"type\":\"event\",\"id\":\"shared-1\",\"event\":{\"type\":\"late\"}}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "event body must be an object",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"event\",\"id\":\"shared-1\",\"event\":\"progress\"}",
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":null}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "success requires value",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "failure requires error",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":false}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "duplicate nested object key",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":{\"answer\":1,\"answer\":2}}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "overflowing number",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":1e999}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "underflowing number",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":\"shared-1\",\"ok\":true,\"value\":1e-999}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "unknown top-level frame type",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"checkpoint\",\"id\":\"shared-1\"}"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "integer id is outside the shared emitted profile",
+      "expected_id": "shared-1",
+      "frames": [
+        "{\"type\":\"result\",\"id\":7,\"ok\":true,\"value\":null}"
+      ],
+      "accepted": false
+    }
+  ]
+}

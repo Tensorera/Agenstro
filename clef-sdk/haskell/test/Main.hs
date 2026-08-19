@@ -8,7 +8,11 @@ import Clef
 import qualified Clef.Effect.WorkspacePaths as WorkspacePaths
 import Clef.Plugin.Protocol
   ( ParsedPluginOutput (..),
+    PluginOutputStreamParser,
     PluginTerminal (..),
+    feedPluginOutputChunk,
+    finishPluginOutputStream,
+    initialPluginOutputStreamParser,
     parsePluginOutput,
   )
 import Control.Concurrent (forkIO, threadDelay)
@@ -34,7 +38,7 @@ import Control.Exception
     throwIO,
     try,
   )
-import Control.Monad (forM, unless)
+import Control.Monad (foldM, forM, forM_, unless)
 import Data.Aeson
   ( FromJSON (parseJSON),
     ToJSON (toJSON),
@@ -63,6 +67,7 @@ import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv, unsetE
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (hClose, openBinaryTempFile, stderr)
 import qualified System.IO as IO
+import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import MonadIOCompatibility (standardLiftIO)
@@ -95,6 +100,8 @@ runTests = do
           ("text and JSON task decoders", testTaskDecoders),
           ("runtime config schema", testRuntimeConfig executable workspace),
           ("JSONL terminal protocol", testProtocolRules),
+          ("shared Rust and Haskell protocol conformance vectors", testProtocolConformance workspace),
+          ("incremental protocol parsing is chunk-boundary independent", testProtocolChunkBoundaries),
           ("plugin process exit is checked", testPluginExit workspace executable),
           ("plugin pipes drain concurrently", testPluginPipeBackpressure workspace executable),
           ("plugin events stream before terminal across UTF-8 chunks", testPluginEventStreaming workspace executable),
@@ -344,6 +351,90 @@ testProtocolRules = do
         "req-1"
         "{\"type\":\"result\",\"id\":\"req-1\",\"ok\":true,\"value\":-9223372036854775809}"
     )
+
+data ProtocolConformanceDocument = ProtocolConformanceDocument Text [ProtocolConformanceCase]
+
+data ProtocolConformanceCase = ProtocolConformanceCase
+  { protocolCaseName :: Text,
+    protocolCaseExpectedId :: Text,
+    protocolCaseFrames :: [Text],
+    protocolCaseAccepted :: Bool,
+    protocolCaseTerminal :: Maybe Text,
+    protocolCaseEventCount :: Maybe Int
+  }
+
+instance FromJSON ProtocolConformanceDocument where
+  parseJSON = withObject "protocol conformance document" $ \fields ->
+    ProtocolConformanceDocument <$> fields .: "api" <*> fields .: "cases"
+
+instance FromJSON ProtocolConformanceCase where
+  parseJSON = withObject "protocol conformance case" $ \fields ->
+    ProtocolConformanceCase
+      <$> fields .: "name"
+      <*> fields .: "expected_id"
+      <*> fields .: "frames"
+      <*> fields .: "accepted"
+      <*> fields .:? "terminal"
+      <*> fields .:? "event_count"
+
+testProtocolConformance :: FilePath -> IO ()
+testProtocolConformance workspace = do
+  encoded <-
+    ByteString.readFile
+      (workspace </> ".." </> "Test" </> "fixtures" </> "plugin-protocol-v1" </> "cases.json")
+  ProtocolConformanceDocument api cases <-
+    case eitherDecodeStrict' encoded of
+      Left message -> failTest $ "invalid shared protocol fixture: " <> message
+      Right document -> pure document
+  assertEqual "protocol fixture api" "agenstro.plugin.conformance/v1" api
+  forM_ cases $ \protocolCase -> do
+    let output = Text.intercalate "\n" (protocolCaseFrames protocolCase) <> "\n"
+        parsed = parsePluginOutput "conformance" (protocolCaseExpectedId protocolCase) output
+        label = Text.unpack (protocolCaseName protocolCase)
+    case (protocolCaseAccepted protocolCase, parsed) of
+      (False, Left _) -> pure ()
+      (False, Right result) -> failTest $ label <> ": rejected fixture succeeded with " <> show result
+      (True, Left workflowError) -> failTest $ label <> ": accepted fixture failed with " <> show workflowError
+      (True, Right result) -> do
+        assertEqual (label <> " event count") (protocolCaseEventCount protocolCase) (Just (length (pluginOutputEvents result)))
+        let terminalKind = case pluginOutputTerminal result of
+              PluginSucceeded _ -> "success"
+              PluginFailed _ -> "failure"
+        assertEqual (label <> " terminal") (protocolCaseTerminal protocolCase) (Just terminalKind)
+
+testProtocolChunkBoundaries :: IO ()
+testProtocolChunkBoundaries = do
+  let output =
+        Text.intercalate
+          "\n"
+          [ "{\"type\":\"event\",\"id\":\"chunks\",\"event\":{\"type\":\"progress\",\"message\":\"边界🌊\"}}",
+            "{\"type\":\"result\",\"id\":\"chunks\",\"ok\":true,\"value\":{\"answer\":42}}"
+          ]
+          <> "\n"
+      encoded = Text.Encoding.encodeUtf8 output
+      expected = parsePluginOutput "chunks" "chunks" output
+      twoWayPartitions =
+        [ [ByteString.take index encoded, ByteString.drop index encoded]
+          | index <- [0 .. ByteString.length encoded]
+        ]
+      bytewisePartition = fmap ByteString.singleton (ByteString.unpack encoded)
+  forM_ (bytewisePartition : twoWayPartitions) $ \chunks ->
+    assertEqual "chunked parser result" expected (snd <$> parseProtocolChunks chunks)
+  assertProtocolFailure
+    "streaming parser rejects invalid UTF-8"
+    (snd <$> parseProtocolChunks [ByteString.pack [255, 10]])
+
+parseProtocolChunks :: [ByteString.ByteString] -> Either WorkflowError ([Value], ParsedPluginOutput)
+parseProtocolChunks chunks = do
+  (parser, events) <-
+    foldM feed (initialPluginOutputStreamParser, []) chunks
+  (finalEvents, output) <- finishPluginOutputStream "chunks" "chunks" parser
+  pure (events <> finalEvents, output)
+  where
+    feed :: (PluginOutputStreamParser, [Value]) -> ByteString.ByteString -> Either WorkflowError (PluginOutputStreamParser, [Value])
+    feed (parser, events) chunk = do
+      (nextParser, nextEvents) <- feedPluginOutputChunk "chunks" "chunks" parser chunk
+      pure (nextParser, events <> nextEvents)
 
 testPluginExit :: FilePath -> FilePath -> IO ()
 testPluginExit workspace executable = do
