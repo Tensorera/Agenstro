@@ -57,7 +57,6 @@ data WorkflowError
   | PluginProcessFailed Text Text
   | PluginOutcomeUnknown Text Text WorkflowCause
   | PluginReportedFailure Text Text WorkflowCause
-  | RuntimeSinkFailed Text
   deriving (Eq, Show)
 
 instance Exception WorkflowError where
@@ -102,8 +101,6 @@ renderWorkflowError workflowError = case workflowError of
       <> method
       <> "' failed: "
       <> workflowCauseMessage cause
-  RuntimeSinkFailed message ->
-    "runtime event sink failed: " <> message
 
 workflowErrorCode :: WorkflowError -> Text
 workflowErrorCode workflowError = case workflowError of
@@ -120,7 +117,6 @@ workflowErrorCode workflowError = case workflowError of
   PluginProcessFailed _ _ -> "plugin.process_failed"
   PluginOutcomeUnknown _ _ _ -> "plugin.outcome_unknown"
   PluginReportedFailure _ _ _ -> "plugin.reported_failure"
-  RuntimeSinkFailed _ -> "runtime.sink_failed"
 
 workflowErrorCause :: WorkflowError -> Maybe WorkflowCause
 workflowErrorCause workflowError = case workflowError of
