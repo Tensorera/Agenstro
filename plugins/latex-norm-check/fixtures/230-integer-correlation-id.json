@@ -1,0 +1,6 @@
+{
+  "name": "230-integer-correlation-id",
+  "rawRequest": "{\"api\":\"agenstro.plugin/v1\",\"id\":7,\"method\":\"describe\",\"params\":{}}",
+  "expectedId": 7,
+  "expect": {"ok": true, "exitCode": 0}
+}

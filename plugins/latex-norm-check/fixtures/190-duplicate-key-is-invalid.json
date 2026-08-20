@@ -1,0 +1,6 @@
+{
+  "name": "190-duplicate-key-is-invalid",
+  "rawRequest": "{\"api\":\"agenstro.plugin/v1\",\"id\":\"r19\",\"method\":\"describe\",\"method\":\"smoke\",\"params\":{}}",
+  "expectedId": "unknown",
+  "expect": {"ok": false, "code": "invalid_request", "exitCode": 1}
+}

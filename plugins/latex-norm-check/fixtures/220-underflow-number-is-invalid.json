@@ -1,0 +1,6 @@
+{
+  "name": "220-underflow-number-is-invalid",
+  "rawRequest": "{\"api\":\"agenstro.plugin/v1\",\"id\":\"r22\",\"method\":\"smoke\",\"params\":{\"value\":1e-4000}}",
+  "expectedId": "unknown",
+  "expect": {"ok": false, "code": "invalid_request", "exitCode": 1}
+}

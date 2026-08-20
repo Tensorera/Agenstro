@@ -1,7 +1,7 @@
 ---
 title: Agenstro public roadmap
 status: alpha
-last_verified: 2026-08-17
+last_verified: 2026-08-20
 applies_to: "Agenstro 0.3"
 ---
 
@@ -16,12 +16,14 @@ work appears here only when it changes what users can reasonably expect.
 The release candidate path contains:
 
 - Clef as a compact GHC2021 EDSL for typed provider, effect, and generic plugin
-  calls;
+  calls, typed norms, composable rubrics, and bounded refinement;
 - Tactus as one Rust CLI/runtime for `.tactus`, process supervision, bounded
-  event transport, diagnostic journals, and Studio control projections;
+  event transport, diagnostic journals, durable decision sessions, and Studio
+  control projections;
 - Segno as one Haskell, single-node, at-least-once persistent-task driver with
   pure interval/UTC-cron planning and separate SQLite lifecycle/business state;
-- Motivo Studio as a thin TypeScript/React/Electron client over Tactus; and
+- Motivo Studio as a thin TypeScript/React/Electron client over Tactus with a
+  typed human-decision return channel; and
 - a language-neutral one-shot `agenstro.plugin/v1` process boundary.
 
 The release gate covers Windows and Ubuntu source builds, local fake providers,
@@ -48,14 +50,18 @@ operate, and extend without enlarging the core:
 Clef should remain ordinary typed Haskell rather than grow a custom parser,
 hidden DAG, or closed effect universe. Compatible additions include better
 typed wrappers, reusable task libraries, documented error recovery, and
-observation APIs that remain orthogonal to workflow values.
+observation APIs that remain orthogonal to workflow values. Norm catalogue
+policy, SARIF export, and reviewable mining are staged follow-ups; automatic
+promotion of mined norms is not implied.
 
 ## Tactus direction
 
 Tactus should remain a small, dependable execution kernel rather than become a
 network daemon. Compatible work includes packaging, config migration tooling,
 bounded run inspection/retention, provider adapter acceptance, and stronger
-cross-platform descendant cleanup.
+cross-platform descendant cleanup. Session planner registration and
+`session advance` require an explicit invocation contract before they become
+runtime commands.
 
 ## Segno direction
 
@@ -69,9 +75,9 @@ current SQLite driver.
 
 Motivo should improve visibility and safe named actions while remaining a
 projection. Candidate work includes richer trace filtering, accessibility,
-signed installers, and typed configuration mutation through future Tactus
-commands. Direct TOML/database parsing, a general terminal, and private runtime
-ownership remain out of scope.
+signed installers, transcript projection, and typed configuration mutation
+through future Tactus commands. Direct TOML/database/session parsing, a general
+terminal, and private runtime ownership remain out of scope.
 
 ## Explicit non-goals for 0.3
 

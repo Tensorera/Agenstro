@@ -1,0 +1,8 @@
+{
+  "name": "080-metric-within-bound",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r8", "method": "check",
+    "params": {"artifact": "article.tex", "source": "\\begin{equation}x=1\\end{equation}\n", "norms": [{"id": "venue.metric.display-equations", "statement": "Use at most three equations.", "severity": "Preference", "spec": {"kind": "Metric", "specMetric": "display-equations", "specBound": {"boundMinimum": null, "boundMaximum": 3}}}]}
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": ["venue.metric.display-equations"], "unchecked": []}
+}

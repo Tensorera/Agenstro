@@ -1,0 +1,5 @@
+{
+  "name": "010-describe",
+  "request": {"api": "agenstro.plugin/v1", "id": "r1", "method": "describe", "params": {}},
+  "expect": {"ok": true, "exitCode": 0}
+}

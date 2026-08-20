@@ -1,0 +1,11 @@
+{
+  "name": "040-consistency-mixed",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r4", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "The colour plot uses color, then analyse and analyze.\n",
+      "norms": [{"id": "prose.consistency.spelling", "statement": "Use one spelling convention.", "severity": "Style", "spec": {"kind": "Consistency", "specGroups": [["colour", "color"], ["analyse", "analyze"]]}}]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": ["prose.consistency.spelling", "prose.consistency.spelling"]}
+}

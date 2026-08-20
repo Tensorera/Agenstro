@@ -1,0 +1,21 @@
+{
+  "name": "170-consistency-missing-groups-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r17",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "colour color",
+      "norms": [
+        {
+          "id": "malformed.consistency",
+          "statement": "Use one spelling.",
+          "severity": "Style",
+          "spec": {"kind": "Consistency"}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.consistency"]}
+}

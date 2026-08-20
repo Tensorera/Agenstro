@@ -6,10 +6,12 @@ import type {
   StudioEventPage,
   StudioView,
 } from "../shared/contracts";
+import type { SessionAnswerInput, SessionList, SessionView } from "../shared/session-contracts";
 import { ActionConsole } from "./components/ActionConsole";
 import { OverviewView } from "./components/OverviewView";
 import { PluginsView } from "./components/PluginsView";
 import { RunsView } from "./components/RunsView";
+import { SessionsView } from "./components/SessionsView";
 import { ErrorToast, LoadingView, StudioHeader, StudioSidebar } from "./components/StudioChrome";
 import { WorkflowView } from "./components/WorkflowView";
 import { appendBounded, errorMessage } from "./format";
@@ -38,10 +40,43 @@ export default function App() {
   const [eventPage, setEventPage] = useState<StudioEventPage | null>(null);
   const [events, setEvents] = useState<readonly StudioEvent[]>([]);
   const [eventsBusy, setEventsBusy] = useState(false);
+  const [actionStartBusy, setActionStartBusy] = useState(false);
+  const [sessionList, setSessionList] = useState<SessionList | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [session, setSession] = useState<SessionView | null>(null);
+  const [sessionListBusy, setSessionListBusy] = useState(false);
+  const [sessionCurrentBusy, setSessionCurrentBusy] = useState(false);
+  const [sessionAnswerBusy, setSessionAnswerBusy] = useState(false);
   const actionIdRef = useRef<string | null>(null);
   const eventRequestRef = useRef(0);
+  const workspaceHandleRef = useRef<string | null>(null);
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const sessionListRequestRef = useRef(0);
+  const sessionCurrentRequestRef = useRef(0);
+  const sessionAnswerRequestRef = useRef(0);
+  const sessionListOperationRef = useRef(false);
+  const sessionCurrentOperationRef = useRef(false);
+  const sessionAnswerOperationRef = useRef(false);
+  const actionOperationRef = useRef(false);
 
   const acceptStudio = useCallback((next: StudioView | null) => {
+    const nextHandle = next?.handle ?? null;
+    if (workspaceHandleRef.current !== nextHandle) {
+      workspaceHandleRef.current = nextHandle;
+      sessionListRequestRef.current += 1;
+      sessionCurrentRequestRef.current += 1;
+      sessionAnswerRequestRef.current += 1;
+      sessionListOperationRef.current = false;
+      sessionCurrentOperationRef.current = false;
+      sessionAnswerOperationRef.current = false;
+      selectedSessionIdRef.current = null;
+      setSessionList(null);
+      setSelectedSessionId(null);
+      setSession(null);
+      setSessionListBusy(false);
+      setSessionCurrentBusy(false);
+      setSessionAnswerBusy(false);
+    }
     setStudio(next);
     if (!next) {
       setProvider("");
@@ -92,6 +127,7 @@ export default function App() {
 
     function applyActionEvent(event: StudioActionEvent): void {
       if (event.type === "started") {
+        actionOperationRef.current = true;
         actionIdRef.current = event.actionId;
         setActiveAction({
           actionId: event.actionId,
@@ -125,6 +161,8 @@ export default function App() {
         return;
       }
 
+      actionOperationRef.current = false;
+      setActionStartBusy(false);
       setActiveAction((current) =>
         current?.actionId === event.actionId
           ? {
@@ -149,14 +187,129 @@ export default function App() {
   );
 
   const selectedRun = snapshot?.runs.find((run) => run.runId === selectedRunId) ?? null;
+  const actionBusy = isActionBusy(activeAction) || actionStartBusy;
+  const actionControlsBusy = actionBusy || sessionAnswerBusy;
 
   useEffect(() => {
     if (view !== "runs" || !selectedRunId) return;
     void loadEvents(selectedRunId, "0", false);
   }, [selectedRunId, view]);
 
+  useEffect(() => {
+    if (view !== "sessions" || !studio || actionBusy || sessionAnswerOperationRef.current) return;
+    void loadSessionList(studio.handle);
+  }, [actionBusy, studio, view]);
+
+  useEffect(() => {
+    if (view !== "sessions" || !studio || !selectedSessionId) return;
+    void loadSessionCurrent(selectedSessionId, studio.handle);
+  }, [selectedSessionId, studio, view]);
+
+  async function loadSessionList(workspaceHandle: string): Promise<void> {
+    if (
+      sessionListOperationRef.current ||
+      actionOperationRef.current ||
+      sessionAnswerOperationRef.current
+    ) {
+      return;
+    }
+    const request = ++sessionListRequestRef.current;
+    sessionListOperationRef.current = true;
+    setSessionListBusy(true);
+    setError(null);
+    try {
+      const list = await window.motivo.sessions.list({ workspaceHandle, limit: 50 });
+      if (
+        request !== sessionListRequestRef.current ||
+        workspaceHandleRef.current !== workspaceHandle
+      ) {
+        return;
+      }
+      setSessionList(list);
+      const preferred = selectedSessionIdRef.current;
+      const nextId =
+        (preferred && list.sessions.some((item) => item.sessionId === preferred)
+          ? preferred
+          : list.sessions[0]?.sessionId) ?? null;
+      selectedSessionIdRef.current = nextId;
+      setSelectedSessionId(nextId);
+      setSession(list.sessions.find((item) => item.sessionId === nextId) ?? null);
+    } catch (caught) {
+      if (
+        request === sessionListRequestRef.current &&
+        workspaceHandleRef.current === workspaceHandle
+      ) {
+        setError(errorMessage(caught));
+      }
+    } finally {
+      if (request === sessionListRequestRef.current) {
+        sessionListOperationRef.current = false;
+        setSessionListBusy(false);
+      }
+    }
+  }
+
+  async function loadSessionCurrent(
+    sessionId: string,
+    workspaceHandle: string,
+    allowDuringAnswer = false,
+  ): Promise<void> {
+    if (
+      sessionCurrentOperationRef.current ||
+      actionOperationRef.current ||
+      (!allowDuringAnswer && sessionAnswerOperationRef.current)
+    ) {
+      return;
+    }
+    const request = ++sessionCurrentRequestRef.current;
+    sessionCurrentOperationRef.current = true;
+    setSessionCurrentBusy(true);
+    setError(null);
+    try {
+      const current = await window.motivo.sessions.current({ workspaceHandle, sessionId });
+      if (
+        request !== sessionCurrentRequestRef.current ||
+        workspaceHandleRef.current !== workspaceHandle ||
+        selectedSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      setSession(current);
+      setSessionList((list) =>
+        list
+          ? {
+              ...list,
+              sessions: list.sessions.map((item) =>
+                item.sessionId === current.sessionId ? current : item,
+              ),
+            }
+          : list,
+      );
+    } catch (caught) {
+      if (
+        request === sessionCurrentRequestRef.current &&
+        workspaceHandleRef.current === workspaceHandle
+      ) {
+        setError(errorMessage(caught));
+      }
+    } finally {
+      if (request === sessionCurrentRequestRef.current) {
+        sessionCurrentOperationRef.current = false;
+        setSessionCurrentBusy(false);
+      }
+    }
+  }
+
   async function chooseWorkspace(operation: "open" | "initialize"): Promise<void> {
-    if (!("motivo" in window)) return;
+    if (
+      !("motivo" in window) ||
+      actionOperationRef.current ||
+      sessionAnswerOperationRef.current ||
+      sessionListOperationRef.current ||
+      sessionCurrentOperationRef.current
+    ) {
+      return;
+    }
     setWorkspaceBusy(true);
     setError(null);
     try {
@@ -178,7 +331,15 @@ export default function App() {
   }
 
   async function refreshWorkspace(): Promise<void> {
-    if (!studio) return;
+    if (
+      !studio ||
+      actionOperationRef.current ||
+      sessionAnswerOperationRef.current ||
+      sessionListOperationRef.current ||
+      sessionCurrentOperationRef.current
+    ) {
+      return;
+    }
     setWorkspaceBusy(true);
     setError(null);
     try {
@@ -191,7 +352,18 @@ export default function App() {
   }
 
   async function startAction(request: ActionRequest): Promise<void> {
-    if (!studio || isActionBusy(activeAction)) return;
+    if (
+      !studio ||
+      actionBusy ||
+      actionOperationRef.current ||
+      sessionAnswerOperationRef.current ||
+      sessionListOperationRef.current ||
+      sessionCurrentOperationRef.current
+    ) {
+      return;
+    }
+    actionOperationRef.current = true;
+    setActionStartBusy(true);
     setError(null);
     try {
       const started = await window.motivo.actions.start(request);
@@ -211,7 +383,10 @@ export default function App() {
       );
       setOutputStream("stdout");
     } catch (caught) {
+      actionOperationRef.current = false;
       setError(errorMessage(caught));
+    } finally {
+      setActionStartBusy(false);
     }
   }
 
@@ -252,7 +427,78 @@ export default function App() {
     setEvents([]);
   }
 
-  const running = isActionBusy(activeAction);
+  function selectSession(sessionId: string): void {
+    if (sessionId === selectedSessionIdRef.current) return;
+    sessionCurrentRequestRef.current += 1;
+    sessionCurrentOperationRef.current = false;
+    selectedSessionIdRef.current = sessionId;
+    setSelectedSessionId(sessionId);
+    setSession(null);
+  }
+
+  async function answerSession(input: Omit<SessionAnswerInput, "workspaceHandle">): Promise<void> {
+    if (
+      !studio ||
+      actionBusy ||
+      actionOperationRef.current ||
+      sessionAnswerOperationRef.current ||
+      sessionListOperationRef.current ||
+      sessionCurrentOperationRef.current
+    ) {
+      return;
+    }
+    const workspaceHandle = studio.handle;
+    const request = ++sessionAnswerRequestRef.current;
+    sessionAnswerOperationRef.current = true;
+    setSessionAnswerBusy(true);
+    setError(null);
+    try {
+      const answered = await window.motivo.sessions.answer({ ...input, workspaceHandle });
+      if (
+        request !== sessionAnswerRequestRef.current ||
+        workspaceHandleRef.current !== workspaceHandle ||
+        selectedSessionIdRef.current !== input.sessionId
+      ) {
+        return;
+      }
+      setSession(answered);
+      setSessionList((list) =>
+        list
+          ? {
+              ...list,
+              sessions: list.sessions.map((item) =>
+                item.sessionId === answered.sessionId ? answered : item,
+              ),
+            }
+          : list,
+      );
+    } catch (caught) {
+      if (
+        request !== sessionAnswerRequestRef.current ||
+        workspaceHandleRef.current !== workspaceHandle ||
+        selectedSessionIdRef.current !== input.sessionId
+      ) {
+        return;
+      }
+      if (
+        studioErrorCode(caught) === "session_turn_stale" ||
+        studioErrorCode(caught) === "session_state_invalid"
+      ) {
+        await loadSessionCurrent(input.sessionId, workspaceHandle, true);
+      } else {
+        setError(errorMessage(caught));
+      }
+    } finally {
+      if (
+        request === sessionAnswerRequestRef.current &&
+        workspaceHandleRef.current === workspaceHandle
+      ) {
+        sessionAnswerOperationRef.current = false;
+        setSessionAnswerBusy(false);
+      }
+    }
+  }
+
   const sharedWorkspaceActions = {
     onOpen: () => void chooseWorkspace("open"),
     onInitialize: () => void chooseWorkspace("initialize"),
@@ -263,7 +509,7 @@ export default function App() {
       <StudioHeader
         studio={studio}
         workspaceBusy={workspaceBusy}
-        actionBusy={running}
+        actionBusy={actionControlsBusy}
         {...sharedWorkspaceActions}
         onRefresh={() => void refreshWorkspace()}
       />
@@ -272,6 +518,7 @@ export default function App() {
         scripts={snapshot?.scripts.length}
         plugins={pluginCount}
         runs={snapshot?.runs.length}
+        sessions={sessionList?.sessions.length}
         onNavigate={setView}
       />
 
@@ -283,7 +530,7 @@ export default function App() {
             {view === "overview" ? (
               <OverviewView
                 studio={studio}
-                running={running}
+                running={actionControlsBusy}
                 workspaceBusy={workspaceBusy}
                 {...sharedWorkspaceActions}
                 onNavigate={setView}
@@ -294,7 +541,7 @@ export default function App() {
                 studio={studio}
                 goal={goal}
                 provider={provider}
-                running={running}
+                running={actionControlsBusy}
                 onGoal={setGoal}
                 onProvider={setProvider}
                 onGenerate={() =>
@@ -310,7 +557,7 @@ export default function App() {
             ) : view === "plugins" ? (
               <PluginsView
                 studio={studio}
-                running={running}
+                running={actionControlsBusy}
                 onSmoke={(plugin, live) =>
                   void startAction({
                     kind: "smoke",
@@ -319,7 +566,7 @@ export default function App() {
                   })
                 }
               />
-            ) : (
+            ) : view === "runs" ? (
               <RunsView
                 studio={studio}
                 selectedRun={selectedRun}
@@ -333,6 +580,21 @@ export default function App() {
                     void loadEvents(selectedRunId, eventPage.nextAfter, true);
                   }
                 }}
+              />
+            ) : (
+              <SessionsView
+                studio={studio}
+                sessions={sessionList?.sessions ?? null}
+                session={session}
+                selectedSessionId={selectedSessionId}
+                busy={sessionListBusy || sessionCurrentBusy}
+                answering={sessionAnswerBusy}
+                actionBusy={actionBusy}
+                onSelect={selectSession}
+                onReload={() => {
+                  if (studio) void loadSessionList(studio.handle);
+                }}
+                onAnswer={(input) => void answerSession(input)}
               />
             )}
           </div>
@@ -353,4 +615,11 @@ export default function App() {
       </section>
     </main>
   );
+}
+
+function studioErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("detail" in error)) return undefined;
+  const detail = error.detail;
+  if (typeof detail !== "object" || detail === null || !("code" in detail)) return undefined;
+  return typeof detail.code === "string" ? detail.code : undefined;
 }

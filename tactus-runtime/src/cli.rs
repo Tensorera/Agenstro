@@ -30,6 +30,7 @@ use crate::{
         JsonField, PluginFailure, PluginFrame, PluginRequest, TerminalResult, decode_json,
         decode_request,
     },
+    session::SessionControlFailure,
     studio::{ControlFailure, ControlSuccess},
     workspace::{
         PluginNamespace, ResolvedPlugin, ScriptInfo, Workspace, WorkspaceError, discover_scripts,
@@ -210,6 +211,12 @@ enum Command {
         #[command(subcommand)]
         command: StudioCommand,
     },
+    /// Read and answer durable human-in-the-loop sessions.
+    Session {
+        /// Session control operation.
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Built-in adapter from plugin-v1 requests to a native agent CLI.
     #[command(hide = true)]
     ProviderHost {
@@ -231,6 +238,9 @@ enum StudioCommand {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Refuse upward discovery when the supplied folder is not the workspace root.
+        #[arg(long)]
+        exact_root: bool,
         /// Maximum number of recent runs to project.
         #[arg(long, default_value_t = 50)]
         run_limit: usize,
@@ -251,6 +261,49 @@ enum StudioCommand {
         /// Maximum event bytes scanned for this page.
         #[arg(long, default_value_t = 4 * 1024 * 1024)]
         max_bytes: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// List validated sessions, newest first.
+    List {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Maximum number of sessions to return.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show one validated session.
+    Show {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Opaque session identifier.
+        #[arg(long)]
+        session: String,
+    },
+    /// Apply one answer using the current turn as a compare-and-set token.
+    Answer {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Opaque session identifier.
+        #[arg(long)]
+        session: String,
+        /// Delivered-brief turn token.
+        #[arg(long)]
+        turn: String,
+        /// Stable pending question axis.
+        #[arg(long)]
+        axis: String,
+        /// One option present in the pending question.
+        #[arg(long)]
+        option: String,
+        /// Optional bounded human note.
+        #[arg(long, allow_hyphen_values = true)]
+        note: Option<String>,
     },
 }
 
@@ -356,6 +409,7 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             json,
         } => smoke(&root, &names, live, json),
         Command::Studio { command } => studio(command),
+        Command::Session { command } => session(command),
         Command::ProviderHost { kind } => Ok(run_provider_host(
             &kind,
             io::stdin().lock(),
@@ -471,8 +525,17 @@ fn diagnose(start: &Path, json: bool) -> Result<i32, CliError> {
 
 fn studio(command: StudioCommand) -> Result<i32, CliError> {
     match command {
-        StudioCommand::Inspect { root, run_limit } => {
-            match crate::studio::inspect(&root, run_limit) {
+        StudioCommand::Inspect {
+            root,
+            exact_root,
+            run_limit,
+        } => {
+            let inspected = if exact_root {
+                crate::studio::inspect_exact(&root, run_limit)
+            } else {
+                crate::studio::inspect(&root, run_limit)
+            };
+            match inspected {
                 Ok(snapshot) => {
                     print_json(&ControlSuccess::new("studio.inspect", snapshot))?;
                     Ok(0)
@@ -499,6 +562,57 @@ fn studio(command: StudioCommand) -> Result<i32, CliError> {
                 Ok(1)
             }
         },
+    }
+}
+
+fn session(command: SessionCommand) -> Result<i32, CliError> {
+    let (name, result) = match command {
+        SessionCommand::List { root, limit } => (
+            "session.list",
+            crate::session::list(&root, limit).and_then(|value| {
+                serde_json::to_value(value).map_err(|error| {
+                    crate::session::SessionError::Corrupt(format!(
+                        "cannot encode session list: {error}"
+                    ))
+                })
+            }),
+        ),
+        SessionCommand::Show { root, session } => (
+            "session.show",
+            crate::session::show(&root, &session).and_then(|value| {
+                serde_json::to_value(value).map_err(|error| {
+                    crate::session::SessionError::Corrupt(format!("cannot encode session: {error}"))
+                })
+            }),
+        ),
+        SessionCommand::Answer {
+            root,
+            session,
+            turn,
+            axis,
+            option,
+            note,
+        } => (
+            "session.answer",
+            crate::session::answer(&root, &session, &turn, &axis, &option, note.as_deref())
+                .and_then(|value| {
+                    serde_json::to_value(value).map_err(|error| {
+                        crate::session::SessionError::Corrupt(format!(
+                            "cannot encode session: {error}"
+                        ))
+                    })
+                }),
+        ),
+    };
+    match result {
+        Ok(data) => {
+            print_json(&ControlSuccess::new(name, data))?;
+            Ok(0)
+        }
+        Err(error) => {
+            print_json(&SessionControlFailure::new(name, &error))?;
+            Ok(1)
+        }
     }
 }
 

@@ -13,11 +13,23 @@ import {
   type StudioView,
 } from "../../shared/contracts";
 import {
+  sessionListSchema,
+  sessionViewSchema,
+  type SessionAnswerInput,
+  type SessionCurrentInput,
+  type SessionList,
+  type SessionListInput,
+  type SessionView,
+} from "../../shared/session-contracts";
+import {
   actionCancelInputSchema,
   actionStartInputSchema,
   emptyInputSchema,
   IPC,
   runEventsInputSchema,
+  sessionAnswerInputSchema,
+  sessionCurrentInputSchema,
+  sessionListInputSchema,
 } from "../../shared/ipc";
 import { asStudioError } from "../errors";
 import { TactusController } from "../tactus/controller";
@@ -38,6 +50,9 @@ export interface StudioController {
   initialize(root: string): Promise<StudioView>;
   refresh(): Promise<StudioView>;
   events(runId: string, after: string, limit?: number): Promise<StudioEventPage>;
+  sessions(input: SessionListInput): Promise<SessionList>;
+  session(input: SessionCurrentInput): Promise<SessionView>;
+  answer(input: SessionAnswerInput): Promise<SessionView>;
   start(input: ActionRequest): ActionState;
   cancel(actionId: string): void;
   dispose(): void;
@@ -102,6 +117,15 @@ export function registerIpcHandlers(dependencies: HandlerDependencies): () => vo
   });
   register(IPC.runEvents, runEventsInputSchema, studioEventPageSchema, (input) =>
     controller.events(input.runId, input.after, input.limit),
+  );
+  register(IPC.sessionList, sessionListInputSchema, sessionListSchema, (input) =>
+    controller.sessions(input),
+  );
+  register(IPC.sessionCurrent, sessionCurrentInputSchema, sessionViewSchema, (input) =>
+    controller.session(input),
+  );
+  register(IPC.sessionAnswer, sessionAnswerInputSchema, sessionViewSchema, (input) =>
+    controller.answer(input),
   );
 
   return () => {

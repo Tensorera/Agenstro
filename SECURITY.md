@@ -19,6 +19,12 @@ safe to execute.
 The `workspace.paths` effect reports selected before/after path metadata. It is
 not access control, complete auditing, attribution, backup, or rollback.
 
+Session storage rejects static symlink, hardlink, and Windows reparse-point
+substitutions that it observes. Filesystem operations are not yet uniformly
+relative to a pinned directory handle on every supported platform; a hostile
+same-authority process racing directory replacement is therefore outside the
+trusted-local-workspace threat model.
+
 ## Supported security claims
 
 The current project aims to:

@@ -314,12 +314,32 @@ pub struct StudioSummary {
 
 /// Build a bounded, redacted snapshot for a Studio client.
 pub fn inspect(start: &Path, run_limit: usize) -> Result<StudioSnapshot, StudioError> {
+    inspect_with_root_policy(start, run_limit, false)
+}
+
+/// Build a snapshot only when `start` is exactly the discovered workspace root.
+pub fn inspect_exact(start: &Path, run_limit: usize) -> Result<StudioSnapshot, StudioError> {
+    inspect_with_root_policy(start, run_limit, true)
+}
+
+fn inspect_with_root_policy(
+    start: &Path,
+    run_limit: usize,
+    exact_root: bool,
+) -> Result<StudioSnapshot, StudioError> {
     if !(1..=MAX_RUN_LIMIT).contains(&run_limit) {
         return Err(StudioError::InvalidLimit(format!(
             "run limit must be between 1 and {MAX_RUN_LIMIT}"
         )));
     }
     let workspace = Workspace::discover(start)?;
+    if exact_root {
+        let supplied = dunce::canonicalize(start).map_err(StudioError::Io)?;
+        let discovered = dunce::canonicalize(&workspace.root).map_err(StudioError::Io)?;
+        if supplied != discovered {
+            return Err(StudioError::WorkspaceRootMismatch);
+        }
+    }
     let config = workspace.load_config()?;
     let checks = doctor(&workspace);
     let availability = checks
@@ -948,6 +968,9 @@ pub enum StudioError {
     /// A trace component was not a plain file or directory.
     #[error("studio refused a non-plain trace path: {0}")]
     UnsafeTracePath(PathBuf),
+    /// Exact-root mode discovered a workspace above the selected folder.
+    #[error("the supplied folder is not the discovered workspace root")]
+    WorkspaceRootMismatch,
 }
 
 impl StudioError {
@@ -961,6 +984,7 @@ impl StudioError {
             Self::RunNotFound(_) => "run_not_found",
             Self::BudgetExceeded(_) | Self::EventLineTooLarge => "read_budget_exceeded",
             Self::UnsafeTracePath(_) => "unsafe_trace_path",
+            Self::WorkspaceRootMismatch => "workspace_root_mismatch",
         }
     }
 
@@ -981,6 +1005,9 @@ impl StudioError {
             }
             Self::UnsafeTracePath(_) => {
                 "Studio refused an unsafe trace filesystem entry.".to_owned()
+            }
+            Self::WorkspaceRootMismatch => {
+                "The selected folder is not the exact Tactus workspace root.".to_owned()
             }
         }
     }

@@ -1,7 +1,7 @@
 ---
 title: Operate an Agenstro workspace
 status: alpha
-last_verified: 2026-08-17
+last_verified: 2026-08-20
 applies_to: "Agenstro 0.3"
 ---
 
@@ -51,7 +51,9 @@ Normally ignore:
 - `.tactus/path-effect`;
 - `.tactus/dist-newstyle`;
 - `.tactus/segno/state`;
-- provider credentials and session files; and
+- `.tactus/sessions`, unless durable human decisions are intentionally part of
+  the repository history;
+- provider credentials and provider-authentication session files; and
 - generated build output.
 
 The repository's own `.gitignore` is not automatically copied into every
@@ -69,6 +71,7 @@ backup. Then preserve at least:
 .tactus/PROMPT.md
 .tactus/scripts/
 .tactus/skills/
+.tactus/sessions/
 .tactus/segno/jobs/
 .tactus/segno/triggers/
 .tactus/segno/state/business.sqlite3
@@ -78,6 +81,10 @@ backup. Then preserve at least:
 The two Segno databases are separate by design. Copy both from the same stopped
 workspace snapshot. A business-state checkpoint and lifecycle transition are
 not a cross-database exactly-once transaction.
+
+Copy `sessions/` as one stopped-workspace unit. Its current document and
+append-only transcript jointly explain which human choice was accepted; do not
+restore one without the other or edit them by hand.
 
 Run journals are optional for functional recovery but useful for diagnosis.
 They can be large or sensitive; apply an explicit retention policy rather than

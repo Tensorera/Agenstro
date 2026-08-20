@@ -8,6 +8,7 @@ pub mod cli;
 pub mod journal;
 pub mod process;
 pub mod protocol;
+pub mod session;
 pub mod studio;
 pub mod workspace;
 

@@ -5,10 +5,14 @@ Rust Tactus runtime and Motivo Studio. It is separate from
 `agenstro.plugin/v1`: clients use it to inspect an initialized workspace and
 page through validated trace events, not to implement plugins.
 
+Human-decision reads and answers share the `tactus.control/v1` envelope but
+have their own bounded domain contract; see
+[Session document and control API v1](session-control-v1.md).
+
 ## Commands
 
 ```text
-tactus studio inspect --root ROOT --run-limit N
+tactus studio inspect --root ROOT [--exact-root] --run-limit N
 tactus studio events RUN_ID --root ROOT --after SEQ --limit N --max-bytes B
 ```
 
@@ -42,6 +46,11 @@ A control error uses the same envelope and a stable, redacted failure:
 
 `completed` means Tactus produced a domain result. It does not mean that every
 doctor check passed or that a traced plugin invocation succeeded.
+
+`--exact-root` rejects upward workspace discovery with
+`workspace_root_mismatch`. Motivo always uses it so Electron main's private
+redaction root is exactly the workspace Tactus inspected; the error never
+reveals the discovered parent path.
 
 ## Workspace snapshot
 

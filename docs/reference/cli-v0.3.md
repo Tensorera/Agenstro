@@ -1,14 +1,14 @@
 ---
 title: Agenstro CLI reference
 status: alpha
-last_verified: 2026-08-16
+last_verified: 2026-08-20
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 ---
 
 # Agenstro CLI reference
 
 This is the supported human-facing command surface for the 0.3 source alpha.
-It was checked against the compiled `--help` output on 2026-08-16. Internal
+It was checked against the compiled `--help` output on 2026-08-20. Internal
 `dispatch`, `provider-host`, and `effect-host` commands implement plugin
 plumbing and are not a user API.
 
@@ -34,8 +34,11 @@ contains spaces.
 | `tactus generate GOAL...` | Ask one provider to write numbered Haskell scripts | `--provider NAME`, `--timeout-seconds`, `--json` |
 | `tactus plugin-call NAME METHOD` | Invoke a registry entry directly | `--namespace`, `--params JSON`, `--timeout-seconds`, `--json` |
 | `tactus smoke [NAME...]` | Probe configured plugins | `--live`, `--json` |
-| `tactus studio inspect` | Return a redacted Studio workspace projection | `--run-limit` |
+| `tactus studio inspect` | Return a redacted Studio workspace projection | `--exact-root`, `--run-limit` |
 | `tactus studio events RUN_ID` | Read one bounded trace page | `--after`, `--limit`, `--max-bytes` |
+| `tactus session list` | Return newest validated session views | `--root`, `--limit` |
+| `tactus session show` | Return one session view | `--root`, `--session ID` |
+| `tactus session answer` | Compare-and-set one pending choice | `--root`, `--session ID`, `--turn`, `--axis`, `--option`, `--note` |
 
 Without `--json`, the Tactus-generated user-log vocabulary is closed to
 `[state]`, `[info]`, `[warning]`, and `[error]`, each followed by bounded
@@ -66,6 +69,23 @@ tactus plugin-call workspace.paths describe --namespace effect --params '{}'
 tactus plugin-call calculator add --namespace plugin `
   --params '{"left":19,"right":23}' --json
 ```
+
+Session commands always emit one `tactus.control/v1` JSON envelope. An answer
+is accepted only while the session awaits an answer and while its turn, axis,
+and option still match the pending brief:
+
+```powershell
+tactus session list --root D:\work\project --limit 50
+tactus session show --root D:\work\project --session session-7f3a91
+tactus session answer --root D:\work\project `
+  --session session-7f3a91 --turn 3 --axis desk.frame --option fixed `
+  --note "Prefer parts that remain repairable"
+```
+
+`session_turn_stale` is not retryable: refetch the current session before
+making another decision. This stage intentionally has no `session advance`
+command because planner registration and execution are not yet specified. See
+the [session control API](session-control-v1.md).
 
 ## Segno
 

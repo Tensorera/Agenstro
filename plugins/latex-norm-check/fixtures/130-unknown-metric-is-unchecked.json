@@ -1,0 +1,8 @@
+{
+  "name": "130-unknown-metric-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r13", "method": "check",
+    "params": {"artifact": "article.tex", "source": "text", "norms": [{"id": "future.metric", "statement": "A future metric is bounded.", "severity": "Style", "spec": {"kind": "Metric", "specMetric": "future-score", "specBound": {"boundMinimum": 0, "boundMaximum": 1}}}]}
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": [], "unchecked": ["future.metric"]}
+}

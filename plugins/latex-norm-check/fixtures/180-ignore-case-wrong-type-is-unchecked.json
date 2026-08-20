@@ -1,0 +1,21 @@
+{
+  "name": "180-ignore-case-wrong-type-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r18",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "ABC",
+      "norms": [
+        {
+          "id": "malformed.ignore-case",
+          "statement": "Do not contain abc.",
+          "severity": "Style",
+          "spec": {"kind": "Absence", "specPattern": "abc", "specIgnoreCase": "false"}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.ignore-case"]}
+}

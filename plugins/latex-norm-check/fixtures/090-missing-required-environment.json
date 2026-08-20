@@ -1,0 +1,8 @@
+{
+  "name": "090-missing-required-environment",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r9", "method": "check",
+    "params": {"artifact": "article.tex", "source": "\\int f\\,\\mathrm{d}x\n", "norms": [{"id": "venue.structure.abstract", "statement": "The article contains an abstract.", "severity": "Blocking", "spec": {"kind": "Existence", "specPattern": "\\\\begin\\{abstract\\}", "specIgnoreCase": false}}]}
+  },
+  "expect": {"ok": true, "violationNorms": ["venue.structure.abstract"]}
+}

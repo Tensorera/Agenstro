@@ -1,0 +1,6 @@
+{
+  "name": "200-nonfinite-number-is-invalid",
+  "rawRequest": "{\"api\":\"agenstro.plugin/v1\",\"id\":\"r20\",\"method\":\"smoke\",\"params\":{\"live\":NaN}}",
+  "expectedId": "unknown",
+  "expect": {"ok": false, "code": "invalid_request", "exitCode": 1}
+}

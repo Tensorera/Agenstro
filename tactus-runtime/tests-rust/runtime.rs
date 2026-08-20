@@ -46,6 +46,153 @@ fn initialized_project() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn session_control_api_lists_shows_and_answers_with_typed_envelopes() {
+    let (_temporary, project) = initialized_project();
+    let sessions = project.join(".tactus/sessions");
+    assert!(sessions.is_dir());
+    let session_id = "session-control-1";
+    let directory = sessions.join(session_id);
+    fs::create_dir(&directory).expect("session directory");
+    fs::write(
+        directory.join("session.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "api":"agenstro.session/v1",
+            "sessionId":session_id,
+            "label":"Control fixture",
+            "state":"awaiting_answer",
+            "turn":"7",
+            "pending":{
+                "api":"agenstro.session/v1",
+                "sessionId":session_id,
+                "turn":"7",
+                "findings":[],
+                "question":{
+                    "axis":"article.voice",
+                    "prompt":"Which voice?",
+                    "options":[
+                        {"id":"direct","label":"Direct","coordinates":{}},
+                        {"id":"formal","label":"Formal","coordinates":{}}
+                    ],
+                    "reversibility":"reversible",
+                    "dependsOn":[]
+                },
+                "stakes":[],
+                "remainingSurface":["article.voice"],
+                "remainingFloor":["article.voice"],
+                "producerExtension":{"kept":true}
+            },
+            "answered":[],
+            "startedUnixMs":"1",
+            "updatedUnixMs":"2",
+            "producerVersion":"future"
+        }))
+        .expect("session JSON"),
+    )
+    .expect("session document");
+
+    let list = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["session", "list", "--root"])
+        .arg(&project)
+        .args(["--limit", "10"])
+        .output()
+        .expect("session list");
+    assert!(list.status.success());
+    assert!(list.stderr.is_empty());
+    let list_body: Value = serde_json::from_slice(&list.stdout).expect("list envelope");
+    assert_eq!(list_body["api"], "tactus.control/v1");
+    assert_eq!(list_body["command"], "session.list");
+    assert_eq!(list_body["data"]["api"], "agenstro.session/v1");
+    assert_eq!(list_body["data"]["sessions"][0]["sessionId"], session_id);
+
+    let malformed_turn = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["session", "answer", "--root"])
+        .arg(&project)
+        .args([
+            "--session",
+            session_id,
+            "--turn",
+            "07",
+            "--axis",
+            "article.voice",
+            "--option",
+            "direct",
+        ])
+        .output()
+        .expect("malformed answer turn");
+    assert!(!malformed_turn.status.success());
+    let malformed_body: Value =
+        serde_json::from_slice(&malformed_turn.stdout).expect("invalid argument envelope");
+    assert_eq!(malformed_body["error"]["code"], "session_invalid_argument");
+
+    let stale = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["session", "answer", "--root"])
+        .arg(&project)
+        .args([
+            "--session",
+            session_id,
+            "--turn",
+            "6",
+            "--axis",
+            "article.voice",
+            "--option",
+            "direct",
+        ])
+        .output()
+        .expect("stale answer");
+    assert!(!stale.status.success());
+    assert!(stale.stderr.is_empty());
+    let stale_body: Value = serde_json::from_slice(&stale.stdout).expect("failure envelope");
+    assert_eq!(stale_body["command"], "session.answer");
+    assert_eq!(stale_body["error"]["code"], "session_turn_stale");
+
+    let answer = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["session", "answer", "--root"])
+        .arg(&project)
+        .args([
+            "--session",
+            session_id,
+            "--turn",
+            "7",
+            "--axis",
+            "article.voice",
+            "--option",
+            "direct",
+            "--note",
+            "-Keep sentences short.",
+        ])
+        .output()
+        .expect("answer session");
+    assert!(
+        answer.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    let answer_body: Value = serde_json::from_slice(&answer.stdout).expect("answer envelope");
+    assert_eq!(answer_body["command"], "session.answer");
+    assert_eq!(answer_body["data"]["state"], "planning");
+    assert!(answer_body["data"].get("pending").is_none());
+    assert_eq!(answer_body["data"]["answered"][0]["option"], "direct");
+    assert_eq!(answer_body["data"]["producerVersion"], "future");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["session", "show", "--root"])
+        .arg(&project)
+        .args(["--session", session_id])
+        .output()
+        .expect("session show");
+    assert!(show.status.success());
+    let show_body: Value = serde_json::from_slice(&show.stdout).expect("show envelope");
+    assert_eq!(show_body["command"], "session.show");
+    assert_eq!(show_body["data"], answer_body["data"]);
+
+    let transcript =
+        fs::read_to_string(directory.join("transcript.jsonl")).expect("session transcript");
+    let record: Value = serde_json::from_str(transcript.trim()).expect("transcript record");
+    assert_eq!(record["note"], "-Keep sentences short.");
+    assert_eq!(record["brief"]["producerExtension"]["kept"], true);
+}
+
+#[test]
 fn studio_control_api_is_versioned_redacted_and_path_safe() {
     let (_temporary, project) = initialized_project();
     fs::write(
@@ -80,7 +227,7 @@ fn studio_control_api_is_versioned_redacted_and_path_safe() {
     let output = Command::new(env!("CARGO_BIN_EXE_tactus"))
         .args(["studio", "inspect", "--root"])
         .arg(&project)
-        .args(["--run-limit", "10"])
+        .args(["--exact-root", "--run-limit", "10"])
         .output()
         .expect("studio inspect");
     assert!(
@@ -101,6 +248,22 @@ fn studio_control_api_is_versioned_redacted_and_path_safe() {
     let encoded = String::from_utf8(output.stdout).expect("utf8");
     assert!(!encoded.contains("never-project-this"));
     assert!(!encoded.contains(&project.display().to_string()));
+
+    let child = project.join("selected-child");
+    fs::create_dir(&child).expect("selected child");
+    let wrong_root = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["studio", "inspect", "--root"])
+        .arg(&child)
+        .arg("--exact-root")
+        .output()
+        .expect("exact-root rejection");
+    assert!(!wrong_root.status.success());
+    assert!(wrong_root.stderr.is_empty());
+    let wrong_root_body: Value =
+        serde_json::from_slice(&wrong_root.stdout).expect("exact-root failure envelope");
+    assert_eq!(wrong_root_body["error"]["code"], "workspace_root_mismatch");
+    let wrong_root_text = String::from_utf8(wrong_root.stdout).expect("failure UTF-8");
+    assert!(!wrong_root_text.contains(&project.display().to_string()));
 
     let invalid = Command::new(env!("CARGO_BIN_EXE_tactus"))
         .args(["studio", "events", "../escape", "--root"])

@@ -1,0 +1,8 @@
+{
+  "name": "140-invalid-severity",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r14", "method": "check",
+    "params": {"artifact": "article.tex", "source": "text", "norms": [{"id": "bad.severity", "statement": "Invalid severity.", "severity": "Fatal", "spec": {"kind": "Absence", "specPattern": "bad", "specIgnoreCase": false}}]}
+  },
+  "expect": {"ok": false, "code": "invalid_params"}
+}

@@ -82,10 +82,18 @@ interface StudioSidebarProps {
   readonly scripts?: number | undefined;
   readonly plugins: number;
   readonly runs?: number | undefined;
+  readonly sessions?: number | undefined;
   readonly onNavigate: (view: NavigationView) => void;
 }
 
-export function StudioSidebar({ view, scripts, plugins, runs, onNavigate }: StudioSidebarProps) {
+export function StudioSidebar({
+  view,
+  scripts,
+  plugins,
+  runs,
+  sessions,
+  onNavigate,
+}: StudioSidebarProps) {
   return (
     <aside className="sidebar">
       <span className="nav-label">Workspace</span>
@@ -116,6 +124,13 @@ export function StudioSidebar({ view, scripts, plugins, runs, onNavigate }: Stud
           label="Runs"
           count={runs}
           onClick={() => onNavigate("runs")}
+        />
+        <NavButton
+          active={view === "sessions"}
+          icon="sessions"
+          label="Sessions"
+          count={sessions}
+          onClick={() => onNavigate("sessions")}
         />
       </nav>
       <div className="sidebar-foot">

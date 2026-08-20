@@ -83,6 +83,10 @@ Use **Open workspace** for a folder that already contains `.tactus`. Use
 its control snapshot. Initialization must be able to discover Clef through the
 normal Tactus rules, such as `TACTUS_CLEF_SDK`.
 
+Choose the workspace root itself, not a nested folder. Motivo requests exact
+root validation so the main process's private redaction root is identical to
+the workspace Tactus opened.
+
 ## Views
 
 - **Overview** shows workspace health, script and plugin totals, and recent run
@@ -93,6 +97,10 @@ normal Tactus rules, such as `TACTUS_CLEF_SDK`.
   offline or live smoke probes.
 - **Runs** pages through the typed event projection for one opaque run ID. Open
   future event kinds remain available under collapsed technical details.
+- **Sessions** lists durable Tactus decision sessions, explains findings and
+  stakes, compares options on shared coordinates, and returns one turn-scoped
+  answer with an optional note. A stale or already-consumed turn is refetched
+  instead of retried.
 
 One Generate, Check, Run, or Smoke action may be active at a time. The visible
 log contains only `[state]`, `[info]`, `[warning]`, and `[error]` plus bounded
@@ -127,15 +135,22 @@ Electron preload (context isolation + sandbox)
 Electron main -- owns the selected absolute root and child process
     | argv array, shell: false, bounded stdout/stderr
     v
-tactus studio inspect / studio events / init / generate / check / run / smoke
+tactus studio inspect / studio events / session list|show|answer / init / generate / check / run / smoke
 ```
 
 The renderer receives a random workspace handle and a redacted
 `agenstro.studio/v1` snapshot. It never supplies or receives the absolute root.
-The main process never reads `tactus.toml`, `runtime.json`, scripts, or journal
-files. Control JSON is size-limited and validated before it crosses IPC. Action
+The main process never reads `tactus.toml`, `runtime.json`, scripts, journal, or
+session files. Control JSON is size-limited and validated before it crosses IPC. Action
 output and open event payload strings are scrubbed for the selected root as a
 second line of defense.
+
+Session control is intentionally narrower than planning. Motivo does not
+create briefs, invoke a planner, apply defaults on a timer, or expose a dead
+`advance` action; Tactus must publish a later brief through a future, explicit
+planner contract. Every session IPC call is bound to the opaque workspace
+handle that produced its view, so a delayed answer cannot be redirected into a
+newly opened workspace.
 
 Trace-v1 events may include Tactus's additive `presentation` field with one
 closed category and a bounded natural-language message. Studio displays that

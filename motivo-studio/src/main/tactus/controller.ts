@@ -28,6 +28,25 @@ import {
   type StudioPresentation,
   type StudioView,
 } from "../../shared/contracts";
+import {
+  answeredAxisSchema,
+  sessionAnswerInputSchema,
+  sessionBriefSchema,
+  sessionConsequenceSchema,
+  sessionCurrentInputSchema,
+  sessionFindingSchema,
+  sessionListInputSchema,
+  sessionListSchema,
+  sessionOptionSchema,
+  sessionQuestionSchema,
+  sessionViewSchema,
+  SESSION_LIMITS,
+  type SessionAnswerInput,
+  type SessionCurrentInput,
+  type SessionList,
+  type SessionListInput,
+  type SessionView,
+} from "../../shared/session-contracts";
 import { MainProcessError } from "../errors";
 
 const CONTROL_STDOUT_BYTES = 9 * 1_024 * 1_024;
@@ -125,6 +144,79 @@ const eventsControlSchema = z.discriminatedUnion("status", [
     })
     .passthrough(),
   eventsFailureSchema,
+]);
+
+const externalSessionFindingSchema = sessionFindingSchema.strip();
+const externalSessionOptionSchema = sessionOptionSchema.strip();
+const externalSessionConsequenceSchema = sessionConsequenceSchema.strip();
+const externalSessionQuestionSchema = sessionQuestionSchema
+  .safeExtend({
+    options: z.array(externalSessionOptionSchema).min(2).max(SESSION_LIMITS.optionCount),
+  })
+  .strip();
+const externalSessionBriefSchema = sessionBriefSchema
+  .safeExtend({
+    findings: z.array(externalSessionFindingSchema).max(SESSION_LIMITS.briefFindings),
+    question: externalSessionQuestionSchema,
+    stakes: z.array(externalSessionConsequenceSchema).max(SESSION_LIMITS.optionCount),
+  })
+  .strip();
+const externalSessionViewSchema = sessionViewSchema
+  .safeExtend({
+    pending: externalSessionBriefSchema.optional(),
+    answered: z.array(answeredAxisSchema.strip()).max(SESSION_LIMITS.answeredAxes),
+  })
+  .strip();
+const externalSessionListSchema = sessionListSchema
+  .safeExtend({
+    sessions: z.array(externalSessionViewSchema).max(SESSION_LIMITS.sessionPage),
+  })
+  .strip();
+
+const sessionListFailureSchema = inspectFailureSchema.extend({
+  command: z.literal("session.list"),
+});
+const sessionShowFailureSchema = inspectFailureSchema.extend({
+  command: z.literal("session.show"),
+});
+const sessionAnswerFailureSchema = inspectFailureSchema.extend({
+  command: z.literal("session.answer"),
+});
+
+const sessionListControlSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      api: z.literal("tactus.control/v1"),
+      command: z.literal("session.list"),
+      status: z.literal("completed"),
+      data: externalSessionListSchema,
+    })
+    .passthrough(),
+  sessionListFailureSchema,
+]);
+
+const sessionShowControlSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      api: z.literal("tactus.control/v1"),
+      command: z.literal("session.show"),
+      status: z.literal("completed"),
+      data: externalSessionViewSchema,
+    })
+    .passthrough(),
+  sessionShowFailureSchema,
+]);
+
+const sessionAnswerControlSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      api: z.literal("tactus.control/v1"),
+      command: z.literal("session.answer"),
+      status: z.literal("completed"),
+      data: externalSessionViewSchema,
+    })
+    .passthrough(),
+  sessionAnswerFailureSchema,
 ]);
 
 type TactusChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -255,9 +347,64 @@ export class TactusController {
     return studioEventPageSchema.parse(redactValue(envelope.data, root));
   }
 
+  async sessions(rawInput: SessionListInput): Promise<SessionList> {
+    const input = sessionListInputSchema.parse(rawInput);
+    const root = this.requireWorkspaceHandle(input.workspaceHandle);
+    const limit = input.limit ?? 50;
+    const result = await this.capture(
+      ["session", "list", "--root", root, "--limit", String(limit)],
+      root,
+      INSPECT_TIMEOUT_MS,
+    );
+    const envelope = parseControl(sessionListControlSchema, result, root);
+    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+    return sessionListSchema.parse(redactValue(envelope.data, root));
+  }
+
+  async session(rawInput: SessionCurrentInput): Promise<SessionView> {
+    const input = sessionCurrentInputSchema.parse(rawInput);
+    const root = this.requireWorkspaceHandle(input.workspaceHandle);
+    const result = await this.capture(
+      ["session", "show", "--root", root, "--session", input.sessionId],
+      root,
+      INSPECT_TIMEOUT_MS,
+    );
+    const envelope = parseControl(sessionShowControlSchema, result, root);
+    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+    return sessionViewSchema.parse(redactValue(envelope.data, root));
+  }
+
+  async answer(rawInput: SessionAnswerInput): Promise<SessionView> {
+    const input = sessionAnswerInputSchema.parse(rawInput);
+    const root = this.requireWorkspaceHandle(input.workspaceHandle);
+    const result = await this.capture(
+      [
+        "session",
+        "answer",
+        "--root",
+        root,
+        "--session",
+        input.sessionId,
+        "--turn",
+        input.turn,
+        "--axis",
+        input.axis,
+        "--option",
+        input.option,
+        ...(input.note !== undefined ? ["--note", input.note] : []),
+      ],
+      root,
+      INSPECT_TIMEOUT_MS,
+    );
+    const envelope = parseControl(sessionAnswerControlSchema, result, root);
+    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+    return sessionViewSchema.parse(redactValue(envelope.data, root));
+  }
+
   start(rawRequest: ActionRequest): ActionState {
     const root = this.requireWorkspace();
     this.requireIdle();
+    this.requireControlIdle();
     const request = actionRequestSchema.parse(rawRequest);
     const actionId = randomUUID();
     const startedAtUnixMs = Date.now().toString();
@@ -319,7 +466,7 @@ export class TactusController {
 
   private async inspect(root: string): Promise<StudioSnapshot> {
     const result = await this.capture(
-      ["studio", "inspect", "--root", root, "--run-limit", "50"],
+      ["studio", "inspect", "--root", root, "--exact-root", "--run-limit", "50"],
       root,
       INSPECT_TIMEOUT_MS,
     );
@@ -329,14 +476,8 @@ export class TactusController {
   }
 
   private capture(args: readonly string[], cwd: string, timeoutMs: number): Promise<CaptureResult> {
-    if (this.controlChildren.size > 0) {
-      throw new MainProcessError({
-        code: "control_busy",
-        category: "busy",
-        retryable: true,
-        message: "Wait for the current Studio query to finish.",
-      });
-    }
+    this.requireIdle();
+    this.requireControlIdle();
     return new Promise((resolve, reject) => {
       const child = this.spawn(args, cwd);
       this.controlChildren.add(child);
@@ -344,7 +485,7 @@ export class TactusController {
       const stderr: Buffer[] = [];
       let stdoutBytes = 0;
       let stderrBytes = 0;
-      let completed = false;
+      let settled = false;
       let overflow: "stdout" | "stderr" | undefined;
       let deadlineReached = false;
       let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -362,23 +503,44 @@ export class TactusController {
           retryable: false,
           message: `Tactus ${overflow ?? "output"} exceeded the control-plane byte budget.`,
         });
+      const unavailableFailure = () =>
+        new MainProcessError({
+          code: "tactus_unavailable",
+          category: "process",
+          retryable: true,
+          message: "Tactus could not be started. Check MOTIVO_TACTUS_BIN or PATH.",
+        });
+      const currentFailure = () => {
+        if (deadlineReached) return timeoutFailure();
+        if (overflow) return overflowFailure();
+        return unavailableFailure();
+      };
+      const rejectOnce = (failure: MainProcessError): void => {
+        if (settled) return;
+        settled = true;
+        reject(failure);
+      };
+      const cleanupStoppedChild = (): void => {
+        this.controlChildren.delete(child);
+        clearTimeout(timer);
+        if (killGraceTimer) clearTimeout(killGraceTimer);
+      };
       const waitForStop = (): void => {
         killGraceTimer ??= setTimeout(() => {
-          if (completed) return;
-          completed = true;
-          this.controlChildren.delete(child);
+          if (!this.controlChildren.has(child)) return;
           child.kill("SIGKILL");
-          reject(deadlineReached ? timeoutFailure() : overflowFailure());
+          rejectOnce(currentFailure());
         }, CAPTURE_KILL_GRACE_MS);
       };
       const timer = setTimeout(() => {
-        if (completed) return;
+        if (settled) return;
         deadlineReached = true;
         child.kill();
         waitForStop();
       }, timeoutMs);
 
       child.stdout.on("data", (chunk: Buffer) => {
+        if (settled || overflow || deadlineReached) return;
         stdoutBytes += chunk.byteLength;
         if (stdoutBytes > CONTROL_STDOUT_BYTES || stdout.length >= CONTROL_MAX_CHUNKS) {
           overflow = "stdout";
@@ -390,6 +552,7 @@ export class TactusController {
         stdout.push(chunk);
       });
       child.stderr.on("data", (chunk: Buffer) => {
+        if (settled || overflow || deadlineReached) return;
         stderrBytes += chunk.byteLength;
         if (stderrBytes > CONTROL_STDERR_BYTES || stderr.length >= CONTROL_MAX_CHUNKS) {
           overflow = "stderr";
@@ -401,47 +564,36 @@ export class TactusController {
         stderr.push(chunk);
       });
       child.once("error", () => {
-        if (completed) return;
-        completed = true;
-        this.controlChildren.delete(child);
-        clearTimeout(timer);
-        if (killGraceTimer) clearTimeout(killGraceTimer);
-        if (deadlineReached) {
-          reject(timeoutFailure());
-          return;
+        // A spawn failure has no live process and is therefore confirmed stopped.
+        // Other child errors do not prove termination: retain the control lock
+        // until `close`, or until controller disposal clears the process set.
+        if (child.pid === undefined) {
+          cleanupStoppedChild();
+        } else if (!deadlineReached && !overflow) {
+          child.kill();
+          waitForStop();
         }
-        if (overflow) {
-          reject(overflowFailure());
-          return;
-        }
-        reject(
-          new MainProcessError({
-            code: "tactus_unavailable",
-            category: "process",
-            retryable: true,
-            message: "Tactus could not be started. Check MOTIVO_TACTUS_BIN or PATH.",
-          }),
-        );
+        rejectOnce(currentFailure());
       });
       child.once("close", (exitCode) => {
-        if (completed) return;
-        completed = true;
-        this.controlChildren.delete(child);
-        clearTimeout(timer);
-        if (killGraceTimer) clearTimeout(killGraceTimer);
+        // Promise settlement and child termination are deliberately separate.
+        // A deadline may reject before this event, but only `close` releases the
+        // control-plane lock for a process that actually started.
+        cleanupStoppedChild();
+        if (settled) return;
         if (deadlineReached) {
-          reject(timeoutFailure());
+          rejectOnce(timeoutFailure());
           return;
         }
         if (overflow) {
-          reject(overflowFailure());
+          rejectOnce(overflowFailure());
           return;
         }
         let decodedStdout: string;
         try {
           decodedStdout = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdout));
         } catch {
-          reject(
+          rejectOnce(
             new MainProcessError({
               code: "invalid_control_utf8",
               category: "process",
@@ -451,6 +603,7 @@ export class TactusController {
           );
           return;
         }
+        settled = true;
         resolve({
           exitCode,
           stdout: decodedStdout,
@@ -629,6 +782,19 @@ export class TactusController {
     return this.workspaceRoot;
   }
 
+  private requireWorkspaceHandle(handle: string): string {
+    const root = this.requireWorkspace();
+    if (!this.workspaceHandle || handle !== this.workspaceHandle) {
+      throw new MainProcessError({
+        code: "workspace_handle_stale",
+        category: "validation",
+        retryable: false,
+        message: "The workspace changed before this session request could start.",
+      });
+    }
+    return root;
+  }
+
   private requireIdle(): void {
     if (this.active) {
       throw new MainProcessError({
@@ -636,6 +802,17 @@ export class TactusController {
         category: "busy",
         retryable: true,
         message: "Wait for the active Tactus action to finish or cancel it.",
+      });
+    }
+  }
+
+  private requireControlIdle(): void {
+    if (this.controlChildren.size > 0) {
+      throw new MainProcessError({
+        code: "control_busy",
+        category: "busy",
+        retryable: true,
+        message: "Wait for the current Studio query to finish.",
       });
     }
   }
@@ -742,6 +919,29 @@ function controlFailure(error: { code: string; message: string }, root: string):
   });
 }
 
+function sessionControlFailure(
+  error: { code: string; message: string },
+  root: string,
+): MainProcessError {
+  const code = normalizeErrorCode(error.code);
+  const domainCode = code.startsWith("session_") ? code.slice("session_".length) : code;
+  const validation = new Set([
+    "invalid_argument",
+    "invalid_id",
+    "turn_stale",
+    "axis_mismatch",
+    "option_invalid",
+    "state_invalid",
+  ]).has(domainCode);
+  const terminalWorkspace = new Set(["not_found", "corrupt"]).has(domainCode);
+  return new MainProcessError({
+    code,
+    category: validation ? "validation" : "workspace",
+    retryable: validation || terminalWorkspace ? false : true,
+    message: boundedDiagnostic(error.message, root),
+  });
+}
+
 function normalizeErrorCode(value: string): string {
   const normalized = value.toLowerCase().replaceAll(/[^a-z0-9_]/g, "_");
   return /^[a-z]/.test(normalized) ? normalized.slice(0, 96) : "tactus_control_failed";
@@ -772,9 +972,22 @@ function redactValue(value: unknown, root: string): unknown {
   if (typeof value === "string") return redactText(value, root);
   if (Array.isArray(value)) return value.map((entry) => redactValue(entry, root));
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, redactValue(entry, root)]),
-    );
+    const entries: Array<[string, unknown]> = [];
+    const redactedKeys = new Set<string>();
+    for (const [key, entry] of Object.entries(value)) {
+      const redactedKey = redactText(key, root);
+      if (redactedKeys.has(redactedKey)) {
+        throw new MainProcessError({
+          code: "redaction_key_collision",
+          category: "internal",
+          retryable: false,
+          message: "Tactus output could not be projected without exposing workspace data.",
+        });
+      }
+      redactedKeys.add(redactedKey);
+      entries.push([redactedKey, redactValue(entry, root)]);
+    }
+    return Object.fromEntries(entries);
   }
   return value;
 }

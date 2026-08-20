@@ -59,9 +59,13 @@ Use **Open workspace** for a project that already contains `.tactus`, or
 still needs a discoverable Clef SDK; when automatic checkout discovery is not
 available, initialize from the CLI with `tactus init --sdk <clef-sdk>` first.
 
+Select the workspace root itself, not a descendant. Studio inspection uses an
+exact-root guard so its private redaction authority cannot differ from the
+workspace Tactus discovered.
+
 ## Views and actions
 
-The application has four projections:
+The application has five projections:
 
 - **Overview** summarizes Tactus doctor checks, workflow entries, registries,
   recent runs, and the active action.
@@ -74,6 +78,11 @@ The application has four projections:
   summary when one exists. Canonical Tactus presentation messages form the
   visible log; unknown and legacy event data remains available in collapsed
   technical details.
+- **Sessions** lists bounded `agenstro.session/v1` views. It shows findings
+  before one pending question, aligns option coordinates for comparison,
+  keeps consequences beside their options, distinguishes sourced findings
+  from inference, and shows both the necessary and conditional decision
+  roadmap. A person can return one option and an optional bounded note.
 
 The action drawer displays only `[state]`, `[info]`, `[warning]`, and `[error]`
 plus bounded natural-language messages while Electron owns the top-level
@@ -98,13 +107,17 @@ or arbitrary Electron IPC. A context-isolated preload exposes one named,
 Zod-validated method for each supported operation. Electron main retains the
 workspace root and starts Tactus with an argv array and `shell: false`.
 
-Motivo never reads `tactus.toml`, `runtime.json`, or `.tactus/runs` directly.
+Motivo never reads `tactus.toml`, `runtime.json`, `.tactus/runs`, or
+`.tactus/sessions` directly.
 The Rust runtime owns sorting, registry resolution, trace validation, and
 resource limits through:
 
 ```powershell
 tactus studio inspect --root D:\work\project --run-limit 50
 tactus studio events run-... --root D:\work\project --after 0 --limit 250 --max-bytes 4194304
+tactus session list --root D:\work\project --limit 50
+tactus session show --root D:\work\project --session session-...
+tactus session answer --root D:\work\project --session session-... --turn 3 --axis design.axis --option choice
 ```
 
 Each query emits exactly one `tactus.control/v1` envelope containing an
@@ -120,6 +133,18 @@ See the
 [Studio control API v1 reference](reference/studio-control-v1.md) for the exact
 envelopes, pagination rules, and limits.
 
+Session requests also carry the opaque handle of the workspace view that
+created them; Electron main rejects the request if the user opened another
+workspace before it could start. Answers use the displayed turn as a second,
+domain-level compare-and-set token. If another client has already consumed or
+moved the turn forward, Motivo refetches the current brief instead of applying
+or retrying the old choice. The workspace remains the source of truth: the
+renderer never writes a session file, constructs a brief, chooses a default,
+or applies a default on a timer. Planner execution is not part of this stage;
+see the
+[session control reference](reference/session-control-v1.md) and
+[ADR-0006](adr/0006-motivo-session-pattern.md).
+
 ## Intentional non-goals
 
 Studio does not provide:
@@ -127,6 +152,8 @@ Studio does not provide:
 - a daemon, scheduler, replay engine, artifact store, checkpoint, or rollback;
 - a general terminal or shell;
 - source editing or a second script-discovery implementation;
+- session planning, provider inquiry, unattended defaulting, or session
+  expiry;
 - provider login, credential storage, permission policy, or authentication;
 - a guarantee that cancelling a top-level command reverses external work.
 

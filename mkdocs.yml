@@ -44,9 +44,11 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Reference:
       - Local plugin protocol v1: reference/plugin-protocol-v1.md
+      - Norm catalogue v1: reference/norm-v1.md
       - CLI reference: reference/cli-v0.3.md
       - Segno plugin wire v1: reference/segno-plugin-wire-v1.md
       - Studio control API v1: reference/studio-control-v1.md
+      - Session control API v1: reference/session-control-v1.md
       - Support matrix: reference/support-matrix.md
       - Glossary: reference/glossary.md
   - Project:
@@ -55,6 +57,9 @@ nav:
       - Decisions:
           - ADR 0003 - Haskell DSL and local plugins: adr/0003-haskell-dsl-and-local-plugins.md
           - ADR 0004 - Haskell Segno persistent tasks: adr/0004-haskell-segno-persistent-tasks.md
+          - ADR 0005 - Typed norms and refinement: adr/0005-norms-rubrics-and-refinement.md
+          - ADR 0006 - Durable session boundary: adr/0006-motivo-session-pattern.md
+      - Design bundle implementation status: design-bundle-status.md
       - Migration:
           - 0.2 to Haskell 0.3: migrations/0.2-to-haskell-0.3.md
       - Writing documentation: how-to/write-documentation.md

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { SessionBridge } from "./session-contracts";
 
 export const LIMITS = {
   actionOutputBytes: 16_384,
@@ -300,4 +301,5 @@ export interface MotivoBridge {
       readonly limit?: number;
     }): Promise<StudioEventPage>;
   };
+  readonly sessions: SessionBridge;
 }

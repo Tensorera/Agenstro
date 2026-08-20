@@ -1,0 +1,14 @@
+{
+  "name": "050-guidance-only-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r5", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "\\int f(x)\\,\\mathrm{d}x\n",
+      "norms": [
+        {"id": "math.notation.upright-differential", "statement": "Use an upright differential.", "severity": "Style", "spec": {"kind": "Absence", "specPattern": "(?<!\\\\mathrm\\{)\\bd(?=[a-zA-Z]\\b)", "specIgnoreCase": false}},
+        {"id": "math.style.proof-voice", "statement": "Use first person plural.", "severity": "Preference"}
+      ]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": ["math.notation.upright-differential"], "unchecked": ["math.style.proof-voice"]}
+}

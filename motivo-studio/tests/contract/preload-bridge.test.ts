@@ -45,7 +45,8 @@ describe("preload bridge", () => {
     electron.ipcRenderer.invoke.mockResolvedValueOnce({ ok: true, data: null });
     await expect(bridge.studio.openInitialized()).resolves.toBeNull();
     expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(IPC.studioOpenInitialized, {});
-    expect(Object.keys(bridge).sort()).toEqual(["actions", "runs", "studio"]);
+    expect(Object.keys(bridge).sort()).toEqual(["actions", "runs", "sessions", "studio"]);
+    expect(Object.keys(bridge.sessions).sort()).toEqual(["answer", "current", "list"]);
   });
 
   it("forwards only validated action events and releases the single listener", () => {
@@ -74,6 +75,21 @@ describe("preload bridge", () => {
     const bridge = installedBridge();
     await expect(
       bridge.actions.start({ kind: "run", root: "D:\\private" } as never),
+    ).rejects.toThrow();
+    expect(electron.ipcRenderer.invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects extra session answer authority before IPC", async () => {
+    const bridge = installedBridge();
+    await expect(
+      bridge.sessions.answer({
+        workspaceHandle: "aa665bbe-ece0-40e6-8235-2278635aee84",
+        sessionId: "session-desk-1",
+        turn: "3",
+        axis: "desk.frame",
+        option: "fixed",
+        root: "D:\\private",
+      } as never),
     ).rejects.toThrow();
     expect(electron.ipcRenderer.invoke).not.toHaveBeenCalled();
   });

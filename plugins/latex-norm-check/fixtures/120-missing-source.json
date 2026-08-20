@@ -1,0 +1,5 @@
+{
+  "name": "120-missing-source",
+  "request": {"api": "agenstro.plugin/v1", "id": "r12", "method": "check", "params": {"norms": []}},
+  "expect": {"ok": false, "code": "invalid_params"}
+}

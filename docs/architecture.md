@@ -1,7 +1,7 @@
 ---
 title: Agenstro 0.3 architecture
 status: alpha
-last_verified: 2026-08-16
+last_verified: 2026-08-20
 applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, and Segno Haskell 0.3.0.0"
 ---
 
@@ -18,10 +18,10 @@ The architectural split is:
 
 | Component | Owns | Deliberately does not own |
 | --- | --- | --- |
-| Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, incremental event sink, typed `Trigger state event`/`State state`/`PersistentTask` boundary | Provider catalogue, permission policy, custom language parser, scheduler loop, lifecycle database, artifacts, authentication |
-| Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio control DTOs | Haskell workflow semantics, provider credentials, daemon/API service, CAS, replay, rollback, GUI |
+| Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, typed norms/rubrics, incremental event sink, typed `Trigger state event`/`State state`/`PersistentTask` boundary | Provider catalogue, permission policy, custom language parser, scheduler loop, lifecycle database, artifacts, authentication |
+| Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio/session control DTOs and the durable session store | Haskell workflow/planner semantics, provider credentials, daemon/API service, replay, rollback, GUI |
 | Segno `0.3.0.0` | Single-node driver, trigger cursors, occurrence lifecycle, leases/fences, SQLite state plugin, interval/cron planning, invocation/result handoff to Tactus | Workflow value semantics, distributed consensus, exactly-once effects, rollback, replay, provider execution |
-| Motivo `0.3.0` | Electron window/preload boundary, React visualization, named Zod IPC, one top-level Tactus action | Workflow semantics, config/trace parsing, general filesystem/shell access, daemon, scheduler, replay, credentials |
+| Motivo `0.3.0` | Electron window/preload boundary, React projection and decision elicitation, named Zod IPC, one top-level Tactus action | Workflow/planner semantics, session persistence, config/trace parsing, general filesystem/shell access, daemon, scheduler, replay, credentials |
 | Plugins | Provider/effect/domain behavior behind `agenstro.plugin/v1` | Core workflow composition and runtime ownership |
 
 ## Component flow
@@ -76,7 +76,8 @@ Electron main (workspace root + child handle)
         |
         | argv array, shell=false
         v
-tactus studio inspect/events + generate/check/run/smoke
+tactus studio inspect/events + session list/show/answer
+                       + generate/check/run/smoke
 ```
 
 Clef and Tactus remain one-shot. The optional Segno driver is the one resident
@@ -100,6 +101,13 @@ The main building blocks are:
 - `require`/`requireBecause` for typed guards; and
 - `attempt` for catching workflow-domain failures without swallowing
   asynchronous cancellation.
+
+`Norm artifact` extends the same static boundary to domain conventions.
+Serialisable `CheckSpec` values travel through ordinary generic plugins,
+`Rubric artifact` composes compatible norms, and `Critique` keeps checked and
+unchecked identities separate. Bounded refinement remains normal `Workflow`
+composition; it does not create another runtime or turn observations into
+results.
 
 Provider and generic plugin events are decoded as complete lines arrive. Clef
 stores the frames in runtime records and passes each event to an `EventSink`.
@@ -282,6 +290,7 @@ Tactus run evidence:
 .tactus/
   scripts/
   runs/
+  sessions/
   segno/
     jobs/
     state/
@@ -296,15 +305,20 @@ channel. Electron main owns the selected root and launches an external
 `tactus` executable without a shell. It never gives the renderer an arbitrary
 command or filesystem primitive.
 
-Two Rust-owned queries form the read boundary:
+Rust-owned queries form the read and decision boundary:
 
 - `tactus studio inspect` returns health, ordered relative script names,
   redacted registries, and compact recent run state;
 - `tactus studio events` validates an opaque run id and returns a bounded event
   page plus terminal summary and `ok`/`partial`/`corrupt` integrity.
+- `tactus session list/show` return bounded `agenstro.session/v1` views; and
+- `tactus session answer` validates a turn token, axis, and option under a
+  per-session lock before atomically updating workspace-owned state.
 
-Both use a `tactus.control/v1` envelope with `agenstro.studio/v1` data. Commands,
-plugin options, prompt text, and absolute script paths do not cross the bridge.
+Studio queries use a `tactus.control/v1` envelope with `agenstro.studio/v1`
+data; session commands use the same envelope with `agenstro.session/v1` data.
+Commands, plugin options, prompt text, and absolute script paths do not cross
+the bridge.
 All 64-bit counters are decimal strings. Motivo therefore does not parse TOML,
 walk the journal directory, infer workflow state from open event kinds, or own
 a competing scheduler/replay model.
@@ -322,6 +336,14 @@ add its own bounded `[warning]` when its action-output projection budget is
 exhausted, but it keeps draining the child and discards only later raw frames.
 Projection pressure never kills Tactus or changes the action outcome; raw
 stdout/stderr and legacy events remain collapsed technical details.
+
+Sessions add a narrow inbound value without widening renderer authority. A
+brief teaches with findings and consequences before asking exactly one
+question. Motivo shows both the necessary question floor and conditional
+surface, returns one bounded choice, and refetches rather than retrying a stale
+turn. It never constructs a brief, selects a default, or writes session files.
+Planner execution is deferred until a pure, statically analysable planner has
+an explicit registration and invocation contract.
 
 ## `agenstro.trace/v1` journal
 

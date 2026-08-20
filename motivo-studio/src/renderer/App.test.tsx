@@ -7,10 +7,24 @@ import type {
   StudioEventPage,
   StudioView,
 } from "../shared/contracts";
+import type { SessionList, SessionView } from "../shared/session-contracts";
 import App from "./App";
 
 const actionId = "3ce53087-2218-42fd-bdda-afc4097020ae";
 const handle = "aa665bbe-ece0-40e6-8235-2278635aee84";
+
+interface Deferred<Value> {
+  readonly promise: Promise<Value>;
+  readonly resolve: (value: Value) => void;
+}
+
+function deferred<Value>(): Deferred<Value> {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 describe("Motivo Studio renderer", () => {
   let bridge: MotivoBridge;
@@ -307,6 +321,192 @@ describe("Motivo Studio renderer", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(bridge.actions.cancel).toHaveBeenCalledWith({ actionId });
   });
+
+  it("renders a pending brief and returns one typed answer with its turn token", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(await screen.findByText("A solid top exceeds the low-cost lift rating.")).toBeVisible();
+    expect(bridge.sessions.list).toHaveBeenCalledWith({ workspaceHandle: handle, limit: 50 });
+    expect(bridge.sessions.current).toHaveBeenCalledWith({
+      workspaceHandle: handle,
+      sessionId: "session-desk-1",
+    });
+    expect(screen.getByText("No source — inference")).toBeVisible();
+    expect(screen.getAllByText("top-max-mm")).toHaveLength(2);
+    expect(screen.getByText(/rules out solid oak/i)).toBeVisible();
+    expect(screen.getAllByTitle("This consequence is irreversible.")).toHaveLength(2);
+    expect(screen.getByText(/No default is available/)).toBeVisible();
+    expect(screen.getByText("desk.cable-routing")).toBeVisible();
+
+    await user.click(screen.getByRole("radio", { name: /Fixed height, built legs/ }));
+    await user.type(screen.getByLabelText("Optional note"), "Prefer repairable joinery.");
+    await user.click(screen.getByRole("button", { name: "Record answer" }));
+
+    expect(bridge.sessions.answer).toHaveBeenCalledWith({
+      workspaceHandle: handle,
+      sessionId: "session-desk-1",
+      turn: "3",
+      axis: "desk.frame",
+      option: "fixed",
+      note: "Prefer repairable joinery.",
+    });
+    expect(await screen.findByText("Planning the next turn")).toBeVisible();
+  });
+
+  it.each([
+    ["session_turn_stale", "The supplied turn is stale."],
+    ["session_state_invalid", "The session state changed."],
+  ])(
+    "refetches recoverable %s answers without displaying the raw control error",
+    async (code, message) => {
+      const stale = new Error(message) as Error & {
+        detail: { code: string };
+      };
+      stale.detail = { code };
+      const refreshed = answeredSessionView();
+      vi.mocked(bridge.sessions.answer).mockRejectedValueOnce(stale);
+      vi.mocked(bridge.sessions.current)
+        .mockResolvedValueOnce(pendingSessionView())
+        .mockResolvedValue(refreshed);
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Workflow entries");
+      await user.click(screen.getByRole("button", { name: "Sessions" }));
+      await screen.findByText("A solid top exceeds the low-cost lift rating.");
+
+      await user.click(screen.getByRole("radio", { name: /Fixed height, built legs/ }));
+      await user.click(screen.getByRole("button", { name: "Record answer" }));
+
+      expect(await screen.findByText("Planning the next turn")).toBeVisible();
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
+      expect(bridge.sessions.current).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("keeps the decision disabled while the selected-session query is in flight", async () => {
+    const current = deferred<SessionView>();
+    vi.mocked(bridge.sessions.current).mockReset().mockReturnValue(current.promise);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+
+    await waitFor(() => expect(bridge.sessions.current).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("radio", { name: /Fixed height, built legs/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Refreshing/ })).toBeDisabled();
+
+    await act(async () => current.resolve(pendingSessionView()));
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: /Fixed height, built legs/ })).toBeEnabled(),
+    );
+  });
+
+  it("shows a pending historical axis as a required revisit", async () => {
+    const revisiting = pendingSessionView();
+    revisiting.answered = [
+      ...revisiting.answered,
+      {
+        axis: "desk.frame",
+        option: "sit-stand",
+        label: "Sit/stand, motorised frame",
+        defaulted: false,
+        answeredAtUnixMs: "1786852500000",
+      },
+    ];
+    vi.mocked(bridge.sessions.list).mockResolvedValue({
+      api: "agenstro.session/v1",
+      sessions: [revisiting],
+    });
+    vi.mocked(bridge.sessions.current).mockResolvedValue(revisiting);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+
+    expect(await screen.findByText("revisiting")).toBeVisible();
+    expect(screen.getByText("Must still decide (2)")).toBeVisible();
+  });
+
+  it("states the staged boundary without advertising a planner command", async () => {
+    vi.mocked(bridge.sessions.list).mockResolvedValue({
+      api: "agenstro.session/v1",
+      sessions: [],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+
+    expect(
+      await screen.findByText(/No sessions are available in this staged boundary/),
+    ).toBeVisible();
+    expect(screen.getByText(/no planner or publish command/i)).toBeVisible();
+    expect(screen.queryByText(/session producer/i)).not.toBeInTheDocument();
+  });
+
+  it("binds answers to a workspace token and ignores an older answer's finally", async () => {
+    const opened = deferred<StudioView | null>();
+    const oldAnswer = deferred<SessionView>();
+    const newAnswer = deferred<SessionView>();
+    const secondHandle = "bb665bbe-ece0-40e6-8235-2278635aee84";
+    const secondView: StudioView = {
+      ...studioView(),
+      handle: secondHandle,
+      snapshot: {
+        ...studioView().snapshot,
+        workspace: { name: "second-workspace" },
+      },
+    };
+    vi.mocked(bridge.studio.openInitialized).mockReturnValue(opened.promise);
+    vi.mocked(bridge.sessions.answer)
+      .mockReset()
+      .mockReturnValueOnce(oldAnswer.promise)
+      .mockReturnValueOnce(newAnswer.promise);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await screen.findByText("A solid top exceeds the low-cost lift rating.");
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: /Fixed height, built legs/ })).toBeEnabled(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open initialized workspace" }));
+    await user.click(screen.getByRole("radio", { name: /Fixed height, built legs/ }));
+    await user.click(screen.getByRole("button", { name: "Record answer" }));
+    expect(bridge.sessions.answer).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceHandle: handle }),
+    );
+
+    await act(async () => opened.resolve(secondView));
+    expect(await screen.findByText("second-workspace")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await screen.findByText("A solid top exceeds the low-cost lift rating.");
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: /Fixed height, built legs/ })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("radio", { name: /Fixed height, built legs/ }));
+    await user.click(screen.getByRole("button", { name: "Record answer" }));
+    expect(bridge.sessions.answer).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceHandle: secondHandle }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Workflow" }));
+    expect(screen.getByRole("button", { name: "Check" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(screen.getByRole("button", { name: "Recording…" })).toBeDisabled();
+
+    await act(async () => oldAnswer.resolve(answeredSessionView()));
+    expect(screen.getByRole("button", { name: "Recording…" })).toBeDisabled();
+    expect(screen.getByText("Recording…")).toBeVisible();
+
+    await act(async () => newAnswer.resolve(answeredSessionView()));
+    expect(await screen.findByText("Planning the next turn")).toBeVisible();
+    expect(bridge.actions.start).not.toHaveBeenCalled();
+  });
 });
 
 function fakeBridge(): {
@@ -341,6 +541,12 @@ function fakeBridge(): {
       },
     },
   };
+  const pendingSession = pendingSessionView();
+  const answeredSession = answeredSessionView();
+  const sessionList: SessionList = {
+    api: "agenstro.session/v1",
+    sessions: [pendingSession, deliveredSessionView()],
+  };
   const bridge: MotivoBridge = {
     studio: {
       current: vi.fn().mockResolvedValue(view),
@@ -367,6 +573,11 @@ function fakeBridge(): {
         .mockResolvedValueOnce(secondPage)
         .mockResolvedValue(secondPage),
     },
+    sessions: {
+      list: vi.fn().mockResolvedValue(sessionList),
+      current: vi.fn().mockResolvedValue(pendingSession),
+      answer: vi.fn().mockResolvedValue(answeredSession),
+    },
   };
   return {
     bridge,
@@ -374,6 +585,103 @@ function fakeBridge(): {
       if (!listener) throw new Error("action listener was not installed");
       listener(event);
     },
+  };
+}
+
+function pendingSessionView(): SessionView {
+  return {
+    api: "agenstro.session/v1",
+    sessionId: "session-desk-1",
+    label: "Desk build",
+    state: "awaiting_answer",
+    turn: "3",
+    pending: {
+      api: "agenstro.session/v1",
+      sessionId: "session-desk-1",
+      turn: "3",
+      findings: [
+        {
+          summary: "A solid top exceeds the low-cost lift rating.",
+          detail: "The surveyed frames are rated for lighter tops.",
+          source: "corpus: 40 commercial frames",
+        },
+        { summary: "The budget band was inferred from the selected frame." },
+      ],
+      question: {
+        axis: "desk.frame",
+        prompt: "Do you want the desk height to be adjustable?",
+        reversibility: "irreversible",
+        dependsOn: [],
+        options: [
+          {
+            id: "sit-stand",
+            label: "Sit/stand, motorised frame",
+            coordinates: { height: "adjustable", cost: "high", "top-max-mm": "25" },
+            rationale: "The frame carries the load.",
+          },
+          {
+            id: "fixed",
+            label: "Fixed height, built legs",
+            coordinates: { height: "fixed", cost: "low", "top-max-mm": "45" },
+            rationale: "The top can remain structural.",
+          },
+        ],
+      },
+      stakes: [
+        {
+          option: "sit-stand",
+          effect: "Roughly doubles the budget and rules out solid oak.",
+          reversibility: "irreversible",
+        },
+        {
+          option: "fixed",
+          effect: "Commits the height at assembly.",
+          reversibility: "irreversible",
+        },
+      ],
+      remainingSurface: ["desk.frame", "desk.top-material", "desk.joinery", "desk.cable-routing"],
+      remainingFloor: ["desk.frame", "desk.top-material"],
+    },
+    answered: [
+      {
+        axis: "desk.budget",
+        option: "mid",
+        label: "Mid-range",
+        defaulted: false,
+        answeredAtUnixMs: "1786852000000",
+      },
+    ],
+    startedUnixMs: "1786851000000",
+    updatedUnixMs: "1786853000000",
+  };
+}
+
+function answeredSessionView(): SessionView {
+  const { pending: _pending, ...current } = pendingSessionView();
+  void _pending;
+  return {
+    ...current,
+    state: "planning",
+    answered: [
+      ...current.answered,
+      {
+        axis: "desk.frame",
+        option: "fixed",
+        label: "Fixed height, built legs",
+        defaulted: false,
+        answeredAtUnixMs: "1786853100000",
+      },
+    ],
+    updatedUnixMs: "1786853100000",
+  };
+}
+
+function deliveredSessionView(): SessionView {
+  return {
+    ...answeredSessionView(),
+    sessionId: "session-desk-2",
+    label: "Reading desk",
+    state: "delivered",
   };
 }
 

@@ -23,6 +23,8 @@ pub const PROMPT_NAME: &str = "PROMPT.md";
 pub const SCRIPTS_DIRECTORY: &str = "scripts";
 /// Directory containing immutable per-run records.
 pub const RUNS_DIRECTORY: &str = "runs";
+/// Directory containing durable human-in-the-loop session documents.
+pub const SESSIONS_DIRECTORY: &str = "sessions";
 /// Directory containing runtime-owned agent guidance.
 pub const SKILLS_DIRECTORY: &str = "skills";
 /// Canonical Tactus skill directory name.
@@ -181,6 +183,8 @@ pub struct Workspace {
     pub scripts_path: PathBuf,
     /// Run journal directory.
     pub runs_path: PathBuf,
+    /// Durable elicitation session directory.
+    pub sessions_path: PathBuf,
     /// Cabal project file that points at Clef.
     pub cabal_project_path: PathBuf,
 }
@@ -197,6 +201,7 @@ impl Workspace {
             prompt_path: control.join(PROMPT_NAME),
             scripts_path: control.join(SCRIPTS_DIRECTORY),
             runs_path: control.join(RUNS_DIRECTORY),
+            sessions_path: control.join(SESSIONS_DIRECTORY),
             cabal_project_path: control.join("cabal.project"),
             control,
         }
@@ -472,6 +477,9 @@ pub fn initialize_workspace(
     require_contained_directory(&root, &workspace.control, &skill_references)?;
     fs::create_dir_all(&workspace.scripts_path).map_err(WorkspaceError::Io)?;
     fs::create_dir_all(&workspace.runs_path).map_err(WorkspaceError::Io)?;
+    reject_linked_skill_directories(&root, &workspace.sessions_path)?;
+    fs::create_dir_all(&workspace.sessions_path).map_err(WorkspaceError::Io)?;
+    require_contained_directory(&root, &workspace.control, &workspace.sessions_path)?;
 
     let mut files = vec![
         (workspace.config_path.clone(), DEFAULT_CONFIG.to_owned()),
@@ -530,7 +538,9 @@ fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), Works
     for component in relative.components() {
         current.push(component);
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || directory_is_reparse_point(&metadata) =>
+            {
                 return Err(WorkspaceError::InvalidConfig(format!(
                     "Tactus skill directory must not be a link: {}",
                     current.display()
@@ -543,10 +553,6 @@ fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), Works
                 )));
             }
             Ok(_) => {
-                // `symlink_metadata` does not classify Windows junctions as
-                // symbolic links.  Canonical containment catches those (and
-                // any other reparse-point directory) before `create_dir_all`
-                // can materialize skill files outside this workspace.
                 let resolved_current = dunce::canonicalize(&current).map_err(WorkspaceError::Io)?;
                 if !resolved_current.starts_with(&resolved_root) {
                     return Err(WorkspaceError::InvalidConfig(format!(
@@ -560,6 +566,19 @@ fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), Works
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn directory_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn directory_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn require_contained_directory(
@@ -1088,5 +1107,41 @@ mod tests {
         let error = initialize_workspace(&root, Some(&sdk)).expect_err("linked skills rejected");
         assert!(error.to_string().contains("must not be a link"));
         assert!(!outside.join(TACTUS_SKILL_DIRECTORY).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn init_rejects_a_sessions_junction_to_a_sibling_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let control = root.join(CONTROL_DIRECTORY);
+        let runs = control.join(RUNS_DIRECTORY);
+        let sdk = temporary.path().join("sdk");
+        fs::create_dir_all(&runs).expect("runs directory");
+        fs::create_dir_all(&sdk).expect("sdk directory");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk manifest");
+
+        let sessions = control.join(SESSIONS_DIRECTORY);
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:TACTUS_TEST_JUNCTION -Target $env:TACTUS_TEST_TARGET | Out-Null",
+            ])
+            .env("TACTUS_TEST_JUNCTION", &sessions)
+            .env("TACTUS_TEST_TARGET", &runs)
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error =
+            initialize_workspace(&root, Some(&sdk)).expect_err("sessions junction rejected");
+        assert!(error.to_string().contains("must not be a link"));
+        assert!(!control.join(CONFIG_NAME).exists());
     }
 }

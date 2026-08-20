@@ -1,0 +1,8 @@
+{
+  "name": "070-malformed-pattern-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r7", "method": "check",
+    "params": {"artifact": "article.tex", "source": "text", "norms": [{"id": "broken.norm.pattern", "statement": "Malformed fixture.", "severity": "Style", "spec": {"kind": "Absence", "specPattern": "([unclosed", "specIgnoreCase": false}}]}
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": [], "unchecked": ["broken.norm.pattern"]}
+}

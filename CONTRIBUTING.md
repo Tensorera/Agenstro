@@ -196,6 +196,13 @@ npm --prefix motivo-studio run package
 These tests use a fake Tactus process. Never put provider credentials into the
 desktop test or packaging environment.
 
+The reference norm checker is a standalone Python plugin. Its fixture runner
+checks both domain results and the JSONL terminal/correlation rules:
+
+```powershell
+python plugins/latex-norm-check/run_fixtures.py
+```
+
 ## Changing the plugin or trace protocol
 
 The canonical plugin contract is
@@ -233,8 +240,8 @@ Validate navigation and links:
 python -m mkdocs build --strict
 ```
 
-Python in that command belongs to MkDocs only; it is not a Tactus runtime
-requirement.
+Python in these repository checks belongs to MkDocs and the optional reference
+norm plugin; it is not a Tactus runtime requirement.
 
 ## Sensitive data and generated output
 

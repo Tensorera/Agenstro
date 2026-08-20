@@ -1,0 +1,5 @@
+{
+  "name": "110-wrong-api",
+  "request": {"api": "wrong/v1", "id": "r11", "method": "describe", "params": {}},
+  "expect": {"ok": false, "code": "invalid_request", "exitCode": 1}
+}

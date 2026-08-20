@@ -1,0 +1,8 @@
+{
+  "name": "060-unsupported-spec-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r6", "method": "check",
+    "params": {"artifact": "article.tex", "source": "\\section{Results}\n\\section{Introduction}\n", "norms": [{"id": "venue.structure.order", "statement": "Use the prescribed order.", "severity": "Correctness", "spec": {"kind": "Sequence", "specOrdered": ["Introduction", "Results"]}}]}
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": [], "unchecked": ["venue.structure.order"]}
+}

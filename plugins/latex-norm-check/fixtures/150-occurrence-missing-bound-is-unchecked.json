@@ -1,0 +1,21 @@
+{
+  "name": "150-occurrence-missing-bound-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r15",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "x x",
+      "norms": [
+        {
+          "id": "malformed.occurrence",
+          "statement": "Bound the number of x tokens.",
+          "severity": "Style",
+          "spec": {"kind": "Occurrence", "specPattern": "x"}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.occurrence"]}
+}

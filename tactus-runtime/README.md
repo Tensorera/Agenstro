@@ -47,6 +47,7 @@ Initialization creates only missing content:
   PROMPT.md         generation instructions
   scripts/          ordinary Haskell entries and helper modules
   runs/             per-invocation trace directories
+  sessions/         current human-decision state and answer evidence
 ```
 
 Runnable entries are named `NNN_slug.hs` or `NNN_slug.lhs`. Tactus orders them
@@ -69,6 +70,9 @@ tactus smoke
 tactus smoke provider:codex --live
 tactus plugin-call workspace.paths describe --namespace effect
 tactus studio inspect
+tactus session list --limit 50
+tactus session show --session session-7f3a91
+tactus session answer --session session-7f3a91 --turn 3 --axis desk.frame --option fixed
 ```
 
 - `init` creates missing project-local control files without replacing existing
@@ -87,6 +91,9 @@ tactus studio inspect
 - `plugin-call` calls any registered method with an open JSON object.
 - `studio` exposes the bounded, redacted control projection consumed by Motivo;
   it is not a second daemon or workflow API.
+- `session list/show/answer` exposes bounded durable decision state. `answer`
+  is a locked compare-and-set on the displayed turn; Tactus does not yet expose
+  planner execution or `session advance`.
 
 `check` and `run` are fail-fast unless `--keep-going` is supplied. Supervised
 commands have a default 1,800-second deadline; use `--timeout-seconds 0` on a

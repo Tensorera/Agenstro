@@ -14,6 +14,7 @@ export type IconName =
   | "pulse"
   | "refresh"
   | "runs"
+  | "sessions"
   | "spark"
   | "stop"
   | "warning"
@@ -47,6 +48,12 @@ export function Icon({ name }: { readonly name: IconName }) {
       <>
         <path d="M4 5h10M4 12h16M4 19h10" />
         <path d="m16 3 4 2-4 2M16 17l4 2-4 2" />
+      </>
+    ),
+    sessions: (
+      <>
+        <path d="M5 5h14v10H9l-4 4z" />
+        <path d="M9 9h6M9 12h4" />
       </>
     ),
     folder: <path d="M3 6.5h7l2-2h9v14H3z" />,

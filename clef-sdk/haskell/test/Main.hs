@@ -6,6 +6,7 @@ module Main (main) where
 
 import Clef
 import qualified Clef.Effect.WorkspacePaths as WorkspacePaths
+import qualified Clef.Norm as Norm
 import Clef.Plugin.Protocol
   ( ParsedPluginOutput (..),
     PluginOutputStreamParser,
@@ -101,6 +102,9 @@ runTests = do
         [ ("Workflow monad and require", testWorkflowMonad workspace executable),
           ("parallel uses structured concurrency", testParallel workspace executable),
           ("text and JSON task decoders", testTaskDecoders),
+          ("norm wire format is explicit and forward compatible", testNormWire),
+          ("rubrics batch serialisable checks through an ordinary plugin", testNormRubric workspace executable),
+          ("refinement is bounded and feeds critiques back", testNormRefinement workspace executable),
           ("runtime config schema", testRuntimeConfig executable workspace),
           ("JSONL terminal protocol", testProtocolRules),
           ("shared Rust and Haskell protocol conformance vectors", testProtocolConformance workspace),
@@ -211,6 +215,177 @@ testTaskDecoders = do
   case decodeTaskResult floatingTask "1e-999" of
     Left (TaskDecodeFailed "floating" _) -> pure ()
     other -> failTest $ "underflowing JSON task number should fail, received " <> show other
+
+testNormWire :: IO ()
+testNormWire = do
+  let selectedNorm :: Norm Text
+      selectedNorm =
+        (norm (NormId "math.notation.upright-differential") "Use an upright differential." Style)
+          { normGuidance = Just "Write an upright differential.",
+            normCheck = Just (SpecCheck id (Absence "bad" False)),
+            normProvenance = MinedFromCorpus "accepted-papers" 38 40,
+            normSupersedes = [NormId "math.notation.differential"],
+            normFixtures = Just (NormFixtures ["bare-dx.tex"] ["upright-dx.tex"])
+          }
+      durable = normRecord selectedNorm
+      encoded = toJSON durable
+  assertEqual "norm id wire value" (String "math.notation.upright-differential") (toJSON (recordId durable))
+  case encoded of
+    Object fields -> do
+      unless (KeyMap.member "id" fields && KeyMap.member "spec" fields && KeyMap.member "provenance" fields) $
+        failTest "norm record omitted required wire fields"
+      unless (not (KeyMap.member "recordId" fields)) $
+        failTest "norm record leaked Haskell field names onto the wire"
+    _ -> failTest "norm record must encode as an object"
+  assertEqual
+    "norm record JSON round trip"
+    (Right durable)
+    (eitherDecodeStrict' (strictEncode encoded) :: Either String NormRecord)
+
+  let unknownSpecValue = object ["kind" .= ("FutureCheck" :: Text), "dialect" .= ("v2" :: Text)]
+      unknownProvenanceValue = object ["kind" .= ("ImportedReview" :: Text), "review" .= (7 :: Int)]
+  unknownSpec <- either failTest pure (parseEither parseJSON unknownSpecValue :: Either String CheckSpec)
+  unknownProvenance <- either failTest pure (parseEither parseJSON unknownProvenanceValue :: Either String Provenance)
+  assertEqual "unknown check kind is preserved" unknownSpecValue (toJSON unknownSpec)
+  assertEqual "unknown provenance kind is preserved" unknownProvenanceValue (toJSON unknownProvenance)
+
+  let request = NormCheckRequest "article.tex" "bad" [durable]
+      validResult =
+        NormCheckResult
+          "article.tex"
+          []
+          [recordId durable]
+          []
+      changedSeverity =
+        NormCheckResult
+          "article.tex"
+          [violation (recordId durable) Blocking "checker tried to escalate severity"]
+          [recordId durable]
+          []
+  case validateNormCheckResult request changedSeverity of
+    Left _ -> pure ()
+    Right _ -> failTest "checker severity drift was accepted"
+  mapM_
+    ( \(label, invalidResult) ->
+        case validateNormCheckResult request invalidResult of
+          Left _ -> pure ()
+          Right _ -> failTest $ "invalid checker result was accepted: " <> label
+    )
+    [ ("artifact mismatch", validResult {checkResultArtifact = "other.tex"}),
+      ("missing classification", validResult {checkResultChecked = []}),
+      ("duplicate classification", validResult {checkResultChecked = [recordId durable, recordId durable]}),
+      ("overlapping classification", validResult {checkResultUnchecked = [recordId durable]})
+    ]
+
+  let wrongApi = "{\"api\":\"agenstro.norm/v2\",\"catalogue\":\"x\",\"norms\":[]}" :: ByteString.ByteString
+  case eitherDecodeStrict' wrongApi :: Either String NormCatalogue of
+    Left _ -> pure ()
+    Right _ -> failTest "an unknown norm catalogue api was accepted"
+
+testNormRubric :: FilePath -> FilePath -> IO ()
+testNormRubric workspace executable =
+  withRuntime (testConfig workspace executable) $ \runtime -> do
+    let absenceNorm :: Norm Text
+        absenceNorm =
+          (norm (NormId "text.absence.bad") "The source does not contain bad." Style)
+            { normCheck = Just (SpecCheck id (Absence "bad" False))
+            }
+        existenceNorm :: Norm Text
+        existenceNorm =
+          (norm (NormId "text.existence.article") "The source names article." Correctness)
+            { normCheck = Just (SpecCheck id (Existence "article" False))
+            }
+        futureNorm :: Norm Text
+        futureNorm =
+          (norm (NormId "text.future-check") "A newer checker understands this rule." Style)
+            { normCheck = Just (SpecCheck id (Norm.UnknownCheckSpec "FutureCheck" mempty))
+            }
+        externalStrict :: Norm Text
+        externalStrict =
+          (norm (NormId "text.external.strict") "Run the strict external rule." Style)
+            { normCheck =
+                Just
+                  ( SpecCheck
+                      id
+                      (ExternalCheck "calculator" "external-check" (Just (object ["mode" .= ("strict" :: Text)])))
+                  )
+            }
+        externalLenient :: Norm Text
+        externalLenient =
+          (norm (NormId "text.external.lenient") "Run the lenient external rule." Preference)
+            { normCheck =
+                Just
+                  ( SpecCheck
+                      id
+                      (ExternalCheck "calculator" "external-check" (Just (object ["mode" .= ("lenient" :: Text)])))
+                  )
+            }
+        advisory :: Norm Text
+        advisory =
+          guidanceOnly
+            (NormId "text.voice")
+            "Use a calm voice."
+            Preference
+            "Prefer calm, direct sentences."
+        selectedRubric = rubric [absenceNorm, existenceNorm, externalStrict, externalLenient, futureNorm, advisory]
+        checker = NormChecker "norm-check" "article.tex"
+    critique <- runWorkflow runtime (judgeWith checker selectedRubric "bad article")
+    assertEqual
+      "batch checked ids"
+      [ NormId "text.absence.bad",
+        NormId "text.existence.article",
+        NormId "text.external.strict",
+        NormId "text.external.lenient"
+      ]
+      (critiqueChecked critique)
+    assertEqual
+      "unsupported and guidance-only norms remain unchecked"
+      [NormId "text.future-check", NormId "text.voice"]
+      (critiqueUnchecked critique)
+    assertEqual "batch violation count" 1 (length (critiqueViolations critique))
+    records <- readRuntimeRecords runtime
+    let checkerValues = [value | PluginValueRecord _ "norm-check" "check" value <- records]
+    assertEqual "one plugin value proves a single batch" 1 (length checkerValues)
+    let externalValues = [value | PluginValueRecord _ "calculator" "external-check" value <- records]
+    assertEqual "same-destination external checks form one wrapper batch" 1 (length externalValues)
+    let guidance = rubricGuidance (GuidanceBudget 200 bySeverity) selectedRubric
+    unless ("text.existence.article" `Text.isInfixOf` guidance) $
+      failTest "severity selector omitted the highest-severity guidance"
+    unless (Text.length guidance <= 200) $
+      failTest "rubric guidance exceeded its explicit budget"
+
+testNormRefinement :: FilePath -> FilePath -> IO ()
+testNormRefinement workspace executable =
+  withRuntime (testConfig workspace executable) $ \runtime -> do
+    let identity = NormId "native.no-bad"
+        nativeNorm :: Norm Text
+        nativeNorm =
+          (norm identity "The candidate is repaired." Correctness)
+            { normCheck =
+                Just . NativeCheck $ \candidate ->
+                  pure
+                    [ violation identity Correctness "candidate still contains bad"
+                      | "bad" `Text.isInfixOf` candidate
+                    ]
+            }
+        policy =
+          RefinePolicy
+            { refineMaxRounds = 3,
+              refineAcceptable = null . critiqueViolations,
+              refineBudget = GuidanceBudget 200 bySeverity
+            }
+        generate Nothing = pure "bad candidate"
+        generate (Just _) = pure "good candidate"
+    (candidate, finalCritique) <- runWorkflow runtime (refineWith defaultNormChecker policy (rubric [nativeNorm]) generate)
+    assertEqual "refined candidate" "good candidate" candidate
+    assertEqual "final critique" [] (critiqueViolations finalCritique)
+    assertWorkflowError
+      "invalid refinement bound"
+      (\case RequirementFailed message -> "refineMaxRounds" `Text.isInfixOf` message; _ -> False)
+      ( runWorkflow
+          runtime
+          (refineWith defaultNormChecker (policy {refineMaxRounds = 0}) (rubric [nativeNorm]) generate)
+      )
 
 testRuntimeConfig :: FilePath -> FilePath -> IO ()
 testRuntimeConfig executable workspace = do
@@ -1443,6 +1618,12 @@ testConfig workspace executable =
                 { pluginCommand = pluginCommand,
                   pluginOptions = mempty
                 }
+            ),
+            ( "norm-check",
+              PluginConfig
+                { pluginCommand = pluginCommand,
+                  pluginOptions = mempty
+                }
             )
           ],
       runtimeInstructions = "test instructions"
@@ -1533,6 +1714,54 @@ fakePlugin = do
       (left, right) <-
         parseFakeParams (withObject "add params" (.: "input")) params :: IO (Int, Int)
       succeed requestId (left + right)
+    "check" -> do
+      normRequest <- parseFakeParams parseJSON params :: IO NormCheckRequest
+      let records = checkRequestNorms normRequest
+          (uncheckedRecords, checkedRecords) = splitUnsupported records
+          checkedIds = recordId <$> checkedRecords
+          uncheckedIds = recordId <$> uncheckedRecords
+          violations = case checkedRecords of
+            firstRecord : _
+              | "bad" `Text.isInfixOf` checkRequestSource normRequest ->
+                  [ violation
+                      (recordId firstRecord)
+                      (recordSeverity firstRecord)
+                      (recordStatement firstRecord)
+                  ]
+            _ -> []
+          normResult =
+            NormCheckResult
+              { checkResultArtifact = checkRequestArtifact normRequest,
+                checkResultViolations = violations,
+                checkResultChecked = checkedIds,
+                checkResultUnchecked = uncheckedIds
+              }
+      succeed requestId (toJSON normResult)
+    "external-check" -> do
+      normRequest <- parseFakeParams parseJSON params :: IO NormCheckRequest
+      let records = checkRequestNorms normRequest
+          externalParameters =
+            [ parameters
+              | record <- records,
+                Just (Norm.ExternalCheck pluginName methodName (Just parameters)) <- [recordSpec record],
+                pluginName == "calculator",
+                methodName == "external-check"
+            ]
+      assertEqual "external wrapper batch size" 2 (length records)
+      assertEqual
+        "external wrapper preserves per-norm params"
+        [object ["mode" .= ("strict" :: Text)], object ["mode" .= ("lenient" :: Text)]]
+        externalParameters
+      succeed
+        requestId
+        ( toJSON
+            NormCheckResult
+              { checkResultArtifact = checkRequestArtifact normRequest,
+                checkResultViolations = [],
+                checkResultChecked = recordId <$> records,
+                checkResultUnchecked = []
+              }
+        )
     "compare-and-set" -> do
       (stateKey, expectedRevision, operationIdentity, occurrenceIdentity, fencingToken, fencingEpoch) <-
         parseFakeParams
@@ -1572,6 +1801,17 @@ fakePlugin = do
           ]
 
     emit value = LazyChar8.putStrLn (encode value)
+
+    splitUnsupported records =
+      ( filter isUnsupported records,
+        filter (not . isUnsupported) records
+      )
+
+    isUnsupported record = case recordSpec record of
+      Nothing -> True
+      Just Norm.Sequence {} -> True
+      Just Norm.UnknownCheckSpec {} -> True
+      Just _ -> False
 
 fakeBlock :: IO ()
 fakeBlock = do

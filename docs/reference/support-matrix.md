@@ -2,7 +2,7 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-08-16
+last_verified: 2026-08-20
 applies_to: "Clef/Segno 0.3.0.0 + Tactus 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -16,8 +16,8 @@ successful call to a live provider account.
 | Surface | Version/target | Windows | Ubuntu | Evidence boundary |
 | --- | --- | --- | --- | --- |
 | Repository license | `AGPL-3.0-only` | Current | Current | root `LICENSE`, Cargo workspace, both Cabal packages, and Motivo package metadata agree |
-| Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; fake JSONL plugins exercise typed tasks/plugins and incremental events |
-| Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | format, package-scoped check/test/clippy; commands are `init`, `list`, `prompt`, `generate`, `check`, `run`, `doctor`, `smoke`, and `plugin-call` |
+| Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; fake JSONL plugins exercise typed tasks/plugins, norms/rubrics, bounded refinement, and incremental events |
+| Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | format, package-scoped check/test/clippy; commands include workspace/workflow/plugin operations plus bounded `session list/show/answer` |
 | Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, low-priority observation loss, authoritative terminal preservation, and exit behavior use local fakes |
 | Run journal | `agenstro.trace/v1` | Current gate | Current gate | ordered append-flushed diagnostic events, atomic terminal summary, prompt/provider raw redaction, terminal-value summaries, and degraded-writer outcome preservation are tested; no replay/rollback claim |
 | Process supervision | Unix process group / Windows Job Object | Current gate | Current gate | deadline/cancellation/protocol failure terminate the owned group; deliberate Unix session escape remains outside process-group containment; remote completion is unknowable |
@@ -26,10 +26,12 @@ successful call to a live provider account.
 | OpenCode adapter | Local `opencode` executable | Adapter/fake tested | Adapter/fake tested | `--auto`, inline `permission=allow`, model/variant, and parsing are fake-tested; `full_bypass=false` because deny/managed policy may win |
 | `workspace.paths` effect | Metadata, size, and SHA-256 snapshots | Current gate | Current gate | snapshot/diff/forget and observer calls; no reads, transient-write detection, content retention, attribution, CAS, or rollback |
 | Generic `[plugins]` registry | Any one-shot executable | Current gate | Current gate | typed TOML/runtime JSON plus Clef `jsonPlugin`/`rawPlugin` and Tactus `plugin-call`; implementation language is unrestricted |
+| Norm/checker boundary | `agenstro.norm/v1` over `agenstro.plugin/v1` | Current gate | Current gate | Haskell wire/judge tests and 24 Python fixtures cover catalogue records, external-wrapper routing, malformed/unsupported checks, strict JSON/correlation, exact terminal framing, and one-based inclusive loci |
 | Tactus Studio control API | `tactus.control/v1` + `agenstro.studio/v1` | Current gate | Current gate | redacted inspect projection, four-category natural-language presentation, decimal-string counters, bounded run-event pages, run-id/path validation, and trace integrity use Rust tests |
+| Tactus session control | `tactus.control/v1` + `agenstro.session/v1` | Current gate | Current gate | bounded list/show, static link/reparse refusal, typed document invariants, cross-process turn CAS, right-biased answers, atomic current-state replacement, and append-only answer evidence use Rust tests; hostile concurrent namespace replacement is outside the trusted-workspace model |
 | `tactus smoke` | Offline unless `--live` | Current gate | Current gate | default sends no model prompt; CI uses fakes; live native/account compatibility is opt-in evidence |
 | Topology-holes example | Four Haskell workflow stages + offline Rust oracle | Current gate | Current gate | real Tactus -> runghc -> Clef -> dispatch acceptance runs 010 -> 040 with parallel reviews and observer journals; the oracle verifies holes/Euler independently |
-| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; four-label presentation and non-fatal raw-output projection loss use fake Tactus, with no model credentials; packaged app requires external `tactus` |
+| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; run projection plus strict session list/show/answer, stale-turn refetch, and decision rendering use fake Tactus with no model credentials; packaged app requires external `tactus` |
 | Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
 | Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
 | Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
@@ -41,7 +43,8 @@ successful call to a live provider account.
 
 | Command | Offline by default | Can execute arbitrary trusted code | Can contact a provider |
 | --- | --- | --- | --- |
-| `init`, `list`, `prompt`, `doctor`, `studio inspect/events` | Yes | Plugin commands may be inspected, not invoked by these queries | No |
+| `init`, `list`, `prompt`, `doctor`, `studio inspect/events`, `session list/show` | Yes | Plugin commands may be inspected, not invoked by these queries | No |
+| `session answer` | Yes | Updates one local typed session and its answer transcript | No |
 | `check` | Yes apart from package resolution | Runs Cabal/GHC | No model call |
 | `run` | Depends on script | Yes, ordinary Haskell `IO` | Yes if the script invokes a provider/plugin |
 | `smoke` | Yes | Starts selected plugin executable | Only with `--live` for provider adapters |
@@ -71,8 +74,9 @@ successful call to a live provider account.
   bypass flags. OpenCode has the documented weaker caveat.
 - Protocol validation, argv execution, process groups, deadlines, and resource
   bounds improve reliability; they do not authenticate or sandbox code.
-- Tactus has no daemon, login/auth layer, credential broker, CAS/artifact
-  tracker, checkpoint, or rollback.
+- Tactus has no daemon, login/auth layer, credential broker, general artifact
+  tracker, workflow checkpoint, or rollback. Session answers use a narrow local
+  turn CAS; it is not a workspace transaction facility.
 - Segno adds a local long-lived scheduling loop and business-state CAS. It is
   not a network daemon, auth service, artifact store, workspace transaction, or
   external-effect rollback mechanism.
@@ -95,7 +99,8 @@ provides GHC/Cabal through `C:\ghcup\bin`. The first Cabal build can fetch and
 compile dependencies for several minutes, while later checks reuse the Cabal
 store and build cache. Motivo development additionally requires Node.js 22.12
 or newer. Python is not a runtime dependency of Tactus, Segno, or Motivo; it is
-used only if a third-party plugin chooses it or when MkDocs is built.
+used only when a Python plugin such as the optional reference norm checker is
+selected, or when MkDocs is built.
 
 The checked-in Cargo configuration directs Rust gate output to ignored
 `Build/cargo`; validation must finish with `cargo clean` to remove that large

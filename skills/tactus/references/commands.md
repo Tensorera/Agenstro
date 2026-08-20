@@ -12,6 +12,25 @@ tactus doctor --root $workspace --json
 
 Tactus searches the supplied path and its ancestors for `.tactus/tactus.toml`. A valid workspace also has `.tactus/scripts`, `.tactus/runs`, and its generated Cabal project. `list --json` returns the resolved workspace and ordered script inventory. `doctor --json` returns `ok` and individual checks; preserve its nonzero exit code when any check fails.
 
+## Inspect and answer decision sessions
+
+```powershell
+tactus session list --root $workspace --limit 50
+tactus session show --root $workspace --session session-7f3a91
+tactus session answer --root $workspace `
+  --session session-7f3a91 `
+  --turn 3 `
+  --axis desk.frame `
+  --option fixed `
+  --note 'Prefer repairable joinery'
+```
+
+Session commands return one `tactus.control/v1` envelope. Treat `turn` as a
+compare-and-set token: on `session_turn_stale` or an already-consumed turn,
+fetch the current session and ask the person again rather than retrying the old
+answer. Tactus currently has no `session advance`; do not invent a planner
+invocation command.
+
 ## Select scripts
 
 `check` accepts explicit scripts as positional arguments. Paths are interpreted relative to the resolved workspace root unless absolute:

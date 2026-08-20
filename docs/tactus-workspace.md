@@ -1,7 +1,7 @@
 ---
 title: Tactus workspace and configuration
 status: alpha
-last_verified: 2026-08-17
+last_verified: 2026-08-20
 applies_to: "tactus-runtime 0.3.0"
 ---
 
@@ -54,6 +54,7 @@ for reproducible setup and rerun `doctor` after moving either checkout.
   PROMPT.md
   scripts/
   runs/
+  sessions/
   skills/
     tactus/
       SKILL.md
@@ -71,12 +72,20 @@ for reproducible setup and rerun `doctor` after moving either checkout.
 | `scripts/` | Project-owned Haskell entries and helper modules |
 | `skills/tactus/` | Init-materialized agent guidance; missing files fall back to the embedded copy |
 | `runs/` | Runtime-owned bounded diagnostic journals; not replay state |
+| `sessions/` | Runtime-owned current elicitation state and append-only decision evidence |
 | `path-effect/` | Runtime-owned snapshot/observation tokens |
 | `dist-newstyle/` | Rebuildable Cabal output |
 | `segno/` | Segno-owned job, trigger, lifecycle, and business-state data |
 
 Do not edit runtime-owned state while a command is active. Back up project-owned
-files and Segno databases before deleting `.tactus`; see [Workspace operations](operations.md).
+files, session evidence, and Segno databases before deleting `.tactus`; see
+[Workspace operations](operations.md).
+
+`sessions/` is additive for existing workspaces: `session list` returns an
+empty list when the directory has not been created yet, while a later
+idempotent `tactus init` creates it. Motivo and other clients use
+`tactus session list/show/answer`; they do not read or write this directory.
+See the [session control API](reference/session-control-v1.md).
 
 ## Configuration schema
 

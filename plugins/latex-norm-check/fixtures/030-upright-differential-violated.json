@@ -1,0 +1,11 @@
+{
+  "name": "030-upright-differential-violated",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r3", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "\\begin{abstract}A survey.\\end{abstract}\n\\int f(x) dx + \\int g(y) dy\n",
+      "norms": [{"id": "math.notation.upright-differential", "statement": "Use an upright differential.", "severity": "Style", "spec": {"kind": "Absence", "specPattern": "(?<!\\\\mathrm\\{)\\bd(?=[a-zA-Z]\\b)", "specIgnoreCase": false}}]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": ["math.notation.upright-differential", "math.notation.upright-differential"], "firstLocus": {"startLine": 2, "startColumn": 11, "endLine": 2, "endColumn": 11}}
+}

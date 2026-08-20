@@ -1,6 +1,6 @@
 import type { ActionState, StudioPresentation } from "../shared/contracts";
 
-export type NavigationView = "overview" | "workflow" | "plugins" | "runs";
+export type NavigationView = "overview" | "workflow" | "plugins" | "runs" | "sessions";
 export type ActionStatus = "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
 export type OutputStream = "stdout" | "stderr";
 

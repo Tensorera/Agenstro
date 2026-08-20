@@ -1,0 +1,5 @@
+{
+  "name": "100-unknown-method",
+  "request": {"api": "agenstro.plugin/v1", "id": "r10", "method": "nope", "params": {}},
+  "expect": {"ok": false, "code": "unknown_method", "exitCode": 1}
+}

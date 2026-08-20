@@ -9,12 +9,16 @@ import {
   type MotivoBridge,
   type StudioError,
 } from "../shared/contracts";
+import { sessionListSchema, sessionViewSchema } from "../shared/session-contracts";
 import {
   actionCancelInputSchema,
   actionStartInputSchema,
   emptyInputSchema,
   IPC,
   runEventsInputSchema,
+  sessionAnswerInputSchema,
+  sessionCurrentInputSchema,
+  sessionListInputSchema,
 } from "../shared/ipc";
 
 export class MotivoBridgeError extends Error {
@@ -79,6 +83,13 @@ export function installBridge(): void {
     },
     runs: {
       events: (input) => invoke(IPC.runEvents, runEventsInputSchema, studioEventPageSchema, input),
+    },
+    sessions: {
+      list: (input) => invoke(IPC.sessionList, sessionListInputSchema, sessionListSchema, input),
+      current: (input) =>
+        invoke(IPC.sessionCurrent, sessionCurrentInputSchema, sessionViewSchema, input),
+      answer: (input) =>
+        invoke(IPC.sessionAnswer, sessionAnswerInputSchema, sessionViewSchema, input),
     },
   };
   contextBridge.exposeInMainWorld("motivo", bridge);

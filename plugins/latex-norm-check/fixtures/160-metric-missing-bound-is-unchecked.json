@@ -1,0 +1,21 @@
+{
+  "name": "160-metric-missing-bound-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r16",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "text",
+      "norms": [
+        {
+          "id": "malformed.metric",
+          "statement": "Bound the character count.",
+          "severity": "Correctness",
+          "spec": {"kind": "Metric", "specMetric": "characters"}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.metric"]}
+}

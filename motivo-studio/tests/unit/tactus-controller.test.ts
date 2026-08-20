@@ -272,7 +272,276 @@ if (args.includes("--json")) {
     });
     controller.dispose();
   });
+
+  it("does not overlap control queries and actions", async () => {
+    const fixture = await fakeTactus(`
+const args = process.argv.slice(2);
+const success = (command, data) => ({
+  api: "tactus.control/v1",
+  command,
+  status: "completed",
+  data
 });
+if (args[0] === "studio" && args[1] === "inspect") {
+  process.stdout.write(JSON.stringify(success("studio.inspect", {
+    api: "agenstro.studio/v1",
+    generatedAtUnixMs: "1",
+    workspace: { name: "fixture" },
+    health: { ok: true, checks: [] },
+    scripts: [],
+    registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
+    runs: []
+  })));
+} else if (args[0] === "session" && args[1] === "list") {
+  setTimeout(() => process.stdout.write(JSON.stringify(success("session.list", {
+    api: "agenstro.session/v1",
+    sessions: []
+  }))), 75);
+} else if (args[0] === "run") {
+  setTimeout(() => process.stdout.write("[state] run complete\\n"), 75);
+} else {
+  process.exitCode = 9;
+}
+`);
+    const events: StudioActionEvent[] = [];
+    const controller = new TactusController({
+      executable: process.execPath,
+      commandPrefix: [fixture.script],
+      emit: (event) => events.push(event),
+    });
+    const view = await controller.open(fixture.root);
+
+    const pendingList = controller.sessions({ workspaceHandle: view.handle, limit: 25 });
+    let controlBusy: unknown;
+    try {
+      controller.start({ kind: "run" });
+    } catch (error) {
+      controlBusy = error;
+    }
+    expect(controlBusy).toMatchObject({ detail: { code: "control_busy", category: "busy" } });
+    await expect(pendingList).resolves.toMatchObject({ sessions: [] });
+
+    const action = controller.start({ kind: "run" });
+    await expect(
+      controller.sessions({ workspaceHandle: view.handle, limit: 25 }),
+    ).rejects.toMatchObject({ detail: { code: "action_busy", category: "busy" } });
+    await waitForFinished(events, action.actionId);
+    controller.dispose();
+  });
+
+  it("projects additive session controls, builds fixed answer argv, and classifies failures", async () => {
+    const fixture = await fakeTactus(`
+const args = process.argv.slice(2);
+const root = args[args.indexOf("--root") + 1];
+const pending = {
+  api: "agenstro.session/v1",
+  sessionId: "session-desk-1",
+  label: "Desk build",
+  state: "awaiting_answer",
+  turn: "3",
+  pending: {
+    api: "agenstro.session/v1",
+    sessionId: "session-desk-1",
+    turn: "3",
+    findings: [{ summary: "Grounded finding", source: root, futureFindingField: true }],
+    question: {
+      axis: "desk.frame",
+      prompt: "Choose a frame.",
+      reversibility: "irreversible",
+      dependsOn: [],
+      options: [
+        { id: "fixed", label: "Fixed", coordinates: { [root]: "fixed" }, futureOptionField: true },
+        { id: "moving", label: "Moving", coordinates: { height: "adjustable" } }
+      ],
+      futureQuestionField: true
+    },
+    stakes: [{
+      option: "fixed",
+      effect: "Commits the height.",
+      reversibility: "irreversible",
+      futureStakeField: true
+    }],
+    remainingSurface: ["desk.frame", "desk.finish"],
+    remainingFloor: ["desk.frame"],
+    futureBriefField: true
+  },
+  answered: [],
+  startedUnixMs: "1",
+  updatedUnixMs: "2",
+  futureSessionField: true
+};
+const success = (command, data) => ({
+  api: "tactus.control/v1",
+  command,
+  status: "completed",
+  data,
+  futureEnvelopeField: true
+});
+const failure = (command, code) => ({
+  api: "tactus.control/v1",
+  command,
+  status: "error",
+  error: { code, message: "Session control failed at " + root, futureErrorField: true }
+});
+if (args[0] === "studio" && args[1] === "inspect") {
+  if (!args.includes("--exact-root")) process.exitCode = 8;
+  process.stdout.write(JSON.stringify(success("studio.inspect", {
+    api: "agenstro.studio/v1",
+    generatedAtUnixMs: "1",
+    workspace: { name: "fixture" },
+    health: { ok: true, checks: [] },
+    scripts: [],
+    registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
+    runs: []
+  })));
+} else if (args[0] === "session" && args[1] === "list") {
+  if (args[args.indexOf("--limit") + 1] !== "25") process.exitCode = 8;
+  process.stdout.write(JSON.stringify(success("session.list", {
+    api: "agenstro.session/v1",
+    sessions: [pending],
+    futureListField: true
+  })));
+} else if (args[0] === "session" && args[1] === "show") {
+  const requested = args[args.indexOf("--session") + 1];
+  if (requested === "session-collision-1") {
+    const collision = JSON.parse(JSON.stringify(pending));
+    collision.sessionId = requested;
+    collision.pending.sessionId = requested;
+    collision.pending.question.options[0].coordinates = { [root]: "fixed", "<workspace>": "collision" };
+    process.stdout.write(JSON.stringify(success("session.show", collision)));
+  } else {
+    if (requested !== "session-desk-1") process.exitCode = 8;
+    process.stdout.write(JSON.stringify(success("session.show", pending)));
+  }
+} else if (args[0] === "session" && args[1] === "answer") {
+  const option = args[args.indexOf("--option") + 1];
+  const command = "session.answer";
+  const codes = {
+    stale: "session_turn_stale",
+    mismatch: "session_axis_mismatch",
+    missing: "session_not_found",
+    corrupt: "session_corrupt",
+    io: "session_io_failed",
+    invalid: "session_invalid_argument"
+  };
+  if (codes[option]) {
+    process.exitCode = 2;
+    process.stdout.write(JSON.stringify(failure(command, codes[option])));
+  } else {
+    const valid =
+      args[args.indexOf("--session") + 1] === "session-desk-1" &&
+      args[args.indexOf("--turn") + 1] === "3" &&
+      args[args.indexOf("--axis") + 1] === "desk.frame" &&
+      option === "fixed" &&
+      args[args.indexOf("--note") + 1] === "Keep $(whoami) && spaces";
+    if (!valid) process.exitCode = 8;
+    const answered = {
+      ...pending,
+      state: "planning",
+      answered: [{
+        axis: "desk.frame",
+        option: "fixed",
+        label: "Fixed",
+        defaulted: false,
+        answeredAtUnixMs: "3"
+      }],
+      updatedUnixMs: "3"
+    };
+    delete answered.pending;
+    process.stdout.write(JSON.stringify(success(command, answered)));
+  }
+} else {
+  process.exitCode = 9;
+}
+`);
+    const controller = new TactusController({
+      executable: process.execPath,
+      commandPrefix: [fixture.script],
+      emit: () => undefined,
+    });
+    const view = await controller.open(fixture.root);
+
+    const list = await controller.sessions({ workspaceHandle: view.handle, limit: 25 });
+    expect(list.sessions[0]?.pending?.findings[0]?.source).toBe("<workspace>");
+    expect(Object.keys(list.sessions[0]?.pending?.question.options[0]?.coordinates ?? {})).toEqual([
+      "<workspace>",
+    ]);
+    expect(JSON.stringify(list)).not.toContain("future");
+    expect(JSON.stringify(list)).not.toContain(fixture.root);
+    await expect(
+      controller.session({ workspaceHandle: view.handle, sessionId: "session-desk-1" }),
+    ).resolves.toMatchObject({
+      sessionId: "session-desk-1",
+      state: "awaiting_answer",
+    });
+    await expect(
+      controller.session({ workspaceHandle: view.handle, sessionId: "session-collision-1" }),
+    ).rejects.toMatchObject({
+      detail: { code: "redaction_key_collision", category: "internal", retryable: false },
+    });
+    const staleHandle = "bb665bbe-ece0-40e6-8235-2278635aee84";
+    for (const request of [
+      () => controller.sessions({ workspaceHandle: staleHandle, limit: 25 }),
+      () => controller.session({ workspaceHandle: staleHandle, sessionId: "session-desk-1" }),
+      () =>
+        controller.answer({
+          workspaceHandle: staleHandle,
+          sessionId: "session-desk-1",
+          turn: "3",
+          axis: "desk.frame",
+          option: "fixed",
+        }),
+    ]) {
+      await expect(request()).rejects.toMatchObject({
+        detail: { code: "workspace_handle_stale", category: "validation", retryable: false },
+      });
+    }
+    await expect(
+      controller.answer({
+        workspaceHandle: view.handle,
+        sessionId: "session-desk-1",
+        turn: "3",
+        axis: "desk.frame",
+        option: "fixed",
+        note: "Keep $(whoami) && spaces",
+      }),
+    ).resolves.toMatchObject({ state: "planning", answered: [{ option: "fixed" }] });
+
+    await expect(sessionFailure(controller, view.handle, "stale")).rejects.toMatchObject({
+      detail: { code: "session_turn_stale", category: "validation", retryable: false },
+    });
+    await expect(sessionFailure(controller, view.handle, "mismatch")).rejects.toMatchObject({
+      detail: { category: "validation", retryable: false },
+    });
+    await expect(sessionFailure(controller, view.handle, "missing")).rejects.toMatchObject({
+      detail: { category: "workspace", retryable: false },
+    });
+    await expect(sessionFailure(controller, view.handle, "corrupt")).rejects.toMatchObject({
+      detail: { category: "workspace", retryable: false },
+    });
+    await expect(sessionFailure(controller, view.handle, "io")).rejects.toMatchObject({
+      detail: { category: "workspace", retryable: true },
+    });
+    await expect(sessionFailure(controller, view.handle, "invalid")).rejects.toMatchObject({
+      detail: { category: "validation", retryable: false },
+    });
+    controller.dispose();
+  });
+});
+
+function sessionFailure(
+  controller: TactusController,
+  workspaceHandle: string,
+  option: string,
+): Promise<unknown> {
+  return controller.answer({
+    workspaceHandle,
+    sessionId: "session-desk-1",
+    turn: "3",
+    axis: "desk.frame",
+    option,
+  });
+}
 
 async function fakeTactus(body: string): Promise<{ root: string; script: string }> {
   const root = await mkdtemp(join(tmpdir(), "motivo-controller-"));

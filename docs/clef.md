@@ -1,7 +1,7 @@
 ---
 title: Program workflows with Clef
 status: alpha
-last_verified: 2026-08-17
+last_verified: 2026-08-20
 applies_to: "clef-sdk 0.3.0.0"
 ---
 
@@ -175,6 +175,73 @@ Important error groups include:
 
 Never automatically retry `OutcomeUnknown` unless the external operation is
 known to be idempotent and has been reconciled.
+
+## Typed norms, rubrics, and refinement
+
+`Norm artifact` attaches one stable convention to the artifact type it
+constrains. A rubric composes norms of the same type and projects them in two
+directions: bounded guidance for generation and a typed critique after
+generation.
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
+import Clef
+import Data.Text (Text)
+
+newtype LaTeX = LaTeX { unLaTeX :: Text }
+
+uprightDifferential :: Norm LaTeX
+uprightDifferential =
+  (norm
+    (NormId "math.notation.upright-differential")
+    "Use an upright differential operator."
+    Style)
+    { normGuidance = Just "Write \\,\\mathrm{d}x in integrands.",
+      normCheck = Just (SpecCheck unLaTeX (Absence "(?<!\\\\mathrm\\{)\\bd(?=[a-zA-Z]\\b)" False)),
+      normProvenance = Authored "project"
+    }
+
+articleRubric :: Rubric LaTeX
+articleRubric = rubric [uprightDifferential]
+
+checkArticle :: LaTeX -> Workflow Critique
+checkArticle =
+  judgeWith
+    ( NormChecker
+        { normCheckerPlugin = "latex-norm-check",
+          normCheckerArtifact = "article.tex"
+        }
+    )
+    articleRubric
+```
+
+Serializable `CheckSpec` values are sent to an ordinary configured plugin.
+The repository reference checker can be registered as a generic plugin:
+
+```toml
+[plugins.latex-norm-check]
+command = ["python", "D:/src/Agenstro/plugins/latex-norm-check/latex_norm_check.py"]
+```
+
+`judge` uses the conventional plugin name `norm-check`; use `judgeWith` when a
+workspace registers another name or artifact label. A `NativeCheck` remains
+available for a typed Haskell check. The `Occurrence` check-spec constructor
+shares its name with the Segno occurrence type, so import it qualified from
+`Clef.Norm` when using the umbrella `Clef` module.
+
+Every `Critique` lists `checked` and `unchecked` norm identities separately.
+No violations plus unchecked norms means only that the available checks found
+nothing; it is not a blanket quality claim. `refine` and `refineWith` bound the
+generate/judge/repair loop and pass the previous structured critique to the
+next generation. Unknown plugin outcomes propagate rather than becoming an
+automatic repair round. Reaching the round limit returns the last candidate and
+critique even if the policy still rejects it, so the caller remains responsible
+for the delivery gate. `refineBudget` is explicit generator policy; the
+combinator cannot inject it into a caller-defined generator automatically.
+
+See the [norm v1 reference](reference/norm-v1.md) and
+[ADR-0005](adr/0005-norms-rubrics-and-refinement.md).
 
 ## Running a workflow
 

@@ -63,6 +63,20 @@ need evidence after failure, `runTactusWithRecords` returns the workflow outcome
 and the accumulated provider/event/effect records; `runTactus` remains the
 smallest convenience runner.
 
+## Norms, rubrics, and refinement
+
+`Clef.Norm` defines typed, stable domain conventions and the open
+`agenstro.norm/v1` wire format. `Clef.Rubric` composes those conventions,
+selects bounded generation guidance, reports both checked and unchecked norms,
+and supports a caller-bounded generate/judge/repair loop. Serializable checks
+are normally batched through an ordinary `norm-check` plugin; `NativeCheck`
+remains the explicit Haskell escape hatch.
+
+The umbrella `Clef` module re-exports this API except the `Occurrence`
+check-spec constructor, whose name is already used by Segno. Import
+`Clef.Norm` qualified when constructing an occurrence check. The full contract
+and checker configuration example are in the [Clef guide](../docs/clef.md).
+
 ## Runtime configuration
 
 `runTactus` reads the path in `TACTUS_RUNTIME_CONFIG`. The referenced file is
@@ -89,6 +103,10 @@ JSON with this schema:
     }
   },
   "plugins": {
+    "norm-check": {
+      "command": ["python", "D:/src/Agenstro/plugins/latex-norm-check/latex_norm_check.py"],
+      "options": {}
+    },
     "calculator": {
       "command": ["calculator-plugin"],
       "options": {}

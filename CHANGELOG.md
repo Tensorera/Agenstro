@@ -3,6 +3,26 @@
 This project is a source alpha. Versions describe checked-in contracts; they
 do not imply a package-registry release or compatibility guarantee.
 
+## Unreleased
+
+### Added
+
+- Typed Clef norms, composable rubrics, honest checked/unchecked critiques,
+  bounded guidance/refinement, and the open `agenstro.norm/v1` checker wire.
+- A Python LaTeX norm checker with strict protocol and domain fixtures.
+- Durable Tactus decision sessions with bounded `session list`, `session show`,
+  and turn-CAS `session answer` commands plus append-only answer evidence.
+- A Motivo Sessions view for findings, comparable choices, stakes, roadmaps,
+  notes, multi-session selection, and stale-turn recovery.
+
+### Compatibility and limitations
+
+- Existing workspaces without `.tactus/sessions` remain valid and list no
+  sessions; a later `tactus init` creates the additive directory.
+- Planner registration, `session advance`, unattended defaults, transcript
+  projection/mining, SARIF export, and a coordinated 0.4 version bump remain
+  staged decisions rather than placeholder APIs.
+
 ## 0.3.0 — Haskell DSL, Rust runtime, and persistent tasks
 
 ### Added

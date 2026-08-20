@@ -26,7 +26,9 @@ library
       Clef.Diagnostic
       Clef.Effect.WorkspacePaths
       Clef.Error
+      Clef.Norm
       Clef.Plugin.Protocol
+      Clef.Rubric
       Clef.Runtime
       Clef.Runtime.Config
       Clef.Segno

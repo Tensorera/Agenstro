@@ -1,0 +1,15 @@
+{
+  "name": "020-clean-source",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r2", "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "\\begin{abstract}A survey.\\end{abstract}\n\\int f(x)\\,\\mathrm{d}x\n",
+      "norms": [
+        {"id": "math.notation.upright-differential", "statement": "Use an upright differential.", "severity": "Style", "provenance": {"kind": "Authored", "author": "fixture"}, "supersedes": [], "spec": {"kind": "Absence", "specPattern": "(?<!\\\\mathrm\\{)\\bd(?=[a-zA-Z]\\b)", "specIgnoreCase": false}},
+        {"id": "venue.structure.abstract", "statement": "The article contains an abstract.", "severity": "Blocking", "provenance": {"kind": "Authored", "author": "fixture"}, "supersedes": [], "spec": {"kind": "Existence", "specPattern": "\\\\begin\\{abstract\\}", "specIgnoreCase": false}}
+      ]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": [], "checked": ["math.notation.upright-differential", "venue.structure.abstract"], "unchecked": []}
+}

@@ -6,6 +6,11 @@ import {
   LIMITS,
   runIdSchema,
 } from "./contracts";
+import {
+  sessionAnswerInputSchema,
+  sessionCurrentInputSchema,
+  sessionListInputSchema,
+} from "./session-contracts";
 
 export const IPC = {
   studioCurrent: "motivo:studio:current",
@@ -16,6 +21,9 @@ export const IPC = {
   actionCancel: "motivo:action:cancel",
   actionEvent: "motivo:action:event",
   runEvents: "motivo:run:events",
+  sessionList: "motivo:session:list",
+  sessionCurrent: "motivo:session:current",
+  sessionAnswer: "motivo:session:answer",
 } as const;
 
 export const emptyInputSchema = z.object({}).strict();
@@ -28,3 +36,5 @@ export const runEventsInputSchema = z
     limit: z.number().int().min(1).max(LIMITS.eventPage).optional(),
   })
   .strict();
+
+export { sessionAnswerInputSchema, sessionCurrentInputSchema, sessionListInputSchema };

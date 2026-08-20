@@ -15,10 +15,10 @@ parts without pretending they are one monolithic agent:
 | Name | Naming idea | Function |
 | --- | --- | --- |
 | **Agenstro** | “agent” + “orchestration” | The whole system: typed composition, execution, persistence, plugins, and visualization |
-| **Clef** | A clef gives notes a typed frame of reference | The Haskell EDSL that defines `Workflow`, typed tasks, effects, generic plugins, and persistent-task values |
-| **Tactus** | The measured pulse that turns a score into an execution | The Rust CLI/runtime that owns `.tactus`, selects scripts, supervises processes, routes events, and records diagnostics |
+| **Clef** | A clef gives notes a typed frame of reference | The Haskell EDSL that defines `Workflow`, typed tasks, effects, generic plugins, typed norms/rubrics, and persistent-task values |
+| **Tactus** | The measured pulse that turns a score into an execution | The Rust CLI/runtime that owns `.tactus`, selects scripts, supervises processes, stores sessions, routes events, and records diagnostics |
 | **Segno** | A score mark that says where execution should continue or return | The Haskell persistent-task driver that owns trigger time, cursors, attempts, leases, and business-state checkpoints |
-| **Motivo Studio** | A motif is a recognizable pattern made visible | The TypeScript/React/Electron projection for workspace health, workflows, plugins, actions, and run diagnostics |
+| **Motivo Studio** | A motif is a recognizable pattern made visible | The TypeScript/React/Electron boundary for redacted projections and typed human decisions |
 
 The metaphor describes responsibility, not hidden coupling. Clef and Segno are
 Haskell packages, Tactus is one Rust executable, Motivo is a thin desktop
@@ -34,17 +34,18 @@ Haskell workflow (Clef)
 Tactus Rust runtime ----> one-shot provider/effect/plugin processes
         |
         +----> diagnostic run journal
-        +----> Motivo Studio projection
+        +----> durable session store
+        +----> Motivo Studio projection + decision return
 
 Segno Haskell driver ----> Tactus ----> one Clef persistent-task occurrence
 ```
 
 | Component | Version | Status | Owns |
 | --- | --- | --- | --- |
-| [`clef-sdk`](clef-sdk/) | Haskell `0.3.0.0` | Current | Typed workflow composition and open plugin calls |
-| [`tactus-runtime`](tactus-runtime/) | Rust `0.3.0` | Current | Workspace, CLI, process supervision, event routing, and journals |
+| [`clef-sdk`](clef-sdk/) | Haskell `0.3.0.0` | Current | Typed workflow composition, norms/rubrics, and open plugin calls |
+| [`tactus-runtime`](tactus-runtime/) | Rust `0.3.0` | Current | Workspace, CLI, process supervision, sessions, event routing, and journals |
 | [`segno-flow`](segno-flow/) | Haskell `0.3.0.0` | **Experimental** | Single-node persistent scheduling and versioned state |
-| [`motivo-studio`](motivo-studio/) | TypeScript/Electron `0.3.0` | **Experimental** | Redacted visual projection over Tactus |
+| [`motivo-studio`](motivo-studio/) | TypeScript/Electron `0.3.0` | **Experimental** | Redacted projection and typed session answers over Tactus |
 | Local plugins | `agenstro.plugin/v1` | Open protocol | Replaceable provider, effect, trigger, or state capabilities |
 
 ## Quick installation
@@ -161,8 +162,9 @@ npm --prefix motivo-studio run install:windows
 motivo-studio 'D:\work\my-project'
 ```
 
-Motivo is not a second runtime or a general shell. It invokes Tactus and shows
-its versioned, redacted projections. See the [Motivo Studio guide](docs/motivo-studio.md).
+Motivo is not a second runtime or a general shell. It invokes Tactus, shows
+versioned redacted projections, and returns a bounded choice for a pending
+session brief. See the [Motivo Studio guide](docs/motivo-studio.md).
 
 ## Documentation
 
