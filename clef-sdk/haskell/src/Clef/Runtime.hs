@@ -242,7 +242,7 @@ data PluginTransportLimits = PluginTransportLimits
 defaultPluginTransportLimits :: PluginTransportLimits
 defaultPluginTransportLimits =
   PluginTransportLimits
-    { transportDeadlineSeconds = Just (30 * 60),
+    { transportDeadlineSeconds = Just (60 * 60),
       transportMaxRequestBytes = 1024 * 1024,
       transportMaxFrameBytes = 1024 * 1024,
       transportMaxStdoutBytes = 64 * 1024 * 1024,

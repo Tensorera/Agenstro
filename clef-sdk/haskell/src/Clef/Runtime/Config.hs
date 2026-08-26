@@ -141,4 +141,19 @@ loadRuntimeConfigFromEnv = do
   configuredPath <- lookupEnv "TACTUS_RUNTIME_CONFIG"
   case configuredPath of
     Nothing -> throwIO $ RuntimeConfigError "TACTUS_RUNTIME_CONFIG is not set"
-    Just path -> loadRuntimeConfig path
+    Just path -> ensureProviderDispatchHour <$> loadRuntimeConfig path
+
+ensureProviderDispatchHour :: RuntimeConfig -> RuntimeConfig
+ensureProviderDispatchHour config =
+  config
+    { runtimeProviders = fmap addDispatchDeadline (runtimeProviders config)
+    }
+  where
+    addDispatchDeadline provider =
+      provider
+        { providerCommand = addHour (providerCommand provider)
+        }
+    addHour command
+      | "dispatch" `elem` command && "--timeout-seconds" `notElem` command =
+          command <> ["--timeout-seconds", "3600"]
+      | otherwise = command
