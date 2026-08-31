@@ -16,7 +16,15 @@ extra-source-files:
 
 common warnings
   default-language: GHC2021
-  ghc-options:      -Wall
+  ghc-options:
+      -Wall
+      -Wcompat
+      -Widentities
+      -Wincomplete-record-updates
+      -Wincomplete-uni-patterns
+      -- Public protocol sum types intentionally expose constructor-specific fields.
+      -Wno-partial-fields
+      -Wredundant-constraints
 
 library
   import: warnings

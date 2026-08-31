@@ -1,8 +1,10 @@
 ---
 title: Build the first Agenstro workflow
 status: alpha
+owners: [documentation]
 last_verified: 2026-08-17
 applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Build the first Agenstro workflow

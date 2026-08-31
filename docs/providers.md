@@ -1,8 +1,10 @@
 ---
 title: Configure coding-agent providers
 status: alpha
+owners: [tactus]
 last_verified: 2026-08-17
 applies_to: "tactus-runtime provider adapters 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Configure coding-agent providers

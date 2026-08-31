@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+head_oid=$(git rev-parse HEAD) || exit 1
+zero_oid=0000000000000000000000000000000000000000
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+    if [ "$local_oid" != "$zero_oid" ] && [ "$local_oid" != "$head_oid" ]; then
+        echo "pre-push: refusing to validate $local_ref; only the current HEAD can be pushed with this hook" >&2
+        exit 1
+    fi
+done
+
+exec pwsh -NoProfile -File scripts/quality.ps1 -Profile Full -RequireClean -CleanIfOverGiB 5

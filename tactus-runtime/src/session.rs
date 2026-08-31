@@ -1,7 +1,8 @@
 //! Durable, bounded elicitation-session storage and answer control.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -42,6 +43,39 @@ pub struct SessionList {
     pub api: &'static str,
     /// Most recently updated sessions first.
     pub sessions: Vec<SessionView>,
+}
+
+#[derive(Debug)]
+struct RankedSession {
+    updated_unix_ms: u64,
+    session: SessionView,
+}
+
+impl PartialEq for RankedSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.updated_unix_ms == other.updated_unix_ms
+            && self.session.session_id == other.session.session_id
+    }
+}
+
+impl Eq for RankedSession {}
+
+impl Ord for RankedSession {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap keeps the greatest item at its root. Reverse the desired
+        // list order here so the least recent retained session is replaced
+        // whenever a better candidate arrives.
+        other
+            .updated_unix_ms
+            .cmp(&self.updated_unix_ms)
+            .then_with(|| self.session.session_id.cmp(&other.session.session_id))
+    }
+}
+
+impl PartialOrd for RankedSession {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Durable session state.
@@ -265,7 +299,7 @@ pub fn list(start: &Path, limit: usize) -> Result<SessionList, SessionError> {
             sessions: Vec::new(),
         });
     };
-    let mut sessions = Vec::new();
+    let mut sessions = BinaryHeap::with_capacity(limit);
     let mut bytes_read = 0u64;
     for (index, entry) in fs::read_dir(&root).map_err(SessionError::Io)?.enumerate() {
         if index >= MAX_SESSION_ENTRIES_SCANNED {
@@ -278,7 +312,7 @@ pub fn list(start: &Path, limit: usize) -> Result<SessionList, SessionError> {
         if !is_session_id(&identifier) {
             continue;
         }
-        let resolved = resolve_session_directory(&root, &identifier)?;
+        let resolved = resolve_listed_session_directory(&root, &entry)?;
         let (session, document_bytes) = read_session_counted(&resolved, &identifier)?;
         bytes_read = bytes_read.checked_add(document_bytes).ok_or_else(|| {
             SessionError::Corrupt("session list byte budget overflowed".to_owned())
@@ -288,14 +322,29 @@ pub fn list(start: &Path, limit: usize) -> Result<SessionList, SessionError> {
                 "session list exceeds the 8 MiB read budget".to_owned(),
             ));
         }
-        sessions.push(session);
+        let ranked = RankedSession {
+            updated_unix_ms: decimal_u64(&session.updated_unix_ms),
+            session,
+        };
+        if sessions.len() < limit {
+            sessions.push(ranked);
+        } else if sessions
+            .peek()
+            .is_some_and(|least_recent| ranked < *least_recent)
+        {
+            sessions.pop();
+            sessions.push(ranked);
+        }
     }
+    let mut sessions = sessions
+        .into_iter()
+        .map(|ranked| ranked.session)
+        .collect::<Vec<_>>();
     sessions.sort_by(|left, right| {
         decimal_u64(&right.updated_unix_ms)
             .cmp(&decimal_u64(&left.updated_unix_ms))
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
-    sessions.truncate(limit);
     let list = SessionList {
         api: SESSION_API,
         sessions,
@@ -440,7 +489,19 @@ fn resolve_session_directory(root: &Path, session_id: &str) -> Result<PathBuf, S
     if !has_exact_child_name(root, session_id)? {
         return Err(SessionError::NotFound);
     }
-    let path = root.join(session_id);
+    resolve_session_path(root, root.join(session_id))
+}
+
+fn resolve_listed_session_directory(
+    root: &Path,
+    entry: &fs::DirEntry,
+) -> Result<PathBuf, SessionError> {
+    // The entry came from this exact read_dir pass, so its OsString already
+    // proves exact child-name identity without rescanning the parent.
+    resolve_session_path(root, entry.path())
+}
+
+fn resolve_session_path(root: &Path, path: PathBuf) -> Result<PathBuf, SessionError> {
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1694,6 +1755,62 @@ mod tests {
                 .code(),
             "session_not_found"
         );
+    }
+
+    #[test]
+    fn list_scales_across_a_large_directory_and_retains_only_the_newest_page() {
+        const SESSION_COUNT: usize = 512;
+        const PAGE_SIZE: usize = 7;
+
+        let (_temporary, root) = initialized();
+        for index in 0..SESSION_COUNT {
+            let session_id = format!("session-scale-{index:04}");
+            let mut document = pending_document(&session_id);
+            // Adjacent pairs deliberately tie so the session-id tiebreaker is
+            // exercised at the top-K boundary as well as within the page.
+            document["updatedUnixMs"] = json!((index / 2 + 100).to_string());
+            write_session(&root, &session_id, &document);
+        }
+
+        let started = Instant::now();
+        let page = list(&root, PAGE_SIZE).expect("bounded large-directory listing");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a 512-entry listing should remain comfortably bounded"
+        );
+        assert_eq!(
+            page.sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "session-scale-0510",
+                "session-scale-0511",
+                "session-scale-0508",
+                "session-scale-0509",
+                "session-scale-0506",
+                "session-scale-0507",
+                "session-scale-0504",
+            ]
+        );
+    }
+
+    #[test]
+    fn list_still_validates_candidates_that_fall_outside_the_requested_page() {
+        let (_temporary, root) = initialized();
+        let newest_id = "session-newest";
+        let mut newest = pending_document(newest_id);
+        newest["updatedUnixMs"] = json!("1000");
+        write_session(&root, newest_id, &newest);
+
+        let corrupt_id = "session-old-corrupt";
+        let mut corrupt = pending_document(corrupt_id);
+        corrupt["updatedUnixMs"] = json!("2");
+        corrupt["label"] = json!("");
+        write_session(&root, corrupt_id, &corrupt);
+
+        let error = list(&root, 1).expect_err("discarded candidates remain validated");
+        assert_eq!(error.code(), "session_corrupt");
     }
 
     #[test]

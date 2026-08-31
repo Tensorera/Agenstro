@@ -1,0 +1,25 @@
+{
+  "name": "250-bound-without-endpoint-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r25",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "x",
+      "norms": [
+        {
+          "id": "malformed.empty-bound",
+          "statement": "Bound the number of x tokens.",
+          "severity": "Style",
+          "spec": {
+            "kind": "Occurrence",
+            "specPattern": "x",
+            "specBound": {"boundMinimum": null, "boundMaximum": null}
+          }
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.empty-bound"]}
+}

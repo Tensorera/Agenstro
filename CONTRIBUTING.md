@@ -9,6 +9,18 @@ All contributions are accepted under the repository's GNU AGPL v3.0-only
 license. Do not copy code whose license is incompatible with `AGPL-3.0-only`;
 retain required third-party notices and record new dependencies explicitly.
 
+PowerShell 7 is the repository-level task runner on both supported platforms.
+The canonical local gates are:
+
+```powershell
+./scripts/quality.ps1 -Profile Fast
+./scripts/quality.ps1 -Profile Full
+```
+
+The commands never contact a live model provider. Run
+`./scripts/quality.ps1 -Profile Bootstrap` explicitly when a checkout needs
+network-fetched tool or package dependencies.
+
 ## Ownership boundaries
 
 | Path | Ownership |
@@ -27,6 +39,7 @@ retain required third-party notices and record new dependencies explicitly.
 | `segno-flow/segno-flow.cabal` | Current Haskell package and `segno` executable |
 | `Test/` | Repository-level fixtures and publication contract tests |
 | `Build/` | Ignored generated output; tools recreate their own subdirectories |
+| `scripts/` and `.githooks/` | Canonical local quality entrypoint and opt-in Git hooks |
 
 Old Segno Python/Rust packages and their independent desktop surface are not
 current compatibility targets. Git history is the migration record.
@@ -96,8 +109,7 @@ The Cabal package uses GHC2021 and the `base` bounds in
 Run from the repository root:
 
 ```powershell
-cabal build --builddir=Build/cabal all --enable-tests
-cabal test --builddir=Build/cabal all --test-show-details=direct
+./scripts/quality.ps1 -Profile Fast
 ```
 
 ## Rust Tactus changes
@@ -109,6 +121,9 @@ Keep the runtime separated into the existing concerns:
   bounded pipes, incremental frame validation;
 - `journal`: flushed JSONL events and atomic terminal summaries;
 - `adapters`: Codex, Claude Code, OpenCode, and `workspace.paths` translations;
+- `protocol`: strict incremental `agenstro.plugin/v1` frame decoding;
+- `studio`: the versioned read-only Studio control projection;
+- `session`: validated durable decision-session storage and control commands;
 - `cli`: the public command surface and error/exit-code mapping.
 
 The public CLI contract is `init`, `list`, `prompt`, `generate`, `check`,
@@ -159,23 +174,12 @@ external effects.
 
 The checked-in Cargo configuration writes to `Build/cargo`; Cabal, MkDocs, and
 Electron Forge use sibling directories under the same ignored `Build/` root.
-Clean Cargo's configured directory in `finally` after a full validation run:
+Keep the Cargo cache during normal iteration; clean it explicitly or after it
+crosses a chosen local threshold:
 
 ```powershell
-$env:CARGO_INCREMENTAL = "0"
-$env:CARGO_PROFILE_DEV_DEBUG = "0"
-$env:CARGO_PROFILE_TEST_DEBUG = "0"
-try {
-  cargo fmt --all --check
-  cargo check -p tactus-runtime --all-targets --locked
-  cargo test -p tactus-runtime --locked
-  cargo clippy -p tactus-runtime --all-targets --locked -- -D warnings
-} finally {
-  cargo clean
-  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
-}
+./scripts/quality.ps1 -Profile Full -CleanIfOverGiB 5
+./scripts/quality.ps1 -Profile Clean
 ```
 
 Use package-scoped checks while iterating. Run broader workspace checks only
@@ -185,13 +189,15 @@ For Motivo Studio changes, exercise every TypeScript boundary and the packaged
 Electron asset graph:
 
 ```powershell
-npm --prefix motivo-studio ci
 npm --prefix motivo-studio run format:check
 npm --prefix motivo-studio run lint
 npm --prefix motivo-studio run typecheck
 npm --prefix motivo-studio test
 npm --prefix motivo-studio run package
 ```
+
+`npm ci` belongs to the explicit Bootstrap or clean Release path rather than
+every warm-cache iteration.
 
 These tests use a fake Tactus process. Never put provider credentials into the
 desktop test or packaging environment.
@@ -234,10 +240,11 @@ remain excluded, but must not be presented as current support.
 - Update `docs/troubleshooting.md` for reproducible user-facing failures.
 - Update `docs/roadmap.md` when a surface or release gate changes.
 
-Validate navigation and links:
+`Fast` checks the metadata schema and local link targets. `Full` additionally
+renders the strict MkDocs navigation:
 
 ```powershell
-python -m mkdocs build --strict
+./scripts/quality.ps1 -Profile Full
 ```
 
 Python in these repository checks belongs to MkDocs and the optional reference
@@ -275,3 +282,23 @@ Keep a change scoped to one architectural concern. State:
 
 Passing tests are evidence for the exercised behavior, not a claim that
 arbitrary generated workflows are safe, deterministic, or replayable.
+
+## Commit messages
+
+Use Conventional Commits for new work: `feat(scope):`, `fix(scope):`,
+`docs(scope):`, `test(scope):`, `refactor(scope):`, `ci(scope):`, or
+`chore(scope):`. Keep the subject imperative and name the architectural
+surface when one component owns the change.
+
+The optional tracked hooks call the same repository gates. Install them for
+this checkout with:
+
+```powershell
+./scripts/install-hooks.ps1
+```
+
+The pre-push hook runs `Full` and removes only this checkout's `Build/cargo`
+target when it has grown beyond 5 GiB. Cargo's shared download cache is left
+alone. It requires a clean worktree and accepts only the current `HEAD` as a
+non-deletion push source; pre-commit rejects unstaged or untracked source so the
+files tested are the files being committed.

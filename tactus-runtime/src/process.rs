@@ -1061,6 +1061,11 @@ mod tests {
     }
 
     #[test]
+    fn process_limits_keep_the_safe_default_stdout_budget() {
+        assert_eq!(ProcessLimits::default().max_stdout_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
     fn stderr_reader_failure_is_observation_only() {
         let result = capture_stderr_reader(FaultyDiagnosticReader, 1024);
         assert!(result.is_err());

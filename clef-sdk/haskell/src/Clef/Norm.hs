@@ -18,11 +18,14 @@ module Clef.Norm
     Locus (..),
     Violation (..),
     violation,
+    validateLocus,
 
     -- * Serialisable checks
     CheckSpec (..),
     Projection,
     Check (..),
+    maxNormPatternBytes,
+    validateCheckSpec,
 
     -- * Norms
     Provenance (..),
@@ -39,11 +42,13 @@ module Clef.Norm
     NormCatalogue (..),
     NormCheckRequest (..),
     NormCheckResult (..),
+    maxNormCheckSourceBytes,
+    validateNormCheckRequest,
     validateNormCheckResult,
   )
 where
 
-import Control.Monad (unless, when)
+import Control.Monad (forM_, unless, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -59,16 +64,28 @@ import Data.Aeson
   )
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser)
+import qualified Data.ByteString as ByteString
 import Data.List (find)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isJust)
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import Clef.Workflow (Workflow)
 
 normApi :: Text
 normApi = "agenstro.norm/v1"
+
+-- | Norm sources are bounded independently of the generic plugin envelope so
+-- metadata and JSON escaping still have room inside the transport request.
+maxNormCheckSourceBytes :: Int
+maxNormCheckSourceBytes = 512 * 1024
+
+-- | A pattern is data exchanged between regex implementations.  A compact
+-- byte bound prevents parser abuse without claiming one shared regex dialect.
+maxNormPatternBytes :: Int
+maxNormPatternBytes = 4 * 1024
 
 -- | Stable, citable identity.  Dotted names are recommended by the wire
 -- profile, for example @math.notation.upright-differential@.
@@ -132,9 +149,18 @@ instance FromJSON Bound where
   parseJSON = withObject "norm bound" $ \objectValue -> do
     minimumValue <- objectValue .:? "boundMinimum"
     maximumValue <- objectValue .:? "boundMaximum"
-    case (minimumValue, maximumValue) of
-      (Just low, Just high) | low > high -> fail "boundMinimum must not exceed boundMaximum"
-      _ -> pure (Bound minimumValue maximumValue)
+    either (fail . Text.unpack) pure (validateBound (Bound minimumValue maximumValue))
+
+validateBound :: Bound -> Either Text Bound
+validateBound selectedBound = do
+  unlessEither
+    (isJust (boundMinimum selectedBound) || isJust (boundMaximum selectedBound))
+    "a norm bound must define at least one non-null endpoint"
+  case (boundMinimum selectedBound, boundMaximum selectedBound) of
+    (Just low, Just high) ->
+      unlessEither (low <= high) "boundMinimum must not exceed boundMaximum"
+    _ -> pure ()
+  pure selectedBound
 
 -- | One-based, inclusive coordinates, matching the Agenstro SARIF profile.
 -- This type must not be reused directly for zero-based LSP ranges.
@@ -167,13 +193,7 @@ instance FromJSON Locus where
     endLine <- objectValue .:? "endLine"
     endColumn <- objectValue .:? "endColumn"
     snippet <- objectValue .:? "snippet"
-    mapM_ positiveCoordinate [startLine, startColumn, endLine, endColumn]
-    case (startLine, startColumn, endLine, endColumn) of
-      (Just firstLine, Just firstColumn, Just lastLine, Just lastColumn) ->
-        when ((lastLine, lastColumn) < (firstLine, firstColumn)) $
-          fail "locus end must not precede its start"
-      _ -> pure ()
-    pure
+    either (fail . Text.unpack) pure . validateLocus $
       Locus
         { locusArtifact = artifact,
           locusStartLine = startLine,
@@ -182,10 +202,43 @@ instance FromJSON Locus where
           locusEndColumn = endColumn,
           locusSnippet = snippet
         }
-    where
-      positiveCoordinate Nothing = pure ()
-      positiveCoordinate (Just coordinate) =
-        unless (coordinate > 0) $ fail "locus coordinates must be positive and one-based"
+
+-- | Validate the legal one-based coordinate combinations used by norm-v1.
+-- A column needs its corresponding line, and any end position needs a start
+-- line.  Partial line-only regions remain valid SARIF-shaped locations.
+validateLocus :: Locus -> Either Text Locus
+validateLocus selectedLocus = do
+  unlessEither (not (Text.null (locusArtifact selectedLocus))) "locus artifact must not be empty"
+  mapM_ positiveCoordinate coordinates
+  unlessEither
+    (not (isJust (locusStartColumn selectedLocus)) || isJust (locusStartLine selectedLocus))
+    "locus startColumn requires startLine"
+  unlessEither
+    (not (isJust (locusEndLine selectedLocus)) || isJust (locusStartLine selectedLocus))
+    "locus endLine requires startLine"
+  unlessEither
+    (not (isJust (locusEndColumn selectedLocus)) || isJust (locusEndLine selectedLocus))
+    "locus endColumn requires endLine"
+  case (locusStartLine selectedLocus, locusEndLine selectedLocus) of
+    (Just firstLine, Just lastLine) -> do
+      unlessEither (lastLine >= firstLine) "locus end line must not precede its start line"
+      case (locusStartColumn selectedLocus, locusEndColumn selectedLocus) of
+        (Just firstColumn, Just lastColumn)
+          | firstLine == lastLine ->
+              unlessEither (lastColumn >= firstColumn) "locus end column must not precede its start column"
+        _ -> pure ()
+    _ -> pure ()
+  pure selectedLocus
+  where
+    coordinates =
+      [ locusStartLine selectedLocus,
+        locusStartColumn selectedLocus,
+        locusEndLine selectedLocus,
+        locusEndColumn selectedLocus
+      ]
+    positiveCoordinate Nothing = pure ()
+    positiveCoordinate (Just coordinate) =
+      unlessEither (coordinate > 0) "locus coordinates must be positive and one-based"
 
 data Violation = Violation
   { violationNorm :: NormId,
@@ -293,7 +346,8 @@ instance ToJSON CheckSpec where
 instance FromJSON CheckSpec where
   parseJSON = withObject "norm check specification" $ \objectValue -> do
     kind <- objectValue .: "kind"
-    case (kind :: Text) of
+    when (Text.null kind) $ fail "norm check kind must not be empty"
+    selectedSpec <- case (kind :: Text) of
       "Existence" ->
         Existence
           <$> objectValue .: "specPattern"
@@ -309,10 +363,50 @@ instance FromJSON CheckSpec where
       "ExternalCheck" -> do
         pluginName <- objectValue .: "specPlugin"
         method <- objectValue .: "specMethod"
-        when (Text.null pluginName || Text.null method) $
-          fail "ExternalCheck plugin and method must not be empty"
         ExternalCheck pluginName method <$> objectValue .:? "specParams"
       other -> pure (UnknownCheckSpec other (KeyMap.delete "kind" objectValue))
+    either (fail . Text.unpack) pure (validateCheckSpec selectedSpec)
+
+-- | Validate the language-neutral shape of an authored check.  Regex syntax
+-- remains the responsibility of the selected checker because norm-v1 does not
+-- mandate a regex dialect.
+validateCheckSpec :: CheckSpec -> Either Text CheckSpec
+validateCheckSpec selectedSpec = do
+  case selectedSpec of
+    Existence patternText _ -> validatePattern "Existence" patternText
+    Absence patternText _ -> validatePattern "Absence" patternText
+    Occurrence patternText selectedBound -> do
+      validatePattern "Occurrence" patternText
+      _ <- validateBound selectedBound
+      pure ()
+    Consistency groups -> do
+      unlessEither (not (null groups)) "Consistency must define at least one group"
+      forM_ (zip [(0 :: Int) ..] groups) $ \(index, group) -> do
+        unlessEither
+          (length group >= 2 && Set.size (Set.fromList group) >= 2)
+          ("Consistency group " <> Text.pack (show index) <> " must contain at least two distinct patterns")
+        mapM_ (validatePattern "Consistency") group
+    Sequence ordered -> do
+      unlessEither (not (null ordered)) "Sequence must define at least one pattern"
+      mapM_ (validatePattern "Sequence") ordered
+    Metric metricName selectedBound -> do
+      unlessEither (not (Text.null metricName)) "Metric name must not be empty"
+      _ <- validateBound selectedBound
+      pure ()
+    ExternalCheck pluginName method _ ->
+      unlessEither
+        (not (Text.null pluginName) && not (Text.null method))
+        "ExternalCheck plugin and method must not be empty"
+    UnknownCheckSpec kind _ ->
+      unlessEither (not (Text.null kind)) "norm check kind must not be empty"
+  pure selectedSpec
+
+validatePattern :: Text -> Text -> Either Text ()
+validatePattern kind patternText = do
+  unlessEither (not (Text.null patternText)) (kind <> " pattern must not be empty")
+  unlessEither
+    (utf8Length patternText <= maxNormPatternBytes)
+    (kind <> " pattern exceeds the " <> Text.pack (show maxNormPatternBytes) <> "-byte limit")
 
 -- | How an artefact is projected into source text for a serialisable checker.
 type Projection artifact = artifact -> Text
@@ -512,8 +606,23 @@ instance FromJSON NormCheckRequest where
     artifact <- objectValue .: "artifact"
     source <- objectValue .: "source"
     records <- objectValue .: "norms"
-    ensureUniqueIds "norm check request" (recordId <$> records)
-    pure (NormCheckRequest artifact source records)
+    either (fail . Text.unpack) pure (validateNormCheckRequest (NormCheckRequest artifact source records))
+
+-- | Validate a request whether it came from JSON or was constructed directly
+-- by a Haskell rubric.
+validateNormCheckRequest :: NormCheckRequest -> Either Text NormCheckRequest
+validateNormCheckRequest request = do
+  unlessEither (not (Text.null (checkRequestArtifact request))) "norm check artifact must not be empty"
+  unlessEither
+    (utf8Length (checkRequestSource request) <= maxNormCheckSourceBytes)
+    ( "norm check source exceeds the "
+        <> Text.pack (show maxNormCheckSourceBytes)
+        <> "-byte limit"
+    )
+  ensureUniqueIdsEither "norm check request" (recordId <$> checkRequestNorms request)
+  forM_ (checkRequestNorms request) $ \record ->
+    maybe (pure ()) (fmap (const ()) . validateCheckSpec) (recordSpec record)
+  pure request
 
 data NormCheckResult = NormCheckResult
   { checkResultArtifact :: Text,
@@ -579,7 +688,12 @@ validateResultShape result = do
           "every violation must cite a checked norm"
     )
     (checkResultViolations result)
+  mapM_ validateViolationShape (checkResultViolations result)
   pure result
+
+validateViolationShape :: Violation -> Either Text ()
+validateViolationShape selectedViolation =
+  maybe (pure ()) (fmap (const ()) . validateLocus) (violationLocus selectedViolation)
 
 validateViolation :: [NormRecord] -> Violation -> Either Text ()
 validateViolation records selectedViolation =
@@ -602,3 +716,6 @@ ensureUniqueIdsEither label identities =
 
 unlessEither :: Bool -> Text -> Either Text ()
 unlessEither condition message = unless condition (Left message)
+
+utf8Length :: Text -> Int
+utf8Length = ByteString.length . Text.Encoding.encodeUtf8

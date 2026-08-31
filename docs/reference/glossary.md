@@ -1,8 +1,10 @@
 ---
 title: Agenstro glossary
 status: alpha
+owners: [documentation]
 last_verified: 2026-08-17
 applies_to: "Agenstro 0.3"
+platforms: [windows, ubuntu]
 ---
 
 # Agenstro glossary

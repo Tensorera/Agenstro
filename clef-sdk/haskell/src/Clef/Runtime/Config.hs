@@ -8,6 +8,7 @@ module Clef.Runtime.Config
     decodeRuntimeConfig,
     loadRuntimeConfig,
     loadRuntimeConfigFromEnv,
+    providerDispatchDeadlineSeconds,
   )
 where
 
@@ -141,19 +142,28 @@ loadRuntimeConfigFromEnv = do
   configuredPath <- lookupEnv "TACTUS_RUNTIME_CONFIG"
   case configuredPath of
     Nothing -> throwIO $ RuntimeConfigError "TACTUS_RUNTIME_CONFIG is not set"
-    Just path -> ensureProviderDispatchHour <$> loadRuntimeConfig path
+    Just path -> ensureProviderDispatchDeadline <$> loadRuntimeConfig path
 
-ensureProviderDispatchHour :: RuntimeConfig -> RuntimeConfig
-ensureProviderDispatchHour config =
+-- | The inner Tactus dispatch deadline.  Clef's provider transport supervisor
+-- allows a further fifteen minutes for dispatch to terminate its process tree,
+-- flush a terminal frame, and exit before the outer boundary is reached.
+providerDispatchDeadlineSeconds :: Int
+providerDispatchDeadlineSeconds = 3 * 60 * 60 + 45 * 60
+
+ensureProviderDispatchDeadline :: RuntimeConfig -> RuntimeConfig
+ensureProviderDispatchDeadline config =
   config
     { runtimeProviders = fmap addDispatchDeadline (runtimeProviders config)
     }
   where
     addDispatchDeadline provider =
       provider
-        { providerCommand = addHour (providerCommand provider)
+        { providerCommand = addDeadlineArgument (providerCommand provider)
         }
-    addHour command
-      | "dispatch" `elem` command && "--timeout-seconds" `notElem` command =
-          command <> ["--timeout-seconds", "3600"]
+    addDeadlineArgument command
+      | "dispatch" `elem` command && not (any isDeadlineArgument command) =
+          command <> ["--timeout-seconds", Text.pack (show providerDispatchDeadlineSeconds)]
       | otherwise = command
+    isDeadlineArgument argument =
+      argument == "--timeout-seconds"
+        || "--timeout-seconds=" `Text.isPrefixOf` argument

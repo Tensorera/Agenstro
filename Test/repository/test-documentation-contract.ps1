@@ -9,36 +9,13 @@ $publishedFiles = @(
     "clef-sdk/README.md",
     "tactus-runtime/README.md",
     "motivo-studio/README.md",
-    "segno-flow/README.md",
-    "docs/index.md",
-    "docs/install.md",
-    "docs/getting-started.md",
-    "docs/clef.md",
-    "docs/tactus-workspace.md",
-    "docs/providers.md",
-    "docs/plugin-authoring.md",
-    "docs/observability.md",
-    "docs/operations.md",
-    "docs/architecture.md",
-    "docs/segno.md",
-    "docs/motivo-studio.md",
-    "docs/troubleshooting.md",
-    "docs/roadmap.md",
-    "docs/design-bundle-status.md",
-    "docs/reference/cli-v0.3.md",
-    "docs/reference/norm-v1.md",
-    "docs/reference/plugin-protocol-v1.md",
-    "docs/reference/session-control-v1.md",
-    "docs/reference/segno-plugin-wire-v1.md",
-    "docs/reference/studio-control-v1.md",
-    "docs/reference/support-matrix.md",
-    "docs/reference/glossary.md",
-    "docs/adr/0003-haskell-dsl-and-local-plugins.md",
-    "docs/adr/0004-haskell-segno-persistent-tasks.md",
-    "docs/adr/0005-norms-rubrics-and-refinement.md",
-    "docs/adr/0006-motivo-session-pattern.md",
-    "docs/migrations/0.2-to-haskell-0.3.md",
-    "docs/how-to/write-documentation.md"
+    "segno-flow/README.md"
+) + @(
+    Get-ChildItem -LiteralPath (Join-Path $repositoryRoot "docs") -Recurse -File -Filter "*.md" |
+        ForEach-Object {
+            [System.IO.Path]::GetRelativePath($repositoryRoot, $_.FullName).Replace('\', '/')
+        } |
+        Sort-Object
 )
 
 function Assert-Contract {
@@ -68,6 +45,44 @@ function Get-MarkdownH1Count {
     return $count
 }
 
+function Get-FrontMatter {
+    param(
+        [Parameter(Mandatory)] [string] $RelativePath,
+        [Parameter(Mandatory)] [string] $Text
+    )
+
+    $lines = $Text -split "\r?\n"
+    Assert-Contract ($lines.Count -gt 2 -and $lines[0] -eq '---') "Missing front matter in $RelativePath"
+    $end = -1
+    for ($index = 1; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -eq '---') {
+            $end = $index
+            break
+        }
+    }
+    Assert-Contract ($end -gt 1) "Unterminated front matter in $RelativePath"
+
+    $metadata = @{}
+    foreach ($line in $lines[1..($end - 1)]) {
+        if ($line -match '^([a-z_]+):\s*(.*)$') {
+            Assert-Contract (-not $metadata.ContainsKey($Matches[1])) "Duplicate metadata key in ${RelativePath}: $($Matches[1])"
+            $metadata[$Matches[1]] = $Matches[2].Trim()
+        }
+    }
+    return $metadata
+}
+
+function Get-InlineList {
+    param(
+        [Parameter(Mandatory)] [string] $RelativePath,
+        [Parameter(Mandatory)] [string] $Key,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    Assert-Contract ($Value -match '^\[([^]]+)\]$') "Expected an inline list for $Key in $RelativePath"
+    return @($Matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
 $documents = @{}
 foreach ($relativePath in $publishedFiles) {
     $path = Join-Path $repositoryRoot $relativePath
@@ -75,6 +90,51 @@ foreach ($relativePath in $publishedFiles) {
     $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
     Assert-Contract ((Get-MarkdownH1Count $text) -eq 1) "Expected exactly one H1 in $relativePath"
     $documents[$relativePath] = $text
+}
+
+$metadataExemptFiles = @(
+    "docs/index.md",
+    "docs/how-to/write-documentation.md",
+    "docs/adr/0003-haskell-dsl-and-local-plugins.md",
+    "docs/adr/0004-haskell-segno-persistent-tasks.md",
+    "docs/adr/0005-norms-rubrics-and-refinement.md",
+    "docs/adr/0006-motivo-session-pattern.md"
+)
+$allowedStatuses = @("alpha", "experimental", "historical", "working decision record")
+$allowedPlatforms = @("windows", "ubuntu", "all")
+$requiredMetadata = @("title", "status", "owners", "last_verified", "applies_to", "platforms")
+foreach ($relativePath in $publishedFiles | Where-Object { $_.StartsWith('docs/') -and $_ -notin $metadataExemptFiles }) {
+    $metadata = Get-FrontMatter $relativePath $documents[$relativePath]
+    foreach ($key in $requiredMetadata) {
+        Assert-Contract ($metadata.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace($metadata[$key])) "Missing metadata key '$key' in $relativePath"
+    }
+    Assert-Contract ($metadata.status -in $allowedStatuses) "Unsupported status '$($metadata.status)' in $relativePath"
+
+    $owners = Get-InlineList $relativePath "owners" $metadata.owners
+    Assert-Contract ($owners.Count -gt 0) "Expected at least one owner in $relativePath"
+    foreach ($owner in $owners) {
+        Assert-Contract ($owner -match '^[a-z0-9-]+$') "Invalid owner '$owner' in $relativePath"
+    }
+
+    $platforms = Get-InlineList $relativePath "platforms" $metadata.platforms
+    Assert-Contract ($platforms.Count -gt 0) "Expected at least one platform in $relativePath"
+    foreach ($platform in $platforms) {
+        Assert-Contract ($platform -in $allowedPlatforms) "Unsupported platform '$platform' in $relativePath"
+    }
+
+    $verifiedDate = [datetime]::MinValue
+    $dateValid = [datetime]::TryParseExact(
+        $metadata.last_verified,
+        'yyyy-MM-dd',
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::AssumeUniversal,
+        [ref]$verifiedDate
+    )
+    Assert-Contract $dateValid "Invalid last_verified date in ${relativePath}: $($metadata.last_verified)"
+    Assert-Contract ($verifiedDate.Date -le [datetime]::UtcNow.Date.AddDays(1)) "Future last_verified date in ${relativePath}: $($metadata.last_verified)"
+    if (([datetime]::UtcNow.Date - $verifiedDate.Date).TotalDays -gt 90) {
+        Write-Warning "Documentation verification is older than 90 days: $relativePath ($($metadata.last_verified))"
+    }
 }
 
 $publishedText = ($documents.Values -join "`n")

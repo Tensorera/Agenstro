@@ -1,3 +1,12 @@
+---
+title: Motivo Studio
+status: alpha
+owners: [motivo]
+last_verified: 2026-08-31
+applies_to: "Motivo Studio 0.3.0 and Tactus control APIs"
+platforms: [windows, ubuntu]
+---
+
 # Motivo Studio
 
 Motivo Studio `0.3.0` is a TypeScript, React, and Electron visualization layer

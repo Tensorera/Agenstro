@@ -1,8 +1,10 @@
 ---
 title: Agenstro CLI reference
 status: alpha
+owners: [tactus]
 last_verified: 2026-08-20
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Agenstro CLI reference

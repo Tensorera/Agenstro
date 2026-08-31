@@ -15,7 +15,17 @@ documented `Metric` names. Guidance-only norms, unsupported `kind` values,
 unknown metrics, malformed spec shapes, and malformed regular expressions are
 returned in `unchecked`; they are never reported as passing. Patterns use
 Python `re` with `MULTILINE`, so catalogues must not assume a different regex
-dialect.
+dialect. Regex compilation and matching run in a short-lived worker with a
+one-second deadline. This portable process boundary can actually terminate
+catastrophic backtracking on Windows and Unix without another regex package;
+a valid but unusually expensive pattern is conservatively reported as
+`unchecked`.
+
+The checker accepts at most 512 KiB of UTF-8 source and 4 KiB per UTF-8
+pattern. A bound needs at least one non-null endpoint. Every `Consistency`
+group needs at least two distinct, non-empty patterns. The complete plugin
+request is capped at 1 MiB. These limits match Clef's norm-v1 validation and
+leave room for catalogue metadata inside the generic transport envelope.
 
 The entrypoint enforces the repository's strict JSON domain, including
 duplicate-key and non-finite/overflow/underflow rejection, and preserves both

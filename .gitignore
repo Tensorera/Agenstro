@@ -48,7 +48,7 @@ secretdoc/
 
 # Historical/local runtime state and generated deliveries
 **/.clef-state/
-# Preserve locally generated state from pre-Agentro checkouts without tracking it.
+# Preserve locally generated state from historical pre-0.3 checkouts.
 **/.harness-state/
 **/.adapter-probe/
 **/.run-control/

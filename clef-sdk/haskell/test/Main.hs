@@ -282,6 +282,39 @@ testNormWire = do
     Left _ -> pure ()
     Right _ -> failTest "an unknown norm catalogue api was accepted"
 
+  assertValidationFailure
+    "empty bound"
+    "at least one"
+    (validateCheckSpec (Metric "characters" (Bound Nothing Nothing)))
+  assertValidationFailure
+    "empty pattern"
+    "must not be empty"
+    (validateCheckSpec (Absence "" False))
+  assertValidationFailure
+    "empty open check kind"
+    "kind must not be empty"
+    (validateCheckSpec (Norm.UnknownCheckSpec "" mempty))
+  assertValidationFailure
+    "oversized pattern"
+    "byte limit"
+    (validateCheckSpec (Existence (Text.replicate (maxNormPatternBytes + 1) "x") False))
+  assertValidationFailure
+    "degenerate consistency group"
+    "distinct patterns"
+    (validateCheckSpec (Consistency [["same", "same"]]))
+  let invalidLocus = Locus "article.tex" (Just 1) Nothing Nothing (Just 2) Nothing
+  assertValidationFailure "end column without end line" "endColumn requires endLine" (validateLocus invalidLocus)
+  assertEqual
+    "line-only locus remains valid"
+    (Right (Locus "article.tex" (Just 2) Nothing (Just 4) Nothing Nothing))
+    (validateLocus (Locus "article.tex" (Just 2) Nothing (Just 4) Nothing Nothing))
+  assertValidationFailure
+    "oversized norm source"
+    "byte limit"
+    ( validateNormCheckRequest
+        (NormCheckRequest "article.tex" (Text.replicate (maxNormCheckSourceBytes + 1) "x") [durable])
+    )
+
 testNormRubric :: FilePath -> FilePath -> IO ()
 testNormRubric workspace executable =
   withRuntime (testConfig workspace executable) $ \runtime -> do
@@ -353,6 +386,15 @@ testNormRubric workspace executable =
       failTest "severity selector omitted the highest-severity guidance"
     unless (Text.length guidance <= 200) $
       failTest "rubric guidance exceeded its explicit budget"
+    let invalidPatternNorm :: Norm Text
+        invalidPatternNorm =
+          (norm (NormId "text.invalid.empty-pattern") "Invalid authored pattern." Style)
+            { normCheck = Just (SpecCheck id (Absence "" False))
+            }
+    assertWorkflowError
+      "rubric validates directly constructed specs"
+      (\case RequirementFailed message -> "pattern must not be empty" `Text.isInfixOf` message; _ -> False)
+      (runWorkflow runtime (judgeWith checker (rubric [invalidPatternNorm]) "article"))
 
 testNormRefinement :: FilePath -> FilePath -> IO ()
 testNormRefinement workspace executable =
@@ -386,6 +428,21 @@ testNormRefinement workspace executable =
           runtime
           (refineWith defaultNormChecker (policy {refineMaxRounds = 0}) (rubric [nativeNorm]) generate)
       )
+    let invalidLocusNorm :: Norm Text
+        invalidLocusNorm =
+          (norm (NormId "native.invalid-locus") "Return a valid location." Style)
+            { normCheck =
+                Just . NativeCheck $ \_ ->
+                  pure
+                    [ (violation (NormId "native.invalid-locus") Style "invalid location")
+                        { violationLocus = Just (Locus "article.tex" Nothing (Just 1) Nothing Nothing Nothing)
+                        }
+                    ]
+            }
+    assertWorkflowError
+      "native checks validate loci"
+      (\case RequirementFailed message -> "invalid norm id, severity, or locus" `Text.isInfixOf` message; _ -> False)
+      (runWorkflow runtime (judge (rubric [invalidLocusNorm]) "article"))
 
 testRuntimeConfig :: FilePath -> FilePath -> IO ()
 testRuntimeConfig executable workspace = do
@@ -427,6 +484,22 @@ testRuntimeConfig executable workspace = do
             "effects" .= object [],
             "instructions" .= ("" :: Text)
           ]
+      dispatchConfig =
+        object
+          [ "api" .= ("clef.runtime/v1" :: Text),
+            "workspace" .= workspace,
+            "default_provider" .= ("dispatch-default" :: Text),
+            "providers"
+              .= object
+                [ "dispatch-default" .= object ["command" .= ([Text.pack executable, "dispatch", "--provider", "fake"] :: [Text])],
+                  "dispatch-explicit" .= object ["command" .= ([Text.pack executable, "dispatch", "--timeout-seconds", "37"] :: [Text])],
+                  "dispatch-equals" .= object ["command" .= ([Text.pack executable, "dispatch", "--timeout-seconds=41"] :: [Text])],
+                  "ordinary" .= object ["command" .= ([Text.pack executable, "--fake-plugin"] :: [Text])]
+                ],
+            "effects" .= object ["dispatch-effect" .= object ["command" .= ([Text.pack executable, "dispatch"] :: [Text])]],
+            "plugins" .= object ["dispatch-plugin" .= object ["command" .= ([Text.pack executable, "dispatch"] :: [Text])]],
+            "instructions" .= ("" :: Text)
+          ]
   case decodeRuntimeConfig (strictEncode valid) of
     Left workflowError -> failTest $ "valid config failed: " <> show workflowError
     Right config -> do
@@ -445,6 +518,50 @@ testRuntimeConfig executable workspace = do
   case decodeRuntimeConfig "{\"options\":1e-999}" of
     Left (RuntimeConfigError _) -> pure ()
     other -> failTest $ "underflowing runtime number should fail, received " <> show other
+  bracket
+    (do
+       configPath <- temporaryFile workspace "clef-runtime-config.json"
+       ByteString.writeFile configPath (strictEncode dispatchConfig)
+       pure configPath)
+    removeIfPresent
+    (\configPath -> do
+       loaded <- withEnvironment [("TACTUS_RUNTIME_CONFIG", configPath)] loadRuntimeConfigFromEnv
+       let injected = Text.pack (show providerDispatchDeadlineSeconds)
+       assertEqual
+         "dispatch receives a finite inner deadline"
+         [Text.pack executable, "dispatch", "--provider", "fake", "--timeout-seconds", injected]
+         (providerCommandFor "dispatch-default" loaded)
+       assertEqual
+         "split explicit dispatch deadline is preserved"
+         [Text.pack executable, "dispatch", "--timeout-seconds", "37"]
+         (providerCommandFor "dispatch-explicit" loaded)
+       assertEqual
+         "equals-form explicit dispatch deadline is preserved"
+         [Text.pack executable, "dispatch", "--timeout-seconds=41"]
+         (providerCommandFor "dispatch-equals" loaded)
+       assertEqual
+         "non-dispatch provider command is unchanged"
+         [Text.pack executable, "--fake-plugin"]
+         (providerCommandFor "ordinary" loaded)
+       assertEqual
+         "effect dispatch command is not provider policy"
+         (Just [Text.pack executable, "dispatch"])
+         (effectCommand <$> Map.lookup "dispatch-effect" (runtimeEffects loaded))
+       assertEqual
+         "generic plugin dispatch command is not provider policy"
+         (Just [Text.pack executable, "dispatch"])
+         (pluginCommand <$> Map.lookup "dispatch-plugin" (runtimePlugins loaded)))
+  assertEqual
+    "generic plugin deadline remains bounded to one hour"
+    (Just (60 * 60))
+    (transportDeadlineSeconds defaultPluginTransportLimits)
+  assertEqual
+    "provider outer deadline leaves cleanup headroom"
+    (Just (providerDispatchDeadlineSeconds + 15 * 60))
+    (transportDeadlineSeconds defaultProviderTransportLimits)
+  where
+    providerCommandFor name config =
+      maybe [] providerCommand (Map.lookup name (runtimeProviders config))
 
 testProtocolRules :: IO ()
 testProtocolRules = do
@@ -1996,6 +2113,12 @@ assertWorkflowError label predicate action = do
     Left workflowError | predicate workflowError -> pure ()
     Left workflowError -> failTest $ label <> ": unexpected WorkflowError " <> show workflowError
     Right _ -> failTest $ label <> ": expected WorkflowError, action succeeded"
+
+assertValidationFailure :: String -> Text -> Either Text value -> IO ()
+assertValidationFailure label expected result = case result of
+  Left message | expected `Text.isInfixOf` message -> pure ()
+  Left message -> failTest $ label <> ": unexpected validation message " <> Text.unpack message
+  Right _ -> failTest $ label <> ": validation unexpectedly succeeded"
 
 assertEqual :: (Eq value, Show value) => String -> value -> value -> IO ()
 assertEqual label expected actual =

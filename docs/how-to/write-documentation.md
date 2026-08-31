@@ -6,6 +6,34 @@ The content model follows the
 `mkdocs.yml` provides the explicit
 [MkDocs navigation](https://www.mkdocs.org/user-guide/writing-your-docs/#configure-pages-and-navigation).
 
+## Declare page metadata
+
+Every current user guide, explanation, migration, and reference page under
+`docs/` starts with this YAML front matter:
+
+```yaml
+---
+title: Human-readable page title
+status: alpha
+owners: [tactus]
+last_verified: 2026-08-31
+applies_to: "tactus-runtime 0.3.0"
+platforms: [windows, ubuntu]
+---
+```
+
+- `status` is `alpha`, `experimental`, `historical`, or
+  `working decision record`.
+- `owners` names one or more architectural concerns, not individual people.
+- `last_verified` records a deliberate content review as an ISO date. The
+  contract warns after 90 days; age alone does not prove a page is wrong.
+- `applies_to` names the contract, component, or version range the page covers.
+- `platforms` uses `windows`, `ubuntu`, or `all`.
+
+The site index, ADRs, and this documentation-authoring guide are structural
+pages with an explicit metadata exemption. ADR status remains part of the ADR
+content rather than mutable front matter.
+
 ## Choose one document type
 
 | Type | Reader need | Required style |
@@ -67,8 +95,16 @@ When a public command, field, state transition, or ownership boundary changes:
 From the repository root:
 
 ```powershell
-python -m mkdocs build --strict
+./scripts/quality.ps1 -Profile Full
 ```
 
-The build must contain every current page in navigation and must not report a
-broken relative link or missing anchor.
+For a documentation-only iteration, run the two underlying checks directly:
+
+```powershell
+python -m mkdocs build --strict
+./Test/repository/test-documentation-contract.ps1
+```
+
+The build must contain every current page in navigation. The contract discovers
+every Markdown page under `docs/` and validates its metadata, canonical claims,
+and local links, so a newly added page cannot silently bypass the schema.

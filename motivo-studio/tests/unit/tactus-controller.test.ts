@@ -273,7 +273,7 @@ if (args.includes("--json")) {
     controller.dispose();
   });
 
-  it("does not overlap control queries and actions", async () => {
+  it("serializes overlapping control queries without allowing an action to overtake them", async () => {
     const fixture = await fakeTactus(`
 const args = process.argv.slice(2);
 const success = (command, data) => ({
@@ -311,6 +311,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     });
     const view = await controller.open(fixture.root);
 
+    const pendingRefresh = controller.refresh();
     const pendingList = controller.sessions({ workspaceHandle: view.handle, limit: 25 });
     let controlBusy: unknown;
     try {
@@ -319,7 +320,10 @@ if (args[0] === "studio" && args[1] === "inspect") {
       controlBusy = error;
     }
     expect(controlBusy).toMatchObject({ detail: { code: "control_busy", category: "busy" } });
-    await expect(pendingList).resolves.toMatchObject({ sessions: [] });
+    await expect(Promise.all([pendingRefresh, pendingList])).resolves.toMatchObject([
+      { handle: view.handle },
+      { sessions: [] },
+    ]);
 
     const action = controller.start({ kind: "run" });
     await expect(

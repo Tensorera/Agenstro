@@ -1,8 +1,10 @@
 ---
 title: Segno trigger and state plugin wire v1
 status: alpha
+owners: [segno]
 last_verified: 2026-08-16
 applies_to: "Segno Flow Haskell 0.3.0.0"
+platforms: [windows, ubuntu]
 ---
 
 # Segno trigger and state plugin wire v1

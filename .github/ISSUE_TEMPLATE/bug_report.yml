@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible Agenstro defect without provider secrets.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include provider credentials, private prompts, `.tactus` run
+        journals, or other sensitive workspace data. Report vulnerabilities
+        through `SECURITY.md` rather than a public issue.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observed outcome
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include model-free commands, fixture data, and the first stable error code when possible.
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Ubuntu
+        - Other or multiple
+    validations:
+      required: true
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version
+      description: Output of `rustc --version`.
+    validations:
+      required: true
+  - type: input
+    id: ghc-version
+    attributes:
+      label: GHC and Cabal versions
+      description: Outputs of `ghc --version` and `cabal --version` when Haskell is involved.
+  - type: input
+    id: node-version
+    attributes:
+      label: Node and npm versions
+      description: Outputs of `node --version` and `npm --version` when Motivo is involved.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Local quality result
+      description: Paste the failing step names and concise diagnostics from `Build/quality/.../summary.json`; do not attach sensitive logs.
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider boundary
+      options:
+        - No live provider call is required
+        - A live provider call is required; details are redacted
+        - Unknown
+    validations:
+      required: true

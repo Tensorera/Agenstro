@@ -1,3 +1,12 @@
+---
+title: Norm catalogue and check result v1
+status: alpha
+owners: [clef]
+last_verified: 2026-08-31
+applies_to: "agenstro.norm/v1"
+platforms: [windows, ubuntu]
+---
+
 # Norm catalogue and check result v1
 
 `agenstro.norm/v1` is the language-neutral compact representation of domain
@@ -60,9 +69,21 @@ A bound is:
 {"boundMinimum": 1, "boundMaximum": null}
 ```
 
+At least one endpoint must be non-null, and if both are present the minimum
+must not exceed the maximum. Pattern-bearing specs use non-empty patterns of
+at most 4,096 UTF-8 bytes. `Consistency` contains at least one group, and each
+group contains at least two distinct valid patterns. A norm check source is at
+most 524,288 UTF-8 bytes; larger requests are rejected rather than partially
+checked.
+
 An unsupported kind, unsupported metric, or malformed pattern is `unchecked`.
 It is never converted to zero violations. A malformed specification is a norm
 defect and may also emit a non-authoritative `norm.check_failed` event.
+Norm-v1 deliberately does not standardize a regex dialect or engine. A checker
+must bound its own evaluation. The reference Python checker uses a killable
+one-second worker process, so malformed, catastrophically backtracking, and
+otherwise over-budget patterns become `unchecked`. This is a resource-safety
+classification, not proof that the same pattern is unsafe in every engine.
 
 `ExternalCheck` does not call an arbitrary legacy method directly. The named
 plugin method must accept the same `NormCheckRequest` and return the same
@@ -123,6 +144,12 @@ Line and column coordinates are one-based and inclusive, matching SARIF
 regions. LSP positions are zero-based with an exclusive end and commonly use
 UTF-16 code units; an implementation supporting both must convert between
 distinct coordinate types.
+
+`artifact` is non-empty. `startColumn` requires `startLine`; `endLine` requires
+`startLine`; and `endColumn` requires `endLine`. Coordinates are positive. An
+end line cannot precede the start line, and columns cannot run backwards when
+both endpoints are on the same line. Artifact-only and partial line-only loci
+remain valid.
 
 ## SARIF mapping
 

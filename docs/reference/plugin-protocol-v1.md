@@ -1,3 +1,12 @@
+---
+title: Local plugin protocol v1
+status: alpha
+owners: [clef, tactus]
+last_verified: 2026-08-31
+applies_to: "agenstro.plugin/v1"
+platforms: [windows, ubuntu]
+---
+
 # Local plugin protocol v1
 
 `agenstro.plugin/v1` is the small language-neutral process boundary shared by
@@ -38,11 +47,14 @@ stderr, frame count, pending-event queue, and sink-delivery time. An isolated
 worker performs sink I/O, so a blocked consumer cannot stop deadline or
 cancellation polling. Its default wall-clock deadline is 1,800 seconds; public
 CLI options may override it, and a supported value of zero disables it
-deliberately. Deadline, cancellation, and protocol/transport failure can
-terminate the owned process group. Observation pressure cannot: Tactus drops
-low-priority events when the callback frame/queue budget is exhausted, counts
-them in `events_dropped`, preserves dedicated terminal capacity, and records a
-stalled or failed callback as `observation_error`. Windows Job Objects contain
+deliberately. Its default process limits include a 1 MiB request, 1 MiB JSONL
+frame, and 64 MiB total stdout; callers may only replace them through an
+explicit `ProcessLimits` value. Deadline, cancellation, and protocol/transport
+failure can terminate the owned process group. Observation pressure cannot:
+Tactus drops low-priority events when the callback frame/queue budget is
+exhausted, counts them in `events_dropped`, preserves dedicated terminal
+capacity, and records a stalled or failed callback as `observation_error`.
+Windows Job Objects contain
 the nested tree; on Unix, a process that deliberately creates a new session can
 escape process-group containment. Local termination cannot prove that a remote
 provider did not already complete work.
@@ -213,7 +225,14 @@ live terminal object, but project token-level JSON/free text as one bounded
 `provider.diagnostic` aggregate of counts, byte sizes, event types, truncation,
 and hashes. The live terminal still contains at least the resulting text and
 process/provider metadata; durable journals summarize that value. Session reuse
-is not implicit.
+is not implicit. Native provider stdout has an adapter-local 8 MiB line and
+1 GiB drain limit because tool payloads can be larger than plugin frames, with
+at most eight lines queued between the pipe reader and parser. The adapter
+incrementally retains at most 512 KiB of extracted result text; if that result
+budget is exceeded it keeps draining the supervised stream. A later,
+higher-precedence candidate may replace an oversized fallback; if the final
+selected candidate is still oversized, the adapter reports `OutcomeUnknown`
+without constructing the oversized result.
 
 ## Observer lifecycle
 

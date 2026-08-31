@@ -1,8 +1,10 @@
 ---
 title: Segno persistent tasks
 status: alpha
+owners: [segno]
 last_verified: 2026-08-17
 applies_to: "Segno Flow Haskell 0.3.0.0"
+platforms: [windows, ubuntu]
 ---
 
 # Segno persistent tasks

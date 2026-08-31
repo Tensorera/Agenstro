@@ -1,0 +1,24 @@
+{
+  "name": "290-oversized-pattern-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r29",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "text",
+      "norms": [
+        {
+          "id": "malformed.oversized-pattern",
+          "statement": "Keep patterns bounded.",
+          "severity": "Style",
+          "spec": {"kind": "Absence", "specPattern": "placeholder", "specIgnoreCase": false}
+        }
+      ]
+    }
+  },
+  "requestRepeats": [
+    {"path": ["params", "norms", 0, "spec", "specPattern"], "text": "é", "count": 2049}
+  ],
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.oversized-pattern"]}
+}

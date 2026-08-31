@@ -1,0 +1,21 @@
+{
+  "name": "280-consistency-duplicate-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r28",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "colour",
+      "norms": [
+        {
+          "id": "malformed.consistency-duplicate",
+          "statement": "Use one spelling convention.",
+          "severity": "Style",
+          "spec": {"kind": "Consistency", "specGroups": [["colour", "colour"]]}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.consistency-duplicate"]}
+}

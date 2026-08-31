@@ -1,0 +1,21 @@
+{
+  "name": "270-consistency-singleton-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r27",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "colour",
+      "norms": [
+        {
+          "id": "malformed.consistency-singleton",
+          "statement": "Use one spelling convention.",
+          "severity": "Style",
+          "spec": {"kind": "Consistency", "specGroups": [["colour"]]}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.consistency-singleton"]}
+}

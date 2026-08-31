@@ -58,6 +58,8 @@ import Clef.Norm
     Severity (..),
     Violation (..),
     normRecord,
+    validateLocus,
+    validateNormCheckRequest,
     validateNormCheckResult,
   )
 import Clef.Workflow
@@ -220,8 +222,9 @@ judgeWith checker selectedRubric artifact = do
                 checkRequestNorms = pendingNorms pending
               }
           selectedPlugin = jsonPlugin (pendingPlugin pending) (pendingMethod pending) :: Plugin NormCheckRequest NormCheckResult
-      result <- call selectedPlugin request
-      validated <- either workflowFailure pure (validateNormCheckResult request result)
+      validatedRequest <- either workflowFailure pure (validateNormCheckRequest request)
+      result <- call selectedPlugin validatedRequest
+      validated <- either workflowFailure pure (validateNormCheckResult validatedRequest result)
       pure
         Critique
           { critiqueViolations = checkResultViolations validated,
@@ -273,7 +276,7 @@ runNative artifact selectedNorm = case normCheck selectedNorm of
   Just (NativeCheck check) -> do
     violations <- check artifact
     unless (all validViolation violations) . workflowFailure $
-      "native check returned a violation with the wrong norm id or severity for "
+      "native check returned a violation with an invalid norm id, severity, or locus for "
         <> unNormId (normId selectedNorm)
     pure
       Critique
@@ -286,6 +289,7 @@ runNative artifact selectedNorm = case normCheck selectedNorm of
     validViolation selectedViolation =
       violationNorm selectedViolation == normId selectedNorm
         && violationSeverity selectedViolation == normSeverity selectedNorm
+        && maybe True (either (const False) (const True) . validateLocus) (violationLocus selectedViolation)
 
 ensureRubricIdentity :: [Norm artifact] -> Workflow ()
 ensureRubricIdentity norms =

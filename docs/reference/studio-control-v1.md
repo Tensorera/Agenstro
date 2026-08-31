@@ -1,3 +1,12 @@
+---
+title: Studio control API v1
+status: alpha
+owners: [tactus, motivo]
+last_verified: 2026-08-31
+applies_to: "tactus.studio/v1 and tactus.control/v1"
+platforms: [windows, ubuntu]
+---
+
 # Studio control API v1
 
 The Studio control API is the read-only, machine-facing boundary between the

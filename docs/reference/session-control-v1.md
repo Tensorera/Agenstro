@@ -1,3 +1,12 @@
+---
+title: Session document and control API v1
+status: alpha
+owners: [tactus, motivo]
+last_verified: 2026-08-31
+applies_to: "agenstro.session/v1 and tactus.control/v1"
+platforms: [windows, ubuntu]
+---
+
 # Session document and control API v1
 
 `agenstro.session/v1` is the durable projection of one human decision session.

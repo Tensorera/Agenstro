@@ -1,8 +1,10 @@
 ---
 title: Agenstro 0.3 troubleshooting
 status: alpha
-last_verified: 2026-08-16
+owners: [support]
+last_verified: 2026-08-31
 applies_to: "Clef/Segno Haskell 0.3.0.0 and Tactus Rust 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Agenstro 0.3 troubleshooting
@@ -159,25 +161,17 @@ failed Clef or Segno package build usable.
 ## Rust validation uses substantial disk space
 
 The repository's `.cargo/config.toml` redirects Cargo output to the ignored
-`Build/cargo` directory. Clean that configured target after validation:
+`Build/cargo` directory. The Full profile disables incremental output and debug
+symbols for its own build, and it can clean only after a chosen size threshold:
 
 ```powershell
-$env:CARGO_INCREMENTAL = "0"
-$env:CARGO_PROFILE_DEV_DEBUG = "0"
-$env:CARGO_PROFILE_TEST_DEBUG = "0"
-try {
-  cargo check -p tactus-runtime --all-targets --locked
-  cargo test -p tactus-runtime --locked
-} finally {
-  cargo clean
-  Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_DEV_DEBUG -ErrorAction SilentlyContinue
-  Remove-Item Env:CARGO_PROFILE_TEST_DEBUG -ErrorAction SilentlyContinue
-}
+./scripts/quality.ps1 -Profile Full -CleanIfOverGiB 5
 ```
 
-`cargo clean` honors the configured target path. Package-scoped commands are
-usually sufficient while iterating on Tactus.
+Use `./scripts/quality.ps1 -Profile Clean` for an immediate cleanup. The script
+pins and verifies this checkout's `Build/cargo` target, refuses reparse points,
+and leaves Cargo's shared registry/source cache intact. Package-scoped commands
+are usually sufficient while iterating on Tactus.
 
 ## Chinese text or emoji produces a protocol error
 

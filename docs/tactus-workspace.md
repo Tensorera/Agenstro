@@ -1,8 +1,10 @@
 ---
 title: Tactus workspace and configuration
 status: alpha
+owners: [tactus]
 last_verified: 2026-08-20
 applies_to: "tactus-runtime 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Tactus workspace and configuration

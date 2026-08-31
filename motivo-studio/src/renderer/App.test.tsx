@@ -96,6 +96,45 @@ describe("Motivo Studio renderer", () => {
     expect(screen.getByRole("button", { name: "Close action output" })).toBeVisible();
   });
 
+  it("reloads the Sessions page automatically after an action completes", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Workflow entries");
+
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await screen.findByText("A solid top exceeds the low-cost lift rating.");
+    await user.click(screen.getByRole("button", { name: "Workflow" }));
+    await user.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(bridge.actions.start).toHaveBeenCalledWith({ kind: "check" }));
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+
+    vi.mocked(bridge.studio.refresh).mockClear();
+    vi.mocked(bridge.sessions.list)
+      .mockClear()
+      .mockResolvedValue({
+        api: "agenstro.session/v1",
+        sessions: [deliveredSessionView()],
+      });
+    vi.mocked(bridge.sessions.current).mockClear().mockResolvedValue(deliveredSessionView());
+
+    act(() => {
+      publish({
+        type: "finished",
+        actionId,
+        sequence: "1",
+        status: "succeeded",
+        exitCode: 0,
+        finishedAtUnixMs: "1786853020000",
+      });
+    });
+
+    await waitFor(() => expect(bridge.studio.refresh).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(bridge.sessions.list).toHaveBeenCalledWith({ workspaceHandle: handle, limit: 50 }),
+    );
+    expect(await screen.findByText("Session delivered")).toBeVisible();
+  });
+
   it("runs namespace-qualified offline and live smoke actions from plugin cards", async () => {
     const user = userEvent.setup();
     render(<App />);

@@ -1,3 +1,8 @@
 packages:
   ./clef-sdk
   ./segno-flow
+
+-- Keep local and release dependency solving reproducible. Refresh this value
+-- deliberately, then verify the new snapshot with the Bootstrap and Full
+-- profiles.
+index-state: 2026-08-30T00:00:00Z

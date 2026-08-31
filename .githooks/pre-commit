@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+exec pwsh -NoProfile -File scripts/quality.ps1 -Profile Fast -Staged

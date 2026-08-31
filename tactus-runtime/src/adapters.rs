@@ -34,16 +34,18 @@ const PATH_EFFECT_NAME: &str = "workspace.paths";
 const DEFAULT_SMOKE_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_POLL: Duration = Duration::from_millis(10);
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-// These are deliberately below ProcessSupervisor's 1 MiB frame / 64 MiB
-// aggregate limits. A host wraps each native line in a plugin event and may
-// repeat extracted text in its terminal result, so its inner budget must leave
-// transport headroom instead of merely matching the outer ceiling.
-const MAX_NATIVE_LINE_BYTES: usize = 512 * 1024;
-const MAX_NATIVE_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+// The outer plugin protocol keeps its 1 MiB frame / 64 MiB aggregate defaults.
+// Native agent CLIs are consumed inside the provider host and may emit larger
+// stream-json tool payloads, so their drain budget is independent. Extracted
+// result text remains bounded separately before the host emits a plugin frame.
+const MAX_NATIVE_LINE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_NATIVE_STDOUT_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_PROVIDER_RESULT_BYTES: usize = 512 * 1024;
 const MAX_NATIVE_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_HEALTH_STDOUT_BYTES: usize = 1024 * 1024;
-const NATIVE_OUTPUT_QUEUE: usize = 128;
+// Eight full-size lines bound queued native stdout to roughly 64 MiB while
+// preserving backpressure between the pipe reader and JSON parser.
+const NATIVE_OUTPUT_QUEUE: usize = 8;
 const MAX_SNAPSHOT_PATHS: usize = 100_000;
 const MAX_SNAPSHOT_HASH_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SNAPSHOT_DURATION: Duration = Duration::from_secs(30);
@@ -899,6 +901,138 @@ struct ProviderCompletion {
     text: String,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProviderResultKind {
+    Plain,
+    Fragments,
+    Final,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ProviderResultOverflow {
+    result_bytes_at_least: usize,
+    max_result_bytes: usize,
+}
+
+/// Retains only the text that can become the provider's terminal result.
+///
+/// A native stream may be much larger than the plugin result budget. Once the
+/// selected candidate crosses that budget, its storage is released and the
+/// overflow is remembered while the caller continues draining native output.
+struct ProviderResultAccumulator {
+    kind: ProviderResultKind,
+    text: String,
+    items: usize,
+    observed_bytes: usize,
+    max_result_bytes: usize,
+    overflow: Option<ProviderResultOverflow>,
+}
+
+impl ProviderResultAccumulator {
+    fn new(max_result_bytes: usize) -> Self {
+        Self {
+            kind: ProviderResultKind::Plain,
+            text: String::new(),
+            items: 0,
+            observed_bytes: 0,
+            max_result_bytes,
+            overflow: None,
+        }
+    }
+
+    fn observe_plain(&mut self, text: &str) {
+        if self.overflow.is_some() || self.kind != ProviderResultKind::Plain {
+            return;
+        }
+        let separator = if self.items == 0 { "" } else { "\n" };
+        self.append(text, separator);
+    }
+
+    fn observe_fragments(&mut self, fragments: &[&str]) {
+        if fragments.is_empty() {
+            return;
+        }
+        if self.kind == ProviderResultKind::Plain {
+            self.reset(ProviderResultKind::Fragments);
+        }
+        if self.kind != ProviderResultKind::Fragments || self.overflow.is_some() {
+            return;
+        }
+        for fragment in fragments {
+            self.append(fragment, "");
+            if self.overflow.is_some() {
+                break;
+            }
+        }
+    }
+
+    fn observe_final(&mut self, text: &str) {
+        // A final event is authoritative, even when an earlier fallback or
+        // fragment candidate exceeded the retention budget. Providers may
+        // also emit more than one final event; matching the previous parser,
+        // the last one wins.
+        self.reset(ProviderResultKind::Final);
+        self.append(text, "");
+    }
+
+    fn reset(&mut self, kind: ProviderResultKind) {
+        self.kind = kind;
+        self.text.clear();
+        self.items = 0;
+        self.observed_bytes = 0;
+        self.overflow = None;
+    }
+
+    fn append(&mut self, text: &str, separator: &str) {
+        let separator = if self.items == 0 { "" } else { separator };
+        self.items = self.items.saturating_add(1);
+        let next_size = self
+            .observed_bytes
+            .checked_add(separator.len())
+            .and_then(|size| size.checked_add(text.len()))
+            .unwrap_or(usize::MAX);
+        self.observed_bytes = next_size;
+        if next_size > self.max_result_bytes {
+            self.text.clear();
+            self.overflow = Some(ProviderResultOverflow {
+                result_bytes_at_least: next_size,
+                max_result_bytes: self.max_result_bytes,
+            });
+            return;
+        }
+        self.text.push_str(separator);
+        self.text.push_str(text);
+    }
+
+    fn finish(self) -> Result<String, ProviderResultOverflow> {
+        match self.overflow {
+            Some(overflow) => Err(overflow),
+            None => Ok(self.text),
+        }
+    }
+}
+
+fn finish_provider_result(
+    provider: Provider,
+    result: ProviderResultAccumulator,
+) -> Result<String, AdapterError> {
+    result.finish().map_err(|overflow| {
+        AdapterError::new(
+            "outcome_unknown",
+            format!(
+                "{} completed but its result exceeded the host transport budget",
+                provider.name()
+            ),
+        )
+        .with_details(json!({
+            "provider":provider.name(),
+            "cause":"provider_result_limit",
+            "result_bytes_at_least":overflow.result_bytes_at_least,
+            "max_result_bytes":overflow.max_result_bytes
+        }))
+    })
+}
+
 #[derive(Default)]
 struct ProviderEventDiagnostics {
     native_events: u64,
@@ -983,6 +1117,32 @@ impl ProviderEventDiagnostics {
             ("stderr_sha256".to_owned(), json!(self.stderr_sha256)),
             ("event_types".to_owned(), json!(self.event_types)),
         ])
+    }
+}
+
+fn observe_provider_output(
+    provider: Provider,
+    line: &[u8],
+    result: &mut ProviderResultAccumulator,
+    diagnostics: &mut ProviderEventDiagnostics,
+) {
+    let text = String::from_utf8_lossy(line);
+    if text.trim().is_empty() {
+        return;
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(raw) => {
+            diagnostics.observe_json(provider, &raw, line.len());
+            let (event_fragments, event_final) = provider_event_text(provider, &raw);
+            result.observe_fragments(&event_fragments);
+            if let Some(event_final) = event_final {
+                result.observe_final(event_final);
+            }
+        }
+        Err(_) => {
+            diagnostics.observe_plain(line.len());
+            result.observe_plain(&text);
+        }
     }
 }
 
@@ -1119,9 +1279,7 @@ fn run_provider_command<W: Write, E: Write>(
     let started = Instant::now();
     let mut status = None;
     let mut output_done = false;
-    let mut fragments = Vec::new();
-    let mut final_text = None;
-    let mut plain_lines = Vec::new();
+    let mut result = ProviderResultAccumulator::new(MAX_PROVIDER_RESULT_BYTES);
     let mut event_diagnostics = ProviderEventDiagnostics::default();
     while status.is_none()
         || !output_done
@@ -1130,24 +1288,7 @@ fn run_provider_command<W: Write, E: Write>(
     {
         match receiver.recv_timeout(PROCESS_POLL) {
             Ok(OutputMessage::Line(line)) => {
-                let text = String::from_utf8_lossy(&line).into_owned();
-                if text.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(&text) {
-                    Ok(raw) => {
-                        event_diagnostics.observe_json(provider, &raw, line.len());
-                        let (event_fragments, event_final) = provider_event_text(provider, &raw);
-                        fragments.extend(event_fragments);
-                        if event_final.is_some() {
-                            final_text = event_final;
-                        }
-                    }
-                    Err(_) => {
-                        event_diagnostics.observe_plain(line.len());
-                        plain_lines.push(text);
-                    }
-                }
+                observe_provider_output(provider, &line, &mut result, &mut event_diagnostics);
             }
             Ok(OutputMessage::ReadError(error)) => {
                 let _ = child.kill();
@@ -1247,29 +1388,8 @@ fn run_provider_command<W: Write, E: Write>(
     // JSON. This protects both the durable trace and human observers while
     // retaining enough evidence to diagnose event-shape changes.
     writer.event("provider.diagnostic", event_diagnostics.payload(provider))?;
-    let text = final_text.unwrap_or_else(|| {
-        if fragments.is_empty() {
-            plain_lines.join("\n")
-        } else {
-            fragments.concat()
-        }
-    });
     child.disarm();
-    if text.len() > MAX_PROVIDER_RESULT_BYTES {
-        return Err(AdapterError::new(
-            "outcome_unknown",
-            format!(
-                "{} completed but its result exceeded the host transport budget",
-                provider.name()
-            ),
-        )
-        .with_details(json!({
-            "provider":provider.name(),
-            "cause":"provider_result_limit",
-            "result_bytes":text.len(),
-            "max_result_bytes":MAX_PROVIDER_RESULT_BYTES
-        })));
-    }
+    let text = finish_provider_result(provider, result)?;
     Ok(ProviderCompletion { status, text })
 }
 
@@ -1579,7 +1699,7 @@ fn forward_diagnostics<E: Write>(provider: Provider, bytes: &[u8], diagnostics: 
     let _ = diagnostics.flush();
 }
 
-fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<String>, Option<String>) {
+fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<&str>, Option<&str>) {
     let Some(event) = raw.as_object() else {
         return (Vec::new(), None);
     };
@@ -1591,15 +1711,11 @@ fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<String>, Option<
                 .and_then(Value::as_object)
                 .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"))
                 .and_then(|item| item.get("text"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+                .and_then(Value::as_str);
             (Vec::new(), text)
         }
         Provider::ClaudeCode if event_type == Some("result") => {
-            let text = event
-                .get("result")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            let text = event.get("result").and_then(Value::as_str);
             (Vec::new(), text)
         }
         Provider::ClaudeCode if event_type == Some("assistant") => {
@@ -1613,7 +1729,6 @@ fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<String>, Option<
                 .filter_map(Value::as_object)
                 .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .map(str::to_owned)
                 .collect();
             (fragments, None)
         }
@@ -1623,8 +1738,7 @@ fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<String>, Option<
                 .and_then(Value::as_object)
                 .and_then(|part| part.get("text"))
                 .and_then(Value::as_str)
-                .or_else(|| event.get("text").and_then(Value::as_str))
-                .map(str::to_owned);
+                .or_else(|| event.get("text").and_then(Value::as_str));
             (text.into_iter().collect(), None)
         }
         Provider::Codex | Provider::ClaudeCode | Provider::OpenCode => (Vec::new(), None),
@@ -3277,6 +3391,90 @@ mod tests {
         assert_eq!(
             error.details.as_ref().expect("error details")["cause"],
             "provider_result_limit"
+        );
+    }
+
+    #[test]
+    fn provider_result_accumulator_bounds_fragments_with_an_injected_limit() {
+        let mut result = ProviderResultAccumulator::new(8);
+        result.observe_fragments(&["1234", "5678"]);
+        assert_eq!(result.text, "12345678");
+
+        result.observe_fragments(&["9"]);
+        assert!(result.text.is_empty(), "oversized text stayed retained");
+        result.observe_fragments(&["more output that must not be retained"]);
+
+        assert_eq!(
+            result.finish(),
+            Err(ProviderResultOverflow {
+                result_bytes_at_least: 9,
+                max_result_bytes: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn provider_result_overflow_keeps_observing_and_becomes_outcome_unknown() {
+        let mut result = ProviderResultAccumulator::new(4);
+        let mut diagnostics = ProviderEventDiagnostics::default();
+        observe_provider_output(
+            Provider::ClaudeCode,
+            b"abcde",
+            &mut result,
+            &mut diagnostics,
+        );
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"thinking"}"#,
+            &mut result,
+            &mut diagnostics,
+        );
+
+        assert_eq!(diagnostics.native_events, 2);
+        assert_eq!(diagnostics.plain_lines, 1);
+        assert_eq!(diagnostics.json_events, 1);
+        let error = finish_provider_result(Provider::ClaudeCode, result)
+            .expect_err("oversized result must remain outcome-unknown");
+        assert_eq!(error.code, "outcome_unknown");
+        let details = error.details.expect("overflow details");
+        assert_eq!(details["cause"], "provider_result_limit");
+        assert_eq!(details["result_bytes_at_least"], 5);
+        assert_eq!(details["max_result_bytes"], 4);
+    }
+
+    #[test]
+    fn provider_result_accumulator_preserves_plain_line_and_final_precedence() {
+        let mut plain = ProviderResultAccumulator::new(5);
+        plain.observe_plain("ab");
+        plain.observe_plain("cd");
+        assert_eq!(plain.finish().expect("bounded plain text"), "ab\ncd");
+
+        let mut final_result = ProviderResultAccumulator::new(8);
+        final_result.observe_plain("fallback");
+        final_result.observe_final("final");
+        final_result.observe_plain("ignored");
+        assert_eq!(final_result.finish().expect("bounded final text"), "final");
+    }
+
+    #[test]
+    fn provider_result_accumulator_recovers_when_a_higher_precedence_candidate_fits() {
+        let mut fragments = ProviderResultAccumulator::new(4);
+        fragments.observe_plain("oversized fallback");
+        fragments.observe_fragments(&["okay"]);
+        assert_eq!(fragments.finish().expect("bounded fragments"), "okay");
+
+        let mut final_result = ProviderResultAccumulator::new(5);
+        final_result.observe_fragments(&["oversized fragments"]);
+        final_result.observe_final("first");
+        final_result.observe_final("last");
+        assert_eq!(final_result.finish().expect("bounded final text"), "last");
+
+        let mut recovered_final = ProviderResultAccumulator::new(5);
+        recovered_final.observe_final("oversized final");
+        recovered_final.observe_final("last");
+        assert_eq!(
+            recovered_final.finish().expect("later bounded final text"),
+            "last"
         );
     }
 }

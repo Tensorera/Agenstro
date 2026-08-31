@@ -1,0 +1,25 @@
+{
+  "name": "320-utf8-pattern-at-limit",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r32",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "placeholder",
+      "norms": [
+        {
+          "id": "boundary.utf8-pattern",
+          "statement": "Accept a pattern at the byte boundary.",
+          "severity": "Style",
+          "spec": {"kind": "Existence", "specPattern": "placeholder", "specIgnoreCase": false}
+        }
+      ]
+    }
+  },
+  "requestRepeats": [
+    {"path": ["params", "source"], "text": "é", "count": 2048},
+    {"path": ["params", "norms", 0, "spec", "specPattern"], "text": "é", "count": 2048}
+  ],
+  "expect": {"ok": true, "violationNorms": [], "checked": ["boundary.utf8-pattern"], "unchecked": []}
+}

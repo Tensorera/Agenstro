@@ -1,0 +1,21 @@
+{
+  "name": "310-catastrophic-regex-times-out",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r31",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+      "norms": [
+        {
+          "id": "unsafe.catastrophic-regex",
+          "statement": "Do not let regex backtracking stall the checker.",
+          "severity": "Style",
+          "spec": {"kind": "Existence", "specPattern": "^(a+)+$", "specIgnoreCase": false}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["unsafe.catastrophic-regex"]}
+}

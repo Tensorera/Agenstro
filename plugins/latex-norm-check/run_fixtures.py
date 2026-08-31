@@ -20,6 +20,7 @@ def run_plugin(raw_request: str) -> tuple[list[dict[str, Any]], int, str]:
         input=raw_request.rstrip("\n") + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=30,
         check=False,
     )
@@ -45,6 +46,18 @@ def check_protocol(frames: list[dict[str, Any]], request_id: str | int) -> None:
         assert "error" in terminal and "value" not in terminal
 
 
+def expand_request_fields(fixture: dict[str, Any], request: dict[str, Any]) -> None:
+    """Expand large boundary inputs without storing them verbatim in fixtures."""
+    for expansion in fixture.get("requestRepeats", []):
+        path = expansion["path"]
+        if not isinstance(path, list) or not path:
+            raise ValueError("requestRepeats.path must be a non-empty array")
+        cursor: Any = request
+        for segment in path[:-1]:
+            cursor = cursor[segment]
+        cursor[path[-1]] = expansion["text"] * expansion["count"]
+
+
 def main() -> int:
     if not FIXTURES:
         print("no fixtures found", file=sys.stderr)
@@ -58,6 +71,7 @@ def main() -> int:
             request_id = fixture.get("expectedId", "unknown")
         else:
             request = fixture["request"]
+            expand_request_fields(fixture, request)
             raw_request = json.dumps(request, ensure_ascii=False, allow_nan=False)
             request_id = request["id"]
         try:

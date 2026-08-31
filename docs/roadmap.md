@@ -1,8 +1,10 @@
 ---
 title: Agenstro public roadmap
 status: alpha
+owners: [release]
 last_verified: 2026-08-20
 applies_to: "Agenstro 0.3"
+platforms: [windows, ubuntu]
 ---
 
 # Agenstro public roadmap

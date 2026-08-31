@@ -1,8 +1,10 @@
 ---
 title: Program workflows with Clef
 status: alpha
+owners: [clef]
 last_verified: 2026-08-20
 applies_to: "clef-sdk 0.3.0.0"
+platforms: [windows, ubuntu]
 ---
 
 # Program workflows with Clef

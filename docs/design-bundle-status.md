@@ -1,8 +1,10 @@
 ---
 title: Norm and session design-bundle implementation status
 status: working decision record
+owners: [architecture]
 last_verified: 2026-08-20
 applies_to: feature/norms-rubrics-motivo-sessions
+platforms: [windows, ubuntu]
 ---
 
 # Norm and session design-bundle implementation status

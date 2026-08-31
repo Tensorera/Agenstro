@@ -1,8 +1,10 @@
 ---
 title: Install Agenstro 0.3
 status: alpha
+owners: [release]
 last_verified: 2026-08-17
 applies_to: "Clef/Segno Haskell 0.3.0.0, Tactus Rust 0.3.0, Motivo Studio 0.3.0"
+platforms: [windows, ubuntu]
 ---
 
 # Install Agenstro 0.3

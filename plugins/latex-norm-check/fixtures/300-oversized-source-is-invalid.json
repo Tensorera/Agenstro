@@ -1,0 +1,17 @@
+{
+  "name": "300-oversized-source-is-invalid",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r30",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "placeholder",
+      "norms": []
+    }
+  },
+  "requestRepeats": [
+    {"path": ["params", "source"], "text": "x", "count": 524289}
+  ],
+  "expect": {"ok": false, "code": "invalid_params"}
+}

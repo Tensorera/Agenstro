@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Iterator
 from decimal import Decimal, InvalidOperation
@@ -21,6 +23,10 @@ SUPPORTED_METRICS = ("characters", "lines", "display-equations")
 SEVERITIES = ("Preference", "Style", "Correctness", "Blocking")
 MAX_VIOLATIONS_PER_NORM = 50
 MAX_SNIPPET_CHARS = 160
+MAX_NORM_SOURCE_BYTES = 512 * 1024
+MAX_PATTERN_BYTES = 4 * 1024
+MAX_PLUGIN_REQUEST_BYTES = 1024 * 1024
+REGEX_DEADLINE_SECONDS = 1.0
 MIN_JSON_INTEGER = -(2**63)
 MAX_JSON_INTEGER = 2**64 - 1
 MIN_CORRELATION_INTEGER = -(2**63)
@@ -65,12 +71,12 @@ def line_column(text: str, offset: int) -> tuple[int, int]:
     return line, column
 
 
-def match_locus(artifact: str, text: str, match: re.Match[str]) -> dict[str, Any]:
-    start_line, start_column = line_column(text, match.start())
+def match_locus(artifact: str, text: str, start: int, end: int) -> dict[str, Any]:
+    start_line, start_column = line_column(text, start)
     # Python match.end() is exclusive while agenstro.norm/v1 coordinates are
     # inclusive.  Point an empty match at its start; otherwise use the final
     # character that belongs to the match.
-    inclusive_end = match.start() if match.end() == match.start() else match.end() - 1
+    inclusive_end = start if end == start else end - 1
     end_line, end_column = line_column(text, inclusive_end)
     return {
         "artifact": artifact,
@@ -78,12 +84,84 @@ def match_locus(artifact: str, text: str, match: re.Match[str]) -> dict[str, Any
         "startColumn": start_column,
         "endLine": end_line,
         "endColumn": end_column,
-        "snippet": match.group(0)[:MAX_SNIPPET_CHARS],
+        "snippet": text[start:end][:MAX_SNIPPET_CHARS],
     }
 
 
 def compile_pattern(pattern: str, ignore_case: bool) -> re.Pattern[str]:
     return re.compile(pattern, re.MULTILINE | (re.IGNORECASE if ignore_case else 0))
+
+
+def regex_worker() -> int:
+    """Evaluate one already shape-checked spec in a killable subprocess."""
+    try:
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+        operation = payload["operation"]
+        text = payload["text"]
+        if operation == "spans":
+            regex = compile_pattern(payload["pattern"], payload["ignoreCase"])
+            spans: list[list[int]] = []
+            truncated = False
+            for index, match in enumerate(regex.finditer(text)):
+                if index >= MAX_VIOLATIONS_PER_NORM:
+                    truncated = True
+                    break
+                spans.append([match.start(), match.end()])
+            value: Any = {"spans": spans, "truncated": truncated}
+        elif operation == "search":
+            regex = compile_pattern(payload["pattern"], payload["ignoreCase"])
+            value = {"matched": regex.search(text) is not None}
+        elif operation == "count":
+            regex = compile_pattern(payload["pattern"], False)
+            value = {"count": sum(1 for _ in regex.finditer(text))}
+        elif operation == "consistency":
+            value = {
+                "present": [
+                    [variant for variant in group if compile_pattern(variant, True).search(text)]
+                    for group in payload["groups"]
+                ]
+            }
+        else:
+            raise ValueError(f"unknown regex worker operation: {operation}")
+        sys.stdout.write(json.dumps({"ok": True, "value": value}, ensure_ascii=True))
+    except (KeyError, TypeError, ValueError, re.error) as error:
+        sys.stdout.write(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=True))
+    return 0
+
+
+def evaluate_regex(payload: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    try:
+        completed = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--regex-worker"],
+            input=encoded,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=REGEX_DEADLINE_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise UnsupportedCheck(
+            f"regular expression evaluation exceeded {REGEX_DEADLINE_SECONDS:g} second"
+        ) from error
+    if completed.returncode != 0:
+        raise UnsupportedCheck(f"regular expression worker exited with {completed.returncode}")
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise UnsupportedCheck("regular expression worker returned invalid JSON") from error
+    if not isinstance(result, dict) or not result.get("ok"):
+        message = (
+            result.get("error", "regular expression worker failed")
+            if isinstance(result, dict)
+            else "regular expression worker failed"
+        )
+        raise UnsupportedCheck(str(message))
+    value = result.get("value")
+    if not isinstance(value, dict):
+        raise UnsupportedCheck("regular expression worker returned an invalid value")
+    return value
 
 
 def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -133,11 +211,27 @@ def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def utf8_length(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def validate_pattern(pattern: Any) -> str:
+    if not isinstance(pattern, str):
+        raise TypeError("specPattern must be a string")
+    if not pattern:
+        raise TypeError("specPattern must not be empty")
+    if utf8_length(pattern) > MAX_PATTERN_BYTES:
+        raise TypeError(f"specPattern exceeds the {MAX_PATTERN_BYTES}-byte limit")
+    return pattern
+
+
 def validate_bound(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("specBound must be an object")
     low = value.get("boundMinimum")
     high = value.get("boundMaximum")
+    if low is None and high is None:
+        raise TypeError("specBound must define at least one non-null endpoint")
     if low is not None and not is_number(low):
         raise TypeError("boundMinimum must be a finite number or null")
     if high is not None and not is_number(high):
@@ -149,8 +243,7 @@ def validate_bound(value: Any) -> dict[str, Any]:
 
 def validate_check_spec(spec: dict[str, Any], kind: str) -> None:
     if kind in ("Existence", "Absence", "Occurrence"):
-        if not isinstance(spec.get("specPattern"), str):
-            raise TypeError("specPattern must be a string")
+        validate_pattern(spec.get("specPattern"))
     if kind in ("Existence", "Absence"):
         ignore_case = spec.get("specIgnoreCase", False)
         if not isinstance(ignore_case, bool):
@@ -161,11 +254,14 @@ def validate_check_spec(spec: dict[str, Any], kind: str) -> None:
         validate_bound(spec["specBound"])
     elif kind == "Consistency":
         groups = spec.get("specGroups")
-        if not isinstance(groups, list) or any(
-            not isinstance(group, list) or any(not isinstance(item, str) for item in group)
-            for group in groups
-        ):
+        if not isinstance(groups, list) or not groups:
             raise TypeError("specGroups must be an array of string arrays")
+        for index, group in enumerate(groups):
+            if not isinstance(group, list) or len(group) < 2:
+                raise TypeError(f"specGroups[{index}] must contain at least two distinct patterns")
+            patterns = [validate_pattern(item) for item in group]
+            if len(set(patterns)) < 2:
+                raise TypeError(f"specGroups[{index}] must contain at least two distinct patterns")
     elif kind == "Metric":
         if not isinstance(spec.get("specMetric"), str):
             raise TypeError("specMetric must be a string")
@@ -174,30 +270,60 @@ def validate_check_spec(spec: dict[str, Any], kind: str) -> None:
         validate_bound(spec["specBound"])
 
 
-def check_absence(norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str) -> Iterator[dict[str, Any]]:
-    regex = compile_pattern(spec["specPattern"], spec.get("specIgnoreCase", False))
-    for index, match in enumerate(regex.finditer(text)):
-        if index >= MAX_VIOLATIONS_PER_NORM:
-            event(
-                CURRENT_REQUEST_ID,
-                {
-                    "type": "norm.truncated",
-                    "norm": norm["id"],
-                    "limit": MAX_VIOLATIONS_PER_NORM,
-                },
-            )
-            break
+def check_absence(
+    norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str
+) -> Iterator[dict[str, Any]]:
+    evaluated = evaluate_regex(
+        {
+            "operation": "spans",
+            "pattern": spec["specPattern"],
+            "ignoreCase": spec.get("specIgnoreCase", False),
+            "text": text,
+        }
+    )
+    spans = evaluated.get("spans")
+    if not isinstance(spans, list):
+        raise UnsupportedCheck("regular expression worker omitted match spans")
+    for span in spans:
+        if (
+            not isinstance(span, list)
+            or len(span) != 2
+            or not all(isinstance(offset, int) for offset in span)
+        ):
+            raise UnsupportedCheck("regular expression worker returned an invalid match span")
+        start, end = span
         yield {
             "norm": norm["id"],
             "severity": norm["severity"],
             "message": norm["statement"],
-            "locus": match_locus(artifact, text, match),
+            "locus": match_locus(artifact, text, start, end),
         }
+    if evaluated.get("truncated") is True:
+        event(
+            CURRENT_REQUEST_ID,
+            {
+                "type": "norm.truncated",
+                "norm": norm["id"],
+                "limit": MAX_VIOLATIONS_PER_NORM,
+            },
+        )
 
 
-def check_existence(norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str) -> Iterator[dict[str, Any]]:
-    regex = compile_pattern(spec["specPattern"], spec.get("specIgnoreCase", False))
-    if regex.search(text) is None:
+def check_existence(
+    norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str
+) -> Iterator[dict[str, Any]]:
+    evaluated = evaluate_regex(
+        {
+            "operation": "search",
+            "pattern": spec["specPattern"],
+            "ignoreCase": spec.get("specIgnoreCase", False),
+            "text": text,
+        }
+    )
+    matched = evaluated.get("matched")
+    if not isinstance(matched, bool):
+        raise UnsupportedCheck("regular expression worker omitted the search result")
+    if not matched:
         yield {
             "norm": norm["id"],
             "severity": norm["severity"],
@@ -206,9 +332,15 @@ def check_existence(norm: dict[str, Any], spec: dict[str, Any], text: str, artif
         }
 
 
-def check_occurrence(norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str) -> Iterator[dict[str, Any]]:
-    regex = compile_pattern(spec["specPattern"], False)
-    count = sum(1 for _ in regex.finditer(text))
+def check_occurrence(
+    norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str
+) -> Iterator[dict[str, Any]]:
+    evaluated = evaluate_regex(
+        {"operation": "count", "pattern": spec["specPattern"], "text": text}
+    )
+    count = evaluated.get("count")
+    if not isinstance(count, int):
+        raise UnsupportedCheck("regular expression worker omitted the match count")
     bound = spec["specBound"]
     low, high = bound.get("boundMinimum"), bound.get("boundMaximum")
     if (low is not None and count < low) or (high is not None and count > high):
@@ -221,9 +353,18 @@ def check_occurrence(norm: dict[str, Any], spec: dict[str, Any], text: str, arti
         }
 
 
-def check_consistency(norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str) -> Iterator[dict[str, Any]]:
-    for group in spec["specGroups"]:
-        present = [variant for variant in group if compile_pattern(variant, True).search(text)]
+def check_consistency(
+    norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str
+) -> Iterator[dict[str, Any]]:
+    evaluated = evaluate_regex(
+        {"operation": "consistency", "groups": spec["specGroups"], "text": text}
+    )
+    present_groups = evaluated.get("present")
+    if not isinstance(present_groups, list):
+        raise UnsupportedCheck("regular expression worker omitted consistency results")
+    for present in present_groups:
+        if not isinstance(present, list) or any(not isinstance(item, str) for item in present):
+            raise UnsupportedCheck("regular expression worker returned invalid consistency results")
         if len(present) > 1:
             yield {
                 "norm": norm["id"],
@@ -234,7 +375,9 @@ def check_consistency(norm: dict[str, Any], spec: dict[str, Any], text: str, art
             }
 
 
-def check_metric(norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str) -> Iterator[dict[str, Any]]:
+def check_metric(
+    norm: dict[str, Any], spec: dict[str, Any], text: str, artifact: str
+) -> Iterator[dict[str, Any]]:
     metrics = {
         "characters": float(len(text)),
         "lines": float(text.count("\n") + 1),
@@ -330,9 +473,20 @@ def method_check(request_id: str | int, params: dict[str, Any]) -> None:
     if not isinstance(text, str):
         failed(request_id, "invalid_params", "check requires a string 'source' field")
         return
+    if utf8_length(text) > MAX_NORM_SOURCE_BYTES:
+        failed(
+            request_id,
+            "invalid_params",
+            f"check source exceeds the {MAX_NORM_SOURCE_BYTES}-byte limit",
+        )
+        return
     artifact = params.get("artifact", "artifact.tex")
-    if not isinstance(artifact, str):
-        failed(request_id, "invalid_params", "check requires a string 'artifact' field")
+    if not isinstance(artifact, str) or not artifact:
+        failed(
+            request_id,
+            "invalid_params",
+            "check requires a non-empty string 'artifact' field",
+        )
         return
     norms, validation_error = validate_norms(params.get("norms"))
     if validation_error is not None or norms is None:
@@ -384,7 +538,23 @@ def method_check(request_id: str | int, params: dict[str, Any]) -> None:
 def main() -> int:
     global CURRENT_REQUEST_ID
 
-    raw = sys.stdin.readline()
+    if sys.argv[1:] == ["--regex-worker"]:
+        return regex_worker()
+
+    raw_bytes = sys.stdin.buffer.readline(MAX_PLUGIN_REQUEST_BYTES + 2)
+    request_bytes = raw_bytes[:-1] if raw_bytes.endswith(b"\n") else raw_bytes
+    if len(request_bytes) > MAX_PLUGIN_REQUEST_BYTES:
+        failed(
+            "unknown",
+            "invalid_request",
+            f"request exceeds the {MAX_PLUGIN_REQUEST_BYTES}-byte limit",
+        )
+        return 1
+    try:
+        raw = request_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        failed("unknown", "invalid_request", f"request is not valid UTF-8: {error}")
+        return 1
     if not raw.strip():
         failed("unknown", "invalid_request", "empty request")
         return 1

@@ -66,19 +66,33 @@ describe("Tactus control child lifetime", () => {
     const rejection = expect(listing).rejects.toMatchObject({
       detail: { code: "control_output_too_large" },
     });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children).toHaveLength(2);
     children[1]?.stdout.emit("data", Buffer.alloc(9 * 1_024 * 1_024 + 1));
     await vi.advanceTimersByTimeAsync(2_000);
     await rejection;
 
     expect(children[1]?.kill).toHaveBeenCalledWith("SIGKILL");
+    const queuedListing = controller.sessions({ workspaceHandle: studio.handle, limit: 50 });
+    await Promise.resolve();
+    expect(children).toHaveLength(2);
     expect(() => controller.start({ kind: "run" })).toThrowError(
       expect.objectContaining({ detail: expect.objectContaining({ code: "control_busy" }) }),
     );
-    await expect(
-      controller.sessions({ workspaceHandle: studio.handle, limit: 50 }),
-    ).rejects.toMatchObject({ detail: { code: "control_busy" } });
 
     children[1]?.emit("close", null);
+    vi.useRealTimers();
+    await waitForChild(children, 3);
+    children[2]?.stdout.write(
+      JSON.stringify({
+        api: "tactus.control/v1",
+        command: "session.list",
+        status: "completed",
+        data: { api: "agenstro.session/v1", sessions: [] },
+      }),
+    );
+    children[2]?.emit("close", 0);
+    await expect(queuedListing).resolves.toMatchObject({ sessions: [] });
     expect(() => controller.start({ kind: "run" })).not.toThrow();
     controller.dispose();
   });

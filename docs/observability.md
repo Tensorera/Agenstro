@@ -1,8 +1,10 @@
 ---
 title: Logs, state transitions, and run evidence
 status: alpha
+owners: [tactus, motivo]
 last_verified: 2026-08-17
 applies_to: "Clef/Tactus/Motivo 0.3"
+platforms: [windows, ubuntu]
 ---
 
 # Logs, state transitions, and run evidence

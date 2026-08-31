@@ -1,0 +1,21 @@
+{
+  "name": "260-empty-pattern-is-unchecked",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r26",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "text",
+      "norms": [
+        {
+          "id": "malformed.empty-pattern",
+          "statement": "Use a meaningful pattern.",
+          "severity": "Style",
+          "spec": {"kind": "Existence", "specPattern": "", "specIgnoreCase": false}
+        }
+      ]
+    }
+  },
+  "expect": {"ok": true, "checked": [], "unchecked": ["malformed.empty-pattern"]}
+}

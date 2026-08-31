@@ -1,8 +1,10 @@
 ---
 title: Agenstro 0.3 architecture
 status: alpha
-last_verified: 2026-08-20
+owners: [architecture]
+last_verified: 2026-08-31
 applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, and Segno Haskell 0.3.0.0"
+platforms: [windows, ubuntu]
 ---
 
 # Agenstro 0.3 architecture
@@ -193,6 +195,13 @@ on Unix, a process that deliberately creates a new session can escape
 process-group containment. Plugins are therefore still trusted local code.
 Local termination also cannot prove whether a remote provider completed an
 operation before a transport failure, and never implies a safe retry.
+
+For generated Clef runtime configuration, provider `dispatch` commands without
+an explicit timeout receive a 13,500-second inner deadline. Clef's provider
+transport boundary is 14,400 seconds, reserving fifteen minutes for dispatch
+cleanup and terminal delivery. Explicit dispatch timeouts are preserved;
+effects and general plugins are not rewritten and retain Clef's 3,600-second
+default transport deadline.
 
 Transport validity and observation delivery are separate. Invalid or oversized
 protocol data can make the transport outcome unknown. By contrast, the

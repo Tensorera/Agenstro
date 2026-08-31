@@ -126,6 +126,14 @@ They run with the configured workspace as their current directory and inherit
 the caller's environment. Provider-specific approval-bypass flags, models,
 effort mapping, and credentials belong to provider adapters, not the EDSL.
 
+When `loadRuntimeConfigFromEnv` sees a provider command containing the Tactus
+`dispatch` subcommand, it adds `--timeout-seconds 13500` unless either the
+split or `--timeout-seconds=N` form is already present. Explicit values and
+non-provider commands are unchanged. Clef supervises provider processes for
+14,400 seconds, leaving fifteen minutes after the injected inner deadline for
+Tactus to reap its process tree and flush a terminal frame. Ordinary effects
+and plugins retain the finite 3,600-second Clef deadline.
+
 ## Plugin boundary
 
 Each provider, effect, or general plugin call starts one subprocess and writes

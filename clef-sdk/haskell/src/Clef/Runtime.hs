@@ -9,6 +9,7 @@ module Clef.Runtime
     PluginCallResult (..),
     PluginTransportLimits (..),
     defaultPluginTransportLimits,
+    defaultProviderTransportLimits,
     newRuntime,
     newRuntimeWithSink,
     withRuntime,
@@ -119,7 +120,10 @@ import Clef.Plugin.Protocol
     initialPluginOutputStreamParser,
     pluginOutputEventCount,
   )
-import Clef.Runtime.Config (RuntimeConfig (runtimeWorkspace))
+import Clef.Runtime.Config
+  ( RuntimeConfig (runtimeWorkspace),
+    providerDispatchDeadlineSeconds,
+  )
 
 data Runtime = Runtime
   { internalRuntimeConfig :: RuntimeConfig,
@@ -248,6 +252,16 @@ defaultPluginTransportLimits =
       transportMaxStdoutBytes = 64 * 1024 * 1024,
       transportMaxEventFrames = 10000,
       transportMaxStderrBytes = 1024 * 1024
+    }
+
+-- | Providers may legitimately outlive an ordinary local plugin.  Their
+-- Tactus dispatch command receives a shorter inner deadline from
+-- 'loadRuntimeConfigFromEnv', leaving this outer supervisor time to observe
+-- and clean up the dispatch process deterministically.
+defaultProviderTransportLimits :: PluginTransportLimits
+defaultProviderTransportLimits =
+  defaultPluginTransportLimits
+    { transportDeadlineSeconds = Just (providerDispatchDeadlineSeconds + 15 * 60)
     }
 
 newRuntime :: RuntimeConfig -> IO Runtime
@@ -436,7 +450,12 @@ flushRuntimeSink runtime = do
       pure (Left message)
 
 callPlugin :: Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
-callPlugin = callPluginWithLimits defaultPluginTransportLimits
+callPlugin runtime pluginName =
+  callPluginWithLimits selectedLimits runtime pluginName
+  where
+    selectedLimits
+      | "provider:" `Text.isPrefixOf` pluginName = defaultProviderTransportLimits
+      | otherwise = defaultPluginTransportLimits
 
 callPluginWithLimits :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
 callPluginWithLimits transportLimits runtime pluginName command method params = do

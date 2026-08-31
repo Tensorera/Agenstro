@@ -217,6 +217,16 @@ repository keeps generated Rust, Cabal, MkDocs, and Electron output below
 `Build/` or ignored tool directories so it can be rebuilt rather than
 committed. Release-level changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
+The canonical model-free local gates are:
+
+```powershell
+./scripts/quality.ps1 -Profile Fast
+./scripts/quality.ps1 -Profile Full
+```
+
+Use `./scripts/quality.ps1 -Profile Clean` when the shared Cargo target becomes
+too large, or pass `-CleanIfOverGiB 5` to clean only after a threshold.
+
 ## License
 
 Agenstro is licensed under the

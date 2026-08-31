@@ -270,6 +270,10 @@ export class TactusController {
   private snapshot: StudioSnapshot | undefined;
   private active: ActiveAction | undefined;
   private readonly controlChildren = new Set<TactusChild>();
+  private controlQueue: Promise<void> = Promise.resolve();
+  private pendingControlOperations = 0;
+  private readonly controlDrainWaiters = new Set<() => void>();
+  private disposed = false;
 
   constructor(options: TactusControllerOptions) {
     this.executable =
@@ -286,37 +290,41 @@ export class TactusController {
   }
 
   async open(root: string): Promise<StudioView> {
-    this.requireIdle();
-    const resolved = await realpath(root);
-    const snapshot = await this.inspect(resolved);
-    this.workspaceRoot = resolved;
-    this.workspaceHandle = randomUUID();
-    this.snapshot = snapshot;
-    return this.requiredView();
+    return this.scheduleControl(async () => {
+      const resolved = await realpath(root);
+      const snapshot = await this.inspect(resolved);
+      this.workspaceRoot = resolved;
+      this.workspaceHandle = randomUUID();
+      this.snapshot = snapshot;
+      return this.requiredView();
+    });
   }
 
   async initialize(root: string): Promise<StudioView> {
-    this.requireIdle();
-    const resolved = await realpath(root);
-    const initialized = await this.capture(
-      ["init", resolved, "--json"],
-      resolved,
-      INITIALIZE_TIMEOUT_MS,
-    );
-    if (initialized.exitCode !== 0) {
-      throw this.processFailure("initialize_failed", initialized, resolved);
-    }
-    const snapshot = await this.inspect(resolved);
-    this.workspaceRoot = resolved;
-    this.workspaceHandle = randomUUID();
-    this.snapshot = snapshot;
-    return this.requiredView();
+    return this.scheduleControl(async () => {
+      const resolved = await realpath(root);
+      const initialized = await this.capture(
+        ["init", resolved, "--json"],
+        resolved,
+        INITIALIZE_TIMEOUT_MS,
+      );
+      if (initialized.exitCode !== 0) {
+        throw this.processFailure("initialize_failed", initialized, resolved);
+      }
+      const snapshot = await this.inspect(resolved);
+      this.workspaceRoot = resolved;
+      this.workspaceHandle = randomUUID();
+      this.snapshot = snapshot;
+      return this.requiredView();
+    });
   }
 
   async refresh(): Promise<StudioView> {
-    const root = this.requireWorkspace();
-    this.snapshot = await this.inspect(root);
-    return this.requiredView();
+    return this.scheduleControl(async () => {
+      const root = this.requireWorkspace();
+      this.snapshot = await this.inspect(root);
+      return this.requiredView();
+    });
   }
 
   async events(
@@ -324,81 +332,90 @@ export class TactusController {
     after: string,
     limit: number = LIMITS.eventPage,
   ): Promise<StudioEventPage> {
-    const root = this.requireWorkspace();
-    const result = await this.capture(
-      [
-        "studio",
-        "events",
-        runId,
-        "--root",
+    const parsedAfter = decimalStringSchema.parse(after);
+    return this.scheduleControl(async () => {
+      const root = this.requireWorkspace();
+      const result = await this.capture(
+        [
+          "studio",
+          "events",
+          runId,
+          "--root",
+          root,
+          "--after",
+          parsedAfter,
+          "--limit",
+          String(limit),
+          "--max-bytes",
+          String(EVENT_MAX_BYTES),
+        ],
         root,
-        "--after",
-        decimalStringSchema.parse(after),
-        "--limit",
-        String(limit),
-        "--max-bytes",
-        String(EVENT_MAX_BYTES),
-      ],
-      root,
-      INSPECT_TIMEOUT_MS,
-    );
-    const envelope = parseControl(eventsControlSchema, result, root);
-    if (envelope.status === "error") throw controlFailure(envelope.error, root);
-    return studioEventPageSchema.parse(redactValue(envelope.data, root));
+        INSPECT_TIMEOUT_MS,
+      );
+      const envelope = parseControl(eventsControlSchema, result, root);
+      if (envelope.status === "error") throw controlFailure(envelope.error, root);
+      return studioEventPageSchema.parse(redactValue(envelope.data, root));
+    });
   }
 
   async sessions(rawInput: SessionListInput): Promise<SessionList> {
     const input = sessionListInputSchema.parse(rawInput);
-    const root = this.requireWorkspaceHandle(input.workspaceHandle);
     const limit = input.limit ?? 50;
-    const result = await this.capture(
-      ["session", "list", "--root", root, "--limit", String(limit)],
-      root,
-      INSPECT_TIMEOUT_MS,
-    );
-    const envelope = parseControl(sessionListControlSchema, result, root);
-    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
-    return sessionListSchema.parse(redactValue(envelope.data, root));
+    return this.scheduleControl(async () => {
+      const root = this.requireWorkspaceHandle(input.workspaceHandle);
+      const result = await this.capture(
+        ["session", "list", "--root", root, "--limit", String(limit)],
+        root,
+        INSPECT_TIMEOUT_MS,
+      );
+      const envelope = parseControl(sessionListControlSchema, result, root);
+      if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+      return sessionListSchema.parse(redactValue(envelope.data, root));
+    });
   }
 
   async session(rawInput: SessionCurrentInput): Promise<SessionView> {
     const input = sessionCurrentInputSchema.parse(rawInput);
-    const root = this.requireWorkspaceHandle(input.workspaceHandle);
-    const result = await this.capture(
-      ["session", "show", "--root", root, "--session", input.sessionId],
-      root,
-      INSPECT_TIMEOUT_MS,
-    );
-    const envelope = parseControl(sessionShowControlSchema, result, root);
-    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
-    return sessionViewSchema.parse(redactValue(envelope.data, root));
+    return this.scheduleControl(async () => {
+      const root = this.requireWorkspaceHandle(input.workspaceHandle);
+      const result = await this.capture(
+        ["session", "show", "--root", root, "--session", input.sessionId],
+        root,
+        INSPECT_TIMEOUT_MS,
+      );
+      const envelope = parseControl(sessionShowControlSchema, result, root);
+      if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+      return sessionViewSchema.parse(redactValue(envelope.data, root));
+    });
   }
 
   async answer(rawInput: SessionAnswerInput): Promise<SessionView> {
     const input = sessionAnswerInputSchema.parse(rawInput);
-    const root = this.requireWorkspaceHandle(input.workspaceHandle);
-    const result = await this.capture(
-      [
-        "session",
-        "answer",
-        "--root",
+    return this.scheduleControl(async () => {
+      const root = this.requireWorkspaceHandle(input.workspaceHandle);
+      const result = await this.capture(
+        [
+          "session",
+          "answer",
+          "--root",
+          root,
+          "--session",
+          input.sessionId,
+          "--turn",
+          input.turn,
+          "--axis",
+          input.axis,
+          "--option",
+          input.option,
+          ...(input.note !== undefined ? ["--note", input.note] : []),
+        ],
         root,
-        "--session",
-        input.sessionId,
-        "--turn",
-        input.turn,
-        "--axis",
-        input.axis,
-        "--option",
-        input.option,
-        ...(input.note !== undefined ? ["--note", input.note] : []),
-      ],
-      root,
-      INSPECT_TIMEOUT_MS,
-    );
-    const envelope = parseControl(sessionAnswerControlSchema, result, root);
-    if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
-    return sessionViewSchema.parse(redactValue(envelope.data, root));
+        INSPECT_TIMEOUT_MS,
+      );
+      const envelope = parseControl(sessionAnswerControlSchema, result, root);
+      if (envelope.status === "error") throw sessionControlFailure(envelope.error, root);
+      return sessionViewSchema.parse(redactValue(envelope.data, root));
+    });
   }
 
   start(rawRequest: ActionRequest): ActionState {
@@ -456,12 +473,43 @@ export class TactusController {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.active && !this.active.finished) {
       this.active.cancelRequested = true;
       this.active.child.kill();
     }
     for (const child of this.controlChildren) child.kill();
     this.controlChildren.clear();
+    this.resolveControlDrain();
+  }
+
+  private scheduleControl<Result>(operation: () => Promise<Result>): Promise<Result> {
+    if (this.disposed) return Promise.reject(new Error("Tactus controller is disposed."));
+    this.requireIdle();
+    this.pendingControlOperations += 1;
+    const scheduled = this.controlQueue.then(async () => {
+      if (this.disposed) throw new Error("Tactus controller is disposed.");
+      this.requireIdle();
+      return operation();
+    });
+    this.controlQueue = scheduled.then(
+      () => this.waitForControlDrain(),
+      () => this.waitForControlDrain(),
+    );
+    return scheduled.finally(() => {
+      this.pendingControlOperations -= 1;
+    });
+  }
+
+  private waitForControlDrain(): Promise<void> {
+    if (this.controlChildren.size === 0) return Promise.resolve();
+    return new Promise((resolve) => this.controlDrainWaiters.add(resolve));
+  }
+
+  private resolveControlDrain(): void {
+    if (this.controlChildren.size > 0) return;
+    for (const resolve of this.controlDrainWaiters) resolve();
+    this.controlDrainWaiters.clear();
   }
 
   private async inspect(root: string): Promise<StudioSnapshot> {
@@ -477,7 +525,9 @@ export class TactusController {
 
   private capture(args: readonly string[], cwd: string, timeoutMs: number): Promise<CaptureResult> {
     this.requireIdle();
-    this.requireControlIdle();
+    if (this.controlChildren.size > 0) {
+      throw new Error("control scheduler invariant failed");
+    }
     return new Promise((resolve, reject) => {
       const child = this.spawn(args, cwd);
       this.controlChildren.add(child);
@@ -522,6 +572,7 @@ export class TactusController {
       };
       const cleanupStoppedChild = (): void => {
         this.controlChildren.delete(child);
+        this.resolveControlDrain();
         clearTimeout(timer);
         if (killGraceTimer) clearTimeout(killGraceTimer);
       };
@@ -807,7 +858,7 @@ export class TactusController {
   }
 
   private requireControlIdle(): void {
-    if (this.controlChildren.size > 0) {
+    if (this.pendingControlOperations > 0 || this.controlChildren.size > 0) {
       throw new MainProcessError({
         code: "control_busy",
         category: "busy",

@@ -1,8 +1,10 @@
 ---
 title: Author a local Agenstro plugin
 status: alpha
+owners: [protocol]
 last_verified: 2026-08-17
 applies_to: "agenstro.plugin/v1"
+platforms: [windows, ubuntu]
 ---
 
 # Author a local Agenstro plugin

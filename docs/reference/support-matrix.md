@@ -2,7 +2,7 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-08-20
+last_verified: 2026-08-31
 applies_to: "Clef/Segno 0.3.0.0 + Tactus 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -103,9 +103,10 @@ used only when a Python plugin such as the optional reference norm checker is
 selected, or when MkDocs is built.
 
 The checked-in Cargo configuration directs Rust gate output to ignored
-`Build/cargo`; validation must finish with `cargo clean` to remove that large
-rebuildable tree. Cabal, MkDocs, and Electron Forge likewise use dedicated
-subdirectories below `Build/`.
+`Build/cargo`. Warm validation retains that rebuildable tree; use the local
+quality `Clean` profile or its size threshold when disk use matters. Cabal,
+MkDocs, and Electron Forge likewise use dedicated subdirectories below
+`Build/`.
 
 ## Version combination
 
