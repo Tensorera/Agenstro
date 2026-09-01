@@ -2,6 +2,8 @@
 
 module Clef.Error
   ( WorkflowCause (..),
+    ValidatorStage (..),
+    ValidationFailure (..),
     WorkflowError (..),
     renderWorkflowError,
     workflowErrorCode,
@@ -17,6 +19,7 @@ import Data.Aeson
     object,
     (.=),
   )
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -38,6 +41,47 @@ instance ToJSON WorkflowCause where
         "details" .= workflowCauseDetails cause
       ]
 
+-- | The four composable validation layers used by a Rubric gate.  A stage is
+-- execution context for existing norms, not a second checker protocol.
+data ValidatorStage
+  = StructureStage
+  | ReadabilityStage
+  | DomainStage
+  | ReviewerStage
+  deriving (Eq, Show)
+
+instance ToJSON ValidatorStage where
+  toJSON stage = toJSON $ case stage of
+    StructureStage -> ("structure" :: Text)
+    ReadabilityStage -> "readability"
+    DomainStage -> "domain"
+    ReviewerStage -> "reviewer"
+
+-- | A gate-ready projection of one existing Norm violation.  Rule identity,
+-- expected state, and provenance come from the Norm; observed evidence comes
+-- from its Violation.  Keeping the values open preserves domain-specific data
+-- without changing @agenstro.norm/v1@ or @agenstro.plugin/v1@.
+data ValidationFailure = ValidationFailure
+  { validationFailureStage :: ValidatorStage,
+    validationFailureRule :: Text,
+    validationFailureSeverity :: Text,
+    validationFailureExpected :: Value,
+    validationFailureObserved :: Value,
+    validationFailureProvenance :: Value
+  }
+  deriving (Eq, Show)
+
+instance ToJSON ValidationFailure where
+  toJSON failure =
+    object
+      [ "stage" .= validationFailureStage failure,
+        "rule" .= validationFailureRule failure,
+        "severity" .= validationFailureSeverity failure,
+        "expected" .= validationFailureExpected failure,
+        "observed" .= validationFailureObserved failure,
+        "provenance" .= validationFailureProvenance failure
+      ]
+
 -- | Failures at the dynamic boundary of a workflow.
 --
 -- Haskell type errors never become values of this type: GHC rejects those
@@ -49,6 +93,7 @@ data WorkflowError
   | UnknownEffect Text
   | UnknownPlugin Text
   | RequirementFailed Text
+  | ValidationFailed [ValidationFailure]
   | TaskDecodeFailed Text Text
   | OperationDecodeFailed Text Text Text
   | PluginDecodeFailed Text Text Text
@@ -69,6 +114,10 @@ renderWorkflowError workflowError = case workflowError of
   UnknownEffect name -> "unknown effect: " <> name
   UnknownPlugin name -> "unknown plugin: " <> name
   RequirementFailed message -> "workflow requirement failed: " <> message
+  ValidationFailed failures ->
+    "workflow validation failed for "
+      <> Text.pack (show (length failures))
+      <> " gated norm violation(s); inspect the structured validation_failed diagnostic"
   TaskDecodeFailed name message ->
     "task '" <> name <> "' returned an invalid result: " <> message
   OperationDecodeFailed effectName method message ->
@@ -109,6 +158,7 @@ workflowErrorCode workflowError = case workflowError of
   UnknownEffect _ -> "runtime.effect_unknown"
   UnknownPlugin _ -> "runtime.plugin_unknown"
   RequirementFailed _ -> "workflow.requirement_failed"
+  ValidationFailed _ -> "workflow.validation_failed"
   TaskDecodeFailed _ _ -> "workflow.task_decode_failed"
   OperationDecodeFailed _ _ _ -> "workflow.operation_decode_failed"
   PluginDecodeFailed _ _ _ -> "workflow.plugin_decode_failed"
@@ -128,8 +178,11 @@ workflowErrorCause workflowError = case workflowError of
 -- human-facing renderer above deliberately does not expose the JSON details.
 workflowErrorDiagnostic :: WorkflowError -> Value
 workflowErrorDiagnostic workflowError =
-  object
-    [ "code" .= workflowErrorCode workflowError,
-      "message" .= renderWorkflowError workflowError,
-      "cause" .= workflowErrorCause workflowError
+  object . catMaybes $
+    [ Just ("code" .= workflowErrorCode workflowError),
+      Just ("message" .= renderWorkflowError workflowError),
+      Just ("cause" .= workflowErrorCause workflowError),
+      case workflowError of
+        ValidationFailed failures -> Just ("validation_failed" .= failures)
+        _ -> Nothing
     ]

@@ -291,13 +291,16 @@ failure. Windows Job Objects contain the nested tree. On Unix, a process that
 deliberately creates a new session can escape process-group containment; do not
 treat this mechanism as a hostile-code sandbox.
 
-Most direct Tactus invocation commands use `--timeout-seconds`; the default is
-1,800 seconds and `0` disables that deadline. Segno uses a deliberately bounded
-task option instead: `install`, `once`, and `driver` accept
-`--task-timeout-seconds` from 1 through 604,800, defaulting to 1,800 for each
-Tactus build/run phase. Zero is rejected. `driver --poll-seconds` is only its
-maximum idle wait and does not extend task execution or change a trigger's
-interval.
+Most direct Tactus invocation commands use `--timeout-seconds`; `check`
+defaults to 1,800 seconds and each complete workflow script uses a
+15,300-second outer deadline. `0` disables the direct deadline. Within a
+provider workflow, the default nested budgets are 13,440 seconds for the
+native CLI, 13,500 for Tactus dispatch, and 14,400 for Clef's provider
+supervisor. Segno uses a deliberately bounded task option instead: `install`,
+`once`, and `driver` accept `--task-timeout-seconds` from 1 through 604,800,
+defaulting to 15,300 for each Tactus build/run phase. Zero is rejected.
+`driver --poll-seconds` is only its maximum idle wait and does not extend task
+execution or change a trigger's interval.
 
 Process termination is not remote rollback. A model service may have received
 or completed work before the local timeout. For a Segno occurrence, an
@@ -510,6 +513,12 @@ tactus run
 tactus doctor
 tactus smoke
 tactus plugin-call
+tactus runs list
+tactus runs summarize
+tactus runs unfinished
+tactus runs show
+tactus runs archive
+tactus runs gc
 tactus studio inspect
 tactus studio events
 segno init

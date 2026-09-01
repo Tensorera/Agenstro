@@ -5,9 +5,13 @@
 
 pub mod adapters;
 pub mod cli;
+mod executable;
 pub mod journal;
+pub mod limits;
+pub mod outcome;
 pub mod process;
 pub mod protocol;
+pub mod runs;
 pub mod session;
 pub mod studio;
 pub mod workspace;
@@ -17,8 +21,8 @@ pub use journal::{
     TransitionGuard, TransitionTrigger, TriggerKind,
 };
 pub use process::{
-    CancellationToken, CommandKind, CommandOutcome, InvocationKind, ProcessLimits, ProcessOutcome,
-    ProcessSpec, ProcessSupervisor,
+    CancellationToken, CommandKind, CommandOutcome, InvocationKind, InvocationPhase,
+    InvocationProgress, ProcessLimits, ProcessOutcome, ProcessSpec, ProcessSupervisor,
 };
 pub use protocol::{
     FrameSequence, JsonField, PluginEvent, PluginFailure, PluginFrame, PluginRequest,

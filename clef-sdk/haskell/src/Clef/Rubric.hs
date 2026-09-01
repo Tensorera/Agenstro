@@ -25,6 +25,14 @@ module Clef.Rubric
     noViolationAbove,
     renderCritique,
 
+    -- * Validation gates
+    ValidatorStage (..),
+    ValidationFailure (..),
+    validationFailures,
+    gateCritique,
+    validate,
+    validateWith,
+
     -- * Refinement
     RefinePolicy (..),
     defaultRefinePolicy,
@@ -40,12 +48,16 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Function (on)
 import Data.List (find, sortBy, sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
-import Clef.Error (WorkflowError (RequirementFailed))
+import Clef.Error
+  ( ValidationFailure (..),
+    ValidatorStage (..),
+    WorkflowError (RequirementFailed, ValidationFailed),
+  )
 import Clef.Norm
   ( Check (..),
     CheckSpec (..),
@@ -58,6 +70,7 @@ import Clef.Norm
     Severity (..),
     Violation (..),
     normRecord,
+    severityAtLeast,
     validateLocus,
     validateNormCheckRequest,
     validateNormCheckResult,
@@ -323,6 +336,57 @@ critiqueWorst selectedCritique = case violationSeverity <$> critiqueViolations s
 -- A 'Style' violation is therefore accepted by @noViolationAbove Style@.
 noViolationAbove :: Severity -> Critique -> Bool
 noViolationAbove severityCeiling = maybe True (<= severityCeiling) . critiqueWorst
+
+-- | Project gated violations into one stable, structured result.  This is a
+-- pure view over the same Norms and Violations used by 'judge'; it does not
+-- introduce another checker or wire contract.
+validationFailures :: ValidatorStage -> Severity -> Rubric artifact -> Critique -> [ValidationFailure]
+validationFailures stage minimumSeverity selectedRubric selectedCritique =
+  mapMaybe projectFailure (critiqueViolations selectedCritique)
+  where
+    projectFailure selectedViolation
+      | not (severityAtLeast minimumSeverity (violationSeverity selectedViolation)) = Nothing
+      | otherwise = do
+          selectedNorm <- find ((== violationNorm selectedViolation) . normId) (rubricNorms selectedRubric)
+          let durableNorm = normRecord selectedNorm
+          pure
+            ValidationFailure
+              { validationFailureStage = stage,
+                validationFailureRule = unNormId (violationNorm selectedViolation),
+                validationFailureSeverity = Text.pack (show (violationSeverity selectedViolation)),
+                validationFailureExpected =
+                  object
+                    [ "statement" .= normStatement selectedNorm,
+                      "guidance" .= normGuidance selectedNorm,
+                      "spec" .= recordSpec durableNorm
+                    ],
+                validationFailureObserved =
+                  object
+                    [ "message" .= violationMessage selectedViolation,
+                      "locus" .= violationLocus selectedViolation,
+                      "evidence" .= violationEvidence selectedViolation
+                    ],
+                validationFailureProvenance = toJSON (normProvenance selectedNorm)
+              }
+
+-- | Enforce a delivery gate against an already computed Critique.  Choosing
+-- 'Correctness' gates both Correctness and Blocking violations; choosing
+-- 'Blocking' gates only Blocking violations.
+gateCritique :: ValidatorStage -> Severity -> Rubric artifact -> Critique -> Workflow Critique
+gateCritique stage minimumSeverity selectedRubric selectedCritique =
+  case validationFailures stage minimumSeverity selectedRubric selectedCritique of
+    [] -> pure selectedCritique
+    failures -> liftIO (throwIO (ValidationFailed failures))
+
+-- | Judge with the default norm checker and immediately enforce a typed gate.
+validate :: ValidatorStage -> Severity -> Rubric artifact -> artifact -> Workflow Critique
+validate = validateWith defaultNormChecker
+
+-- | Judge with an explicit checker and immediately enforce a typed gate.
+validateWith :: NormChecker -> ValidatorStage -> Severity -> Rubric artifact -> artifact -> Workflow Critique
+validateWith checker stage minimumSeverity selectedRubric artifact = do
+  selectedCritique <- judgeWith checker selectedRubric artifact
+  gateCritique stage minimumSeverity selectedRubric selectedCritique
 
 renderCritique :: Critique -> Text
 renderCritique selectedCritique = Text.intercalate "\n" (violationSection <> uncheckedSection)

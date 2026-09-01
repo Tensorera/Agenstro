@@ -2,7 +2,7 @@
 title: Norm catalogue and check result v1
 status: alpha
 owners: [clef]
-last_verified: 2026-08-31
+last_verified: 2026-09-01
 applies_to: "agenstro.norm/v1"
 platforms: [windows, ubuntu]
 ---
@@ -150,6 +150,25 @@ distinct coordinate types.
 end line cannot precede the start line, and columns cannot run backwards when
 both endpoints are on the same line. Artifact-only and partial line-only loci
 remain valid.
+
+## Clef validation gates
+
+Clef can project an existing `Critique` into gate-ready
+`ValidationFailure` values. This is a local typed API, not a new norm checker
+payload and not a plugin protocol revision. Every projected failure reuses:
+
+- the Norm id as `rule`;
+- the Norm statement, guidance, and check spec as `expected`;
+- the Violation message, locus, and evidence as `observed`; and
+- the Norm's existing `provenance`.
+
+The caller supplies the validator `stage`: `structure`, `readability`,
+`domain`, or `reviewer`. A severity threshold is inclusive. A `Correctness`
+gate therefore rejects `Correctness` and `Blocking`; a `Blocking` gate rejects
+only `Blocking`. Failed gates use workflow diagnostic code
+`workflow.validation_failed` and place the projections under
+`validation_failed`. The `agenstro.norm/v1` request/result above and
+`agenstro.plugin/v1` remain unchanged.
 
 ## SARIF mapping
 

@@ -42,7 +42,8 @@ tactus check --root $workspace `
   '.tactus\scripts\Support.hs'
 ```
 
-Without explicit paths, `check` selects every `.hs` and `.lhs` source below `.tactus/scripts`. Avoid that broader default when the task names specific files.
+Without explicit paths, `--all`, or an inclusive `--from` / `--through` range,
+`check` rejects the command instead of selecting the whole workspace.
 
 `run` uses a repeatable `--script`; it does not accept scripts as bare positionals:
 
@@ -59,10 +60,15 @@ tactus run --root $workspace `
   -- '--workflow argument'
 ```
 
-Without `--script`, `run` executes every numbered `NNN_slug.hs` or `.lhs` entry in Tactus order. Never use that default to validate a single edit.
+Without `--script`, `--all`, or an inclusive `--from` / `--through` range,
+`run` rejects the command instead of executing every numbered entry.
 
 ## Timeouts and packages
 
-Both commands accept `--timeout-seconds N`; the default is 1800 and `0` disables the direct Tactus deadline. Prefer a finite deadline. Repeat `--package NAME` only for required extension libraries. Use `--keep-going` only when the user needs a complete independent-failure inventory.
+Both commands accept `--timeout-seconds N`; `check` defaults to 1800 seconds
+and one complete workflow script defaults to an outer 15300-second deadline.
+`0` disables the direct Tactus deadline. Prefer a finite deadline. Repeat
+`--package NAME` only for required extension libraries. Use `--keep-going` only
+when the user needs a complete independent-failure inventory.
 
 Exit zero means the selected local command completed successfully. A nonzero check means compilation failed. A nonzero run or missing terminal response may require evidence reconciliation before any retry.

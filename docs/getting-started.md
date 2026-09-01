@@ -2,7 +2,7 @@
 title: Build the first Agenstro workflow
 status: alpha
 owners: [documentation]
-last_verified: 2026-08-17
+last_verified: 2026-09-01
 applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -116,20 +116,36 @@ Runnable files use increasing three-digit prefixes:
   Tactus/Shared.hs
 ```
 
-With no explicit selection, Tactus checks all Haskell sources and runs
+Bulk selection is explicit. `--all` checks all Haskell sources or runs all
 numbered entries in numeric/path order:
 
 ```powershell
-tactus check
-tactus run
+tactus check --all
+tactus run --all
 ```
 
-To run only later entries, repeat `--script` in the desired order:
+Use an inclusive numeric range, or repeat `--script` in the desired order:
+
+```powershell
+tactus check --from 20 --through 30
+tactus run --from 20 --through 30
+```
 
 ```powershell
 tactus run `
   --script .tactus\scripts\020_transform.hs `
   --script .tactus\scripts\030_review.hs
+```
+
+Calling `check` or `run` with no paths, `--all`, or range is rejected. This
+prevents an omitted argument from silently executing a whole workspace.
+
+Query the resulting journals through the bounded read-only commands:
+
+```powershell
+tactus runs summarize --since 24h
+tactus runs list --state outcome_unknown
+tactus runs unfinished
 ```
 
 Provider choice is inside the Haskell workflow or the workspace default. Script
@@ -152,7 +168,7 @@ run them. Always inspect and check the result:
 ```powershell
 tactus list
 git diff -- .tactus\scripts
-tactus check
+tactus check --all
 ```
 
 A later `generate` call sees the current workspace and may add or modify

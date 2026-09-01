@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use crate::{executable::ExecutableResolver, limits::RuntimeLimits};
+
 /// Runtime configuration version shared with Clef.
 pub const RUNTIME_API: &str = "clef.runtime/v1";
 /// Project-local control directory.
@@ -39,6 +41,25 @@ const DEFAULT_CONFIG: &str = r#"api = "clef.runtime/v1"
 default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
 
+[limits]
+max_concurrent_provider_calls = 4
+check_timeout_seconds = 1800
+script_timeout_seconds = 15300
+plugin_timeout_seconds = 3600
+provider_timeout_seconds = 13500
+provider_outer_timeout_seconds = 14400
+max_request_bytes = 1048576
+max_frame_bytes = 33554432
+max_stdout_bytes = 67108864
+max_event_frames = 10000
+max_stderr_bytes = 1048576
+event_queue_bound = 4
+native_max_line_bytes = 8388608
+native_max_stdout_bytes = 1073741824
+native_max_result_bytes = 4194304
+native_max_stderr_bytes = 1048576
+native_output_queue_bound = 8
+
 [providers.codex]
 command = ["tactus", "provider-host", "codex"]
 
@@ -63,6 +84,11 @@ const DEFAULT_PROMPT: &str = r#"# Tactus workflow scripts
 - Helpers may use any valid Haskell filename and nested directory.
 - Each entry is an ordinary command-line Haskell program using `clef-sdk`.
 - Route external work through configured providers, effects, or generic plugins.
+- Keep each provider call atomic: one entry, one deliverable, or one checkpoint.
+  Split independent work across bounded calls instead of one monolithic request.
+- Write multi-MiB business artifacts into the workspace and return a relative
+  path, digest, and short summary instead of returning the whole artifact in a
+  terminal plugin value.
 - Before inspecting or changing existing workflows, follow
   `.tactus/skills/tactus/SKILL.md`.
 - During generation, only create or update DSL sources. Do not invoke Cabal, GHC,
@@ -121,6 +147,9 @@ pub struct RuntimeConfig {
     pub default_provider: String,
     /// UTF-8 prompt path, relative to the workspace unless absolute.
     pub instructions: PathBuf,
+    /// Validated process, transport, and provider concurrency policy.
+    #[serde(default)]
+    pub limits: RuntimeLimits,
     /// Provider convenience registry.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderDefinition>,
@@ -295,6 +324,7 @@ impl Workspace {
             "workspace": self.root,
             "default_provider": config.default_provider,
             "instructions": instructions,
+            "limits": config.limits,
             "providers": providers,
             "effects": effects,
             "plugins": plugins,
@@ -366,14 +396,50 @@ impl Workspace {
     }
 
     fn require_layout(&self) -> Result<(), WorkspaceError> {
+        let resolved_root = dunce::canonicalize(&self.root).map_err(WorkspaceError::Io)?;
+        let control_metadata = fs::symlink_metadata(&self.control).map_err(WorkspaceError::Io)?;
+        if !control_metadata.is_dir()
+            || control_metadata.file_type().is_symlink()
+            || directory_is_reparse_point(&control_metadata)
+        {
+            return Err(WorkspaceError::InvalidConfig(
+                ".tactus must be a plain directory, not a symlink or reparse point".to_owned(),
+            ));
+        }
+        let resolved_control = dunce::canonicalize(&self.control).map_err(WorkspaceError::Io)?;
+        if resolved_control.parent() != Some(resolved_root.as_path()) {
+            return Err(WorkspaceError::InvalidConfig(
+                ".tactus must resolve directly below the workspace root".to_owned(),
+            ));
+        }
         for path in [&self.config_path, &self.prompt_path] {
-            if !path.is_file() {
+            let metadata = fs::symlink_metadata(path).map_err(WorkspaceError::Io)?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || directory_is_reparse_point(&metadata)
+            {
                 return Err(WorkspaceError::MissingPath(path.clone()));
+            }
+            let resolved = dunce::canonicalize(path).map_err(WorkspaceError::Io)?;
+            if resolved.parent() != Some(resolved_control.as_path()) {
+                return Err(WorkspaceError::InvalidConfig(
+                    "workspace control file resolved outside .tactus".to_owned(),
+                ));
             }
         }
         for path in [&self.scripts_path, &self.runs_path] {
-            if !path.is_dir() {
+            let metadata = fs::symlink_metadata(path).map_err(WorkspaceError::Io)?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || directory_is_reparse_point(&metadata)
+            {
                 return Err(WorkspaceError::MissingPath(path.clone()));
+            }
+            let resolved = dunce::canonicalize(path).map_err(WorkspaceError::Io)?;
+            if resolved.parent() != Some(resolved_control.as_path()) {
+                return Err(WorkspaceError::InvalidConfig(
+                    "workspace runtime directory resolved outside .tactus".to_owned(),
+                ));
             }
         }
         Ok(())
@@ -422,8 +488,21 @@ impl RuntimeConfig {
                 self.default_provider
             )));
         }
+        self.limits
+            .validate()
+            .map_err(WorkspaceError::InvalidConfig)?;
         for (name, plugin) in &self.providers {
             validate_command("providers", name, &plugin.command)?;
+            let options = plugin
+                .options
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            self.limits
+                .validate_provider_options(&options, self.limits.provider_timeout_seconds)
+                .map_err(|error| {
+                    WorkspaceError::InvalidConfig(format!("providers.{name}: {error}"))
+                })?;
         }
         for (name, plugin) in &self.effects {
             validate_command("effects", name, &plugin.command)?;
@@ -521,6 +600,7 @@ pub fn initialize_workspace(
             Err(error) => return Err(WorkspaceError::Io(error)),
         }
     }
+    workspace.require_layout()?;
     Ok(InitReport {
         workspace,
         clef_sdk: sdk,
@@ -780,6 +860,7 @@ pub struct DoctorCheck {
 /// Diagnose workspace structure, config, SDK linkage, and required tools.
 pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
+    let resolver = ExecutableResolver::environment(&workspace.root);
     match workspace.load_config() {
         Ok(config) => {
             checks.push(DoctorCheck {
@@ -788,13 +869,20 @@ pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
                 detail: workspace.config_path.display().to_string(),
             });
             for (name, definition) in config.providers {
-                push_plugin_check(&mut checks, "provider", &name, &definition.command);
+                push_plugin_check(
+                    &mut checks,
+                    "provider",
+                    &name,
+                    &definition.command,
+                    &resolver,
+                );
+                push_native_provider_check(&mut checks, &name, &definition, &resolver);
             }
             for (name, definition) in config.effects {
-                push_plugin_check(&mut checks, "effect", &name, &definition.command);
+                push_plugin_check(&mut checks, "effect", &name, &definition.command, &resolver);
             }
             for (name, definition) in config.plugins {
-                push_plugin_check(&mut checks, "plugin", &name, &definition.command);
+                push_plugin_check(&mut checks, "plugin", &name, &definition.command, &resolver);
             }
         }
         Err(error) => checks.push(DoctorCheck {
@@ -805,14 +893,11 @@ pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
     }
     checks.push(clef_sdk_link_check(workspace));
     for executable in ["ghc", "cabal"] {
-        let found = find_executable(executable);
+        let found = resolver.resolve(executable);
         checks.push(DoctorCheck {
             name: executable.to_owned(),
-            ok: found.is_some(),
-            detail: found.map_or_else(
-                || format!("{executable} not found on PATH"),
-                |path| path.display().to_string(),
-            ),
+            ok: found.is_ok(),
+            detail: found.map_or_else(|error| error.to_string(), |path| path.display().to_string()),
         });
     }
     checks
@@ -879,96 +964,99 @@ fn push_plugin_check(
     namespace: &str,
     name: &str,
     command: &[String],
+    resolver: &ExecutableResolver,
 ) {
     let executable = &command[0];
     let found = if executable == "tactus"
         && command.get(1).is_some_and(|value| {
             matches!(value.as_str(), "provider-host" | "effect-host" | "dispatch")
         }) {
-        env::current_exe().ok()
+        env::current_exe().map_err(|error| format!("cannot resolve the running tactus: {error}"))
     } else {
-        find_executable(executable)
+        resolver
+            .resolve(executable)
+            .map_err(|error| error.to_string())
     };
     checks.push(DoctorCheck {
         name: format!("{namespace}:{name}"),
-        ok: found.is_some(),
-        detail: found.map_or_else(
-            || format!("{executable} not found"),
-            |path| path.display().to_string(),
-        ),
+        ok: found.is_ok(),
+        detail: found.map_or_else(|error| error, |path| path.display().to_string()),
     });
 }
 
-fn find_executable(command: &str) -> Option<PathBuf> {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        return path.is_file().then(|| path.to_path_buf());
-    }
-    let extensions: Vec<String> = if cfg!(windows) {
-        env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
-            .split(';')
-            .map(str::to_owned)
-            .collect()
-    } else {
-        vec![String::new()]
+fn push_native_provider_check(
+    checks: &mut Vec<DoctorCheck>,
+    name: &str,
+    definition: &ProviderDefinition,
+    resolver: &ExecutableResolver,
+) {
+    let Some(default_executable) = builtin_native_executable(&definition.command) else {
+        return;
     };
-    let value = effective_path();
-    (!value.is_empty())
-        .then(|| {
-            env::split_paths(&value).find_map(|directory| {
-                extensions.iter().find_map(|extension| {
-                    let candidate =
-                        if cfg!(windows) && !command.to_ascii_uppercase().ends_with(extension) {
-                            directory.join(format!("{command}{extension}"))
-                        } else {
-                            directory.join(command)
-                        };
-                    candidate.is_file().then_some(candidate)
-                })
-            })
-        })
-        .flatten()
+    let configured = match definition.options.get("executable") {
+        None => default_executable,
+        Some(JsonValue::String(value)) if !value.is_empty() => value,
+        Some(_) => {
+            checks.push(DoctorCheck {
+                name: format!("provider-native:{name}"),
+                ok: false,
+                detail: "options.executable must be a non-empty string".to_owned(),
+            });
+            return;
+        }
+    };
+    if let Some(prefix) = provider_command_prefix(&definition.options) {
+        let result = resolver.resolve(prefix);
+        checks.push(DoctorCheck {
+            name: format!("provider-native:{name}"),
+            ok: result.is_ok(),
+            detail: result.map_or_else(
+                |error| {
+                    format!("native command {configured:?} uses an unavailable wrapper: {error}")
+                },
+                |path| {
+                    format!(
+                        "native command {configured:?} is delegated through {}",
+                        path.display()
+                    )
+                },
+            ),
+        });
+        return;
+    }
+    let result = resolver.resolve(configured);
+    checks.push(DoctorCheck {
+        name: format!("provider-native:{name}"),
+        ok: result.is_ok(),
+        detail: result.map_or_else(|error| error.to_string(), |path| path.display().to_string()),
+    });
 }
 
-/// Return the inherited PATH plus newly persisted Windows user/machine PATH
-/// entries. Long-lived shells and coding agents otherwise cannot see tools
-/// installed after they started (notably GHCup).
-pub(crate) fn effective_path() -> std::ffi::OsString {
-    #[cfg(not(windows))]
+fn builtin_native_executable(command: &[String]) -> Option<&'static str> {
+    let dispatcher = command.first()?;
+    let file_name = Path::new(dispatcher)
+        .file_name()
+        .and_then(|value| value.to_str())?;
+    if !(file_name.eq_ignore_ascii_case("tactus") || file_name.eq_ignore_ascii_case("tactus.exe"))
+        || command.get(1).map(String::as_str) != Some("provider-host")
     {
-        env::var_os("PATH").unwrap_or_default()
+        return None;
     }
-
-    #[cfg(windows)]
-    {
-        use winreg::{
-            RegKey,
-            enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
-        };
-
-        let mut values = Vec::new();
-        if let Some(current) = env::var_os("PATH") {
-            values.push(current);
-        }
-        let locations = [
-            (HKEY_CURRENT_USER, "Environment"),
-            (
-                HKEY_LOCAL_MACHINE,
-                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-            ),
-        ];
-        for (root, key) in locations {
-            let Ok(key) = RegKey::predef(root).open_subkey(key) else {
-                continue;
-            };
-            if let Ok(path) = key.get_value::<String, _>("Path") {
-                values.push(path.into());
-            }
-        }
-        let entries = values.iter().flat_map(env::split_paths);
-        env::join_paths(entries).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+    match command.get(2).map(String::as_str) {
+        Some("codex") => Some("codex"),
+        Some("claude" | "claude-code") => Some("claude"),
+        Some("opencode") => Some("opencode"),
+        _ => None,
     }
+}
+
+fn provider_command_prefix(options: &BTreeMap<String, JsonValue>) -> Option<&str> {
+    options
+        .get("command_prefix")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .filter(|value| !value.is_empty())
 }
 
 /// Workspace/configuration failure.
@@ -1016,6 +1104,98 @@ mod tests {
         config.validate().expect("valid config");
         assert!(config.plugins.is_empty());
         assert_eq!(config.providers.len(), 3);
+    }
+
+    #[test]
+    fn doctor_resolves_the_configured_native_provider_from_the_workspace() {
+        let temporary = tempfile::tempdir().expect("temporary workspace");
+        let tools = temporary.path().join("中文 provider tools");
+        fs::create_dir_all(&tools).expect("tools directory");
+        #[cfg(windows)]
+        let executable = tools.join("claude.cmd");
+        #[cfg(not(windows))]
+        let executable = tools.join("claude");
+        fs::write(&executable, b"fixture").expect("native provider fixture");
+        let relative = executable
+            .strip_prefix(temporary.path())
+            .expect("relative executable")
+            .to_string_lossy()
+            .into_owned();
+        let definition = ProviderDefinition {
+            command: vec![
+                "tactus".to_owned(),
+                "provider-host".to_owned(),
+                "claude-code".to_owned(),
+            ],
+            model: None,
+            effort: None,
+            options: BTreeMap::from([("executable".to_owned(), JsonValue::String(relative))]),
+        };
+        let resolver = ExecutableResolver::new(std::ffi::OsString::new(), None, temporary.path());
+        let mut checks = Vec::new();
+
+        push_native_provider_check(&mut checks, "reviewer", &definition, &resolver);
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "provider-native:reviewer");
+        assert!(checks[0].ok, "{}", checks[0].detail);
+        assert_eq!(
+            PathBuf::from(&checks[0].detail),
+            dunce::canonicalize(executable).expect("canonical executable")
+        );
+    }
+
+    #[test]
+    fn doctor_reports_ambiguous_native_provider_candidates() {
+        let temporary = tempfile::tempdir().expect("temporary workspace");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        fs::create_dir_all(&first).expect("first tools directory");
+        fs::create_dir_all(&second).expect("second tools directory");
+        #[cfg(windows)]
+        let executable = "claude.exe";
+        #[cfg(not(windows))]
+        let executable = "claude";
+        fs::write(first.join(executable), b"first").expect("first provider");
+        fs::write(second.join(executable), b"second").expect("second provider");
+        let definition = ProviderDefinition {
+            command: vec![
+                "tactus".to_owned(),
+                "provider-host".to_owned(),
+                "claude-code".to_owned(),
+            ],
+            model: None,
+            effort: None,
+            options: BTreeMap::new(),
+        };
+        let resolver = ExecutableResolver::new(
+            env::join_paths([&first, &second]).expect("test PATH"),
+            Some(std::ffi::OsString::from(".EXE")),
+            temporary.path(),
+        );
+        let mut checks = Vec::new();
+
+        push_native_provider_check(&mut checks, "reviewer", &definition, &resolver);
+
+        assert_eq!(checks.len(), 1);
+        assert!(!checks[0].ok);
+        assert!(
+            checks[0].detail.contains("ambiguous"),
+            "{}",
+            checks[0].detail
+        );
+        let first = dunce::canonicalize(first).expect("canonical first directory");
+        let second = dunce::canonicalize(second).expect("canonical second directory");
+        assert!(
+            checks[0].detail.contains(&first.display().to_string()),
+            "{}",
+            checks[0].detail
+        );
+        assert!(
+            checks[0].detail.contains(&second.display().to_string()),
+            "{}",
+            checks[0].detail
+        );
     }
 
     #[test]
@@ -1083,6 +1263,59 @@ mod tests {
         assert!(guidance.contains("Never blindly retry `OutcomeUnknown`"));
         assert!(guidance.contains("# Bundled command reference"));
         assert!(guidance.contains("# Bundled outcome reference"));
+    }
+
+    fn write_minimal_control_layout(control: &Path) {
+        fs::create_dir_all(control.join(SCRIPTS_DIRECTORY)).expect("scripts directory");
+        fs::create_dir_all(control.join(RUNS_DIRECTORY)).expect("runs directory");
+        fs::write(control.join(CONFIG_NAME), DEFAULT_CONFIG).expect("config");
+        fs::write(control.join(PROMPT_NAME), DEFAULT_PROMPT).expect("prompt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_an_entire_linked_control_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let outside_control = temporary.path().join("outside-control");
+        fs::create_dir(&root).expect("project directory");
+        write_minimal_control_layout(&outside_control);
+        symlink(&outside_control, root.join(CONTROL_DIRECTORY)).expect("control symlink");
+
+        let error = Workspace::discover(&root).expect_err("linked control rejected");
+        assert!(error.to_string().contains("plain directory"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovery_rejects_an_entire_control_junction() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let outside_control = temporary.path().join("outside-control");
+        fs::create_dir(&root).expect("project directory");
+        write_minimal_control_layout(&outside_control);
+        let control = root.join(CONTROL_DIRECTORY);
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:TACTUS_TEST_JUNCTION -Target $env:TACTUS_TEST_TARGET | Out-Null",
+            ])
+            .env("TACTUS_TEST_JUNCTION", &control)
+            .env("TACTUS_TEST_TARGET", &outside_control)
+            .output()
+            .expect("create control junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = Workspace::discover(&root).expect_err("control junction rejected");
+        assert!(error.to_string().contains("plain directory"));
     }
 
     #[cfg(unix)]

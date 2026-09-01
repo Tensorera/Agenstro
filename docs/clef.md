@@ -2,7 +2,7 @@
 title: Program workflows with Clef
 status: alpha
 owners: [clef]
-last_verified: 2026-08-20
+last_verified: 2026-09-01
 applies_to: "clef-sdk 0.3.0.0"
 platforms: [windows, ubuntu]
 ---
@@ -133,8 +133,8 @@ before they enter later steps.
 
 ## Explicit concurrency
 
-Clef never infers a hidden DAG. `parallel` and `parallelAll` are the only
-combinators that request concurrency:
+Clef never infers a hidden DAG. `parallel`, `parallelAll`, and
+`parallelAllBounded` are the combinators that request concurrency:
 
 ```haskell
 (security, correctness) <-
@@ -142,6 +142,51 @@ combinators that request concurrency:
     (invoke securityReview plan)
     (invoke correctnessReview plan)
 ```
+
+Use a bounded collection when the input can grow:
+
+```haskell
+reviews <- parallelAllBounded 4 (reviewOne <$> documents)
+```
+
+`parallelAllBounded` preserves traversal order even when branches finish out
+of order. Like `parallelAll`, it uses structured cancellation: if one branch
+throws, unfinished siblings are cancelled. The limit must be positive.
+
+The runtime also admits at most `limits.max_concurrent_provider_calls`
+provider processes at once (default 4). That shared permit is acquired at each
+`provider:` plugin boundary and released on completion, failure, timeout, or
+cancellation. Clef does not hold it while evaluating an enclosing or nested
+`Workflow`, so nested composition cannot consume a permit merely by waiting
+for another branch. Generic plugins and effects are not charged to this
+provider-agent pool; use `parallelAllBounded` to bound broader work.
+
+Tactus may include this optional object in `clef.runtime/v1` runtime JSON:
+
+```json
+{
+  "limits": {
+    "max_concurrent_provider_calls": 4,
+    "plugin_timeout_seconds": 3600,
+    "provider_timeout_seconds": 13500,
+    "provider_outer_timeout_seconds": 14400,
+    "max_request_bytes": 1048576,
+    "max_frame_bytes": 33554432,
+    "max_stdout_bytes": 67108864,
+    "max_event_frames": 10000,
+    "max_stderr_bytes": 1048576
+  }
+}
+```
+
+`provider_timeout_seconds` is the Tactus dispatch deadline (13,500 seconds by
+default); the dispatcher derives a 13,440-second native-provider deadline so
+it retains 60 seconds for cleanup. `provider_outer_timeout_seconds` is Clef's
+14,400-second outer process boundary, and the enclosing workflow script has a
+separate 15,300-second outer deadline. Missing `limits` or fields retain safe
+defaults. Byte and frame limits still govern the outer
+`agenstro.plugin/v1` stream; `max_frame_bytes` cannot exceed 33,554,432 bytes,
+and native provider streaming has separate adapter-local limits.
 
 Both branches share the runtime and may perform external work. A failure in
 one branch does not imply the other branch or its side effects were rolled
@@ -177,6 +222,15 @@ Important error groups include:
 
 Never automatically retry `OutcomeUnknown` unless the external operation is
 known to be idempotent and has been reconciled.
+
+The structured cause of a Clef `PluginOutcomeUnknown` includes a safe summary:
+`phase`, `frames_seen`, progress counts, the last event **type** (never its
+prompt or model-output body), and `last_event_unix_ms`, timestamped when Clef
+accepted that event rather than when it later formed the diagnostic. It also
+sets `external_effect_possible` and a reconciliation policy that marks blind
+automatic retry unsafe. Provider-supplied detail objects are not copied into
+this broadly consumed diagnostic; `reported_details_withheld` records whether
+one was present.
 
 ## Typed norms, rubrics, and refinement
 
@@ -241,6 +295,23 @@ automatic repair round. Reaching the round limit returns the last candidate and
 critique even if the policy still rejects it, so the caller remains responsible
 for the delivery gate. `refineBudget` is explicit generator policy; the
 combinator cannot inject it into a caller-defined generator automatically.
+
+Use the same rubric as an explicit delivery gate:
+
+```haskell
+validated <- validate DomainStage Correctness articleRubric article
+```
+
+The threshold is inclusive: `Correctness` gates both `Correctness` and
+`Blocking`, while `Blocking` gates only `Blocking`. `validationFailures` is the
+pure first-class projection when a caller wants to inspect the result before
+deciding. A failed gate raises `ValidationFailed`; its structured diagnostic
+uses code `workflow.validation_failed` and a `validation_failed` array. Each
+entry contains `stage` (`structure`, `readability`, `domain`, or `reviewer`),
+the Norm identity as `rule`, `expected` data from the Norm, `observed` data
+from the Violation, and the Norm's `provenance`. This reuses
+`Norm`/`Rubric`/`Critique`; it does not add another checker or upgrade either
+`agenstro.norm/v1` or `agenstro.plugin/v1`.
 
 See the [norm v1 reference](reference/norm-v1.md) and
 [ADR-0005](adr/0005-norms-rubrics-and-refinement.md).

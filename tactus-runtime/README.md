@@ -61,14 +61,17 @@ tactus init
 tactus list
 tactus prompt
 tactus generate --provider codex "create a typed multi-step workflow"
-tactus check
+tactus check --all
 tactus check .tactus\scripts\010_contract.hs
-tactus run
+tactus run --all
 tactus run --script .tactus\scripts\010_contract.hs -- --workflow-argument
 tactus doctor
 tactus smoke
 tactus smoke provider:codex --live
 tactus plugin-call workspace.paths describe --namespace effect
+tactus runs list
+tactus runs unfinished
+tactus runs show RUN_ID
 tactus studio inspect
 tactus session list --limit 50
 tactus session show --session session-7f3a91
@@ -89,15 +92,20 @@ tactus session answer --session session-7f3a91 --turn 3 --axis desk.frame --opti
   is explicit. Prefix ambiguous names with `provider:`, `effect:`, or
   `plugin:`.
 - `plugin-call` calls any registered method with an open JSON object.
+- `runs list/summarize/unfinished/show` reads validated local run evidence;
+  `runs archive/gc` previews conservative retention actions unless `--yes` is
+  supplied.
 - `studio` exposes the bounded, redacted control projection consumed by Motivo;
   it is not a second daemon or workflow API.
 - `session list/show/answer` exposes bounded durable decision state. `answer`
   is a locked compare-and-set on the displayed turn; Tactus does not yet expose
   planner execution or `session advance`.
 
-`check` and `run` are fail-fast unless `--keep-going` is supplied. Supervised
-commands have a default 1,800-second deadline; use `--timeout-seconds 0` on a
-command that exposes the option only when deliberately disabling it.
+`check` and `run` require an explicit path, `--all`, or an inclusive entry
+range, and are fail-fast unless `--keep-going` is supplied. The default direct
+deadline is 1,800 seconds for `check` and 15,300 seconds for one complete
+workflow script. Use `--timeout-seconds 0` on a command that exposes the option
+only when deliberately disabling it.
 
 ## Typed configuration
 
@@ -112,6 +120,25 @@ The initialized configuration uses built-in Tactus subcommands:
 api = "clef.runtime/v1"
 default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
+
+[limits]
+max_concurrent_provider_calls = 4
+check_timeout_seconds = 1800
+script_timeout_seconds = 15300
+plugin_timeout_seconds = 3600
+provider_timeout_seconds = 13500
+provider_outer_timeout_seconds = 14400
+max_request_bytes = 1048576
+max_frame_bytes = 33554432
+max_stdout_bytes = 67108864
+max_event_frames = 10000
+max_stderr_bytes = 1048576
+event_queue_bound = 4
+native_max_line_bytes = 8388608
+native_max_stdout_bytes = 1073741824
+native_max_result_bytes = 4194304
+native_max_stderr_bytes = 1048576
+native_output_queue_bound = 8
 
 [providers.codex]
 command = ["tactus", "provider-host", "codex"]
@@ -184,10 +211,10 @@ or absolute script paths. Sequence numbers, timestamps, and event counts are
 decimal strings so TypeScript clients do not lose 64-bit precision.
 
 `studio events` accepts only a validated opaque run id, does not follow symlink
-trace entries, limits each line to 1 MiB and each request to at most 8 MiB, and
-reports `ok`, `partial`, or `corrupt` integrity. Unknown event kinds remain open
-JSON data: Studio may display them but must not reinterpret them as replayable
-workflow state.
+trace entries, and limits each line and page to 36 MiB so a valid escaped
+32 MiB plugin frame can remain inspectable. It reports `ok`, `partial`, or
+`corrupt` integrity. Unknown event kinds remain open JSON data: Studio may
+display them but must not reinterpret them as replayable workflow state.
 
 ## Built-in adapters
 

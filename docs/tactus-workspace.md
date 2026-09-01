@@ -98,13 +98,33 @@ api = "clef.runtime/v1"
 default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
 
+[limits]
+max_concurrent_provider_calls = 4
+check_timeout_seconds = 1800
+script_timeout_seconds = 15300
+plugin_timeout_seconds = 3600
+provider_timeout_seconds = 13500
+provider_outer_timeout_seconds = 14400
+max_request_bytes = 1048576
+max_frame_bytes = 33554432
+max_stdout_bytes = 67108864
+max_event_frames = 10000
+max_stderr_bytes = 1048576
+event_queue_bound = 4
+native_max_line_bytes = 8388608
+native_max_stdout_bytes = 1073741824
+native_max_result_bytes = 4194304
+native_max_stderr_bytes = 1048576
+native_output_queue_bound = 8
+
 [providers.codex]
 command = ["tactus", "provider-host", "codex"]
 model = "optional-provider-model"
 effort = "high"
 
 [providers.codex.options]
-timeout_seconds = 1800
+executable = "tools/codex"
+timeout_seconds = 13440
 extra_args = []
 
 [effects."workspace.paths"]
@@ -128,6 +148,7 @@ must cross the JSON runtime boundary without changing meaning.
 | `api` | string | yes | Must equal `clef.runtime/v1` |
 | `default_provider` | string | yes | Registry name used by `invoke` and generation when no override is supplied |
 | `instructions` | path string | yes | UTF-8 generation prompt; relative paths resolve from the workspace root |
+| `limits` | table | no | Workspace-owned deadlines, transport budgets, and provider concurrency; omitted fields use validated defaults |
 | `providers` | table | yes in practice | Provider convenience registry; must contain `default_provider` |
 | `effects` | table | no | Effect operations and optional invocation observers |
 | `plugins` | table | no | Open generic plugin registry |
@@ -162,6 +183,32 @@ ambiguous; use `provider:NAME`, `effect:NAME`, `plugin:NAME`, or the explicit
 
 Provider-specific model and effort rules are maintained in [Provider setup](providers.md).
 
+### Resource limits
+
+All limit fields are optional as a group and individually; omitted values use
+the defaults shown below. Tactus validates the nested deadlines and byte/queue
+relationships before starting external work.
+
+| Field | Default | Meaning |
+| --- | ---: | --- |
+| `max_concurrent_provider_calls` | `4` | Provider processes admitted by one Clef runtime |
+| `check_timeout_seconds` | `1800` | One compiler/check process |
+| `script_timeout_seconds` | `15300` | Outer deadline for one complete workflow entry |
+| `plugin_timeout_seconds` | `3600` | Non-provider Clef plugin call |
+| `provider_timeout_seconds` | `13500` | Tactus provider dispatch, outside the derived 13,440-second native deadline |
+| `provider_outer_timeout_seconds` | `14400` | Clef provider supervisor, inside the workflow-script deadline |
+| `max_request_bytes` | `1048576` | Encoded plugin request; hard host ceiling 16 MiB |
+| `max_frame_bytes` | `33554432` | One plugin-v1 frame; also the 32 MiB ceiling |
+| `max_stdout_bytes` | `67108864` | Cumulative plugin-v1 stdout drain |
+| `max_event_frames` | `10000` | Observational event frames per invocation |
+| `max_stderr_bytes` | `1048576` | Retained plugin stderr |
+| `event_queue_bound` | `4` | Decoded frames waiting at each plugin handoff |
+| `native_max_line_bytes` | `8388608` | One native provider event line |
+| `native_max_stdout_bytes` | `1073741824` | Cumulative native provider stdout drain |
+| `native_max_result_bytes` | `4194304` | Retained native result; 5 MiB ceiling |
+| `native_max_stderr_bytes` | `1048576` | Retained native provider stderr |
+| `native_output_queue_bound` | `8` | Native stdout lines waiting for parsing |
+
 ## Script discovery
 
 Tactus recursively discovers regular `.hs` and `.lhs` files below
@@ -186,8 +233,9 @@ draft.hs              helper only
 ```
 
 Entries sort by numeric order, then by stable relative path. Helpers sort after
-entries. `tactus run` without `--script` executes runnable entries only;
-`tactus check` without explicit paths checks every discovered source.
+entries. `tactus check` and `tactus run` reject an empty selection: supply an
+explicit path/`--script`, `--all`, or an inclusive `--from` / `--through`
+range.
 
 Explicit selection remains available:
 

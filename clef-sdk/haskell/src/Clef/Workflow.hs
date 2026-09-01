@@ -22,6 +22,7 @@ module Clef.Workflow
     call,
     parallel,
     parallelAll,
+    parallelAllBounded,
     require,
     requireBecause,
     attempt,
@@ -34,8 +35,10 @@ where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently, mapConcurrently)
+import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception
   ( SomeException,
+    bracket_,
     displayException,
     finally,
     fromException,
@@ -316,6 +319,24 @@ parallel leftWorkflow rightWorkflow = Workflow $ \runtime ->
 parallelAll :: Traversable collection => collection (Workflow value) -> Workflow (collection value)
 parallelAll workflows = Workflow $ \runtime ->
   mapConcurrently (\workflow -> executeWorkflow workflow runtime) workflows
+
+-- | Run a homogeneous collection with at most the requested number of active
+-- branches.  'mapConcurrently' preserves traversal order and cancels sibling
+-- branches when one throws; the semaphore only bounds active work and is
+-- released safely on synchronous failure or asynchronous cancellation.
+parallelAllBounded :: Traversable collection => Int -> collection (Workflow value) -> Workflow (collection value)
+parallelAllBounded maximumConcurrency workflows
+  | maximumConcurrency <= 0 = Workflow $ \_ -> throwIO (RequirementFailed "parallelAllBounded concurrency must be positive")
+  | otherwise = Workflow $ \runtime -> do
+      permits <- newQSem maximumConcurrency
+      mapConcurrently
+        ( \workflow ->
+            bracket_
+              (waitQSem permits)
+              (signalQSem permits)
+              (executeWorkflow workflow runtime)
+        )
+        workflows
 
 require :: (value -> Bool) -> value -> Workflow value
 require = requireBecause "predicate returned false"

@@ -345,7 +345,7 @@ parseCapturedWindows = withObject "window log" (.: "capturedWindows")
 persistentWindowRunner :: SegnoPaths -> IORef UTCTime -> IORef Int -> IORef [Text] -> Runner
 persistentWindowRunner paths nowRef windowCalls pluginCalls = Runner runTask callPlugin
   where
-    runTask _ _ mode invocationPath resultPath _timeoutSeconds = do
+    runTask _ _ mode invocationPath resultPath _context _timeoutSeconds = do
       when (mode /= "execute") (fail "unexpected fake task mode")
       path <- maybe (fail "missing fake invocation") pure invocationPath
       invocationValue <- readJsonValue path
@@ -509,7 +509,7 @@ testOutcomeUnknownStops = withTemporaryWorkspace "outcome-unknown" $ \root -> do
   taskCalls <- newIORef (0 :: Int)
   let unknownRunner =
         baseRunner
-          { runnerTask = \_ _ _ _ _ _timeoutSeconds -> do
+          { runnerTask = \_ _ _ _ _ _context _timeoutSeconds -> do
               calls <- readIORef taskCalls
               writeIORef taskCalls (calls + 1)
               pure (ProcessOutcome (ExitFailure 9) "" "workflow crashed after starting" False),
@@ -533,7 +533,7 @@ testOutcomeUnknownStops = withTemporaryWorkspace "outcome-unknown" $ \root -> do
 fakeRunner :: UTCTime -> Runner
 fakeRunner now = Runner runTask callPlugin
   where
-    runTask _ _ mode invocationPath resultPath _timeoutSeconds = do
+    runTask _ _ mode invocationPath resultPath _context _timeoutSeconds = do
       exists <- doesFileExist resultPath
       assert (not exists) "SEGNO_RESULT_PATH was not unique and nonexistent"
       when (mode /= "execute") (ioError (userError "unexpected fake task mode"))

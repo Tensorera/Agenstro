@@ -180,8 +180,17 @@ data ProcessOutcome = ProcessOutcome
   }
   deriving (Eq, Show)
 
+-- | Safe correlation context forwarded to Tactus.  The idempotency/business
+-- key itself never enters the child environment; only its SHA-256 is exposed.
+data TaskRunContext = TaskRunContext
+  { taskRunTask :: Text,
+    taskRunOccurrenceId :: Text,
+    taskRunBusinessKeySha256 :: Text
+  }
+  deriving (Eq, Show)
+
 data Runner = Runner
-  { runnerTask :: FilePath -> FilePath -> Text -> Maybe FilePath -> FilePath -> Int -> IO ProcessOutcome,
+  { runnerTask :: FilePath -> FilePath -> Text -> Maybe FilePath -> FilePath -> Maybe TaskRunContext -> Int -> IO ProcessOutcome,
     runnerPlugin :: FilePath -> Text -> Text -> Object -> IO (Either PluginFailure Value)
   }
 
@@ -256,7 +265,10 @@ defaultDriverEnvironment =
       driverRetrySeconds = 30,
       driverMaximumAttempts = 3,
       driverCatchupLimit = 100,
-      driverTaskTimeoutSeconds = 1800
+      -- Keep Segno's explicit phase budget aligned with Tactus'
+      -- `limits.script_timeout_seconds` default.  The Tactus dispatcher owns
+      -- the shorter provider deadlines and cleanup headroom inside this bound.
+      driverTaskTimeoutSeconds = 15300
     }
 
 discoverWorkspaceRoot :: FilePath -> IO FilePath
@@ -297,7 +309,7 @@ installJob environment start script = do
   when (outsideWorkspace relativeScript) (throwIO (InvalidJob "job script must be inside the Tactus workspace"))
   manifest <- withExchange paths "install" $ \exchange -> do
     let resultPath = exchange </> "result.json"
-    outcome <- runnerTask (driverRunner environment) (pathsRoot paths) absoluteScript "describe" Nothing resultPath (driverTaskTimeoutSeconds environment)
+    outcome <- runnerTask (driverRunner environment) (pathsRoot paths) absoluteScript "describe" Nothing resultPath Nothing (driverTaskTimeoutSeconds environment)
     unless (processExitCode outcome == ExitSuccess) $
       throwIO (ExternalCommandFailed (renderProcessFailure "tactus describe" outcome))
     readJsonFile resultPath
@@ -475,6 +487,13 @@ executeClaimed environment paths job claimed = do
             "execute"
             (Just invocationPath)
             resultPath
+            ( Just
+                TaskRunContext
+                  { taskRunTask = manifestTask manifest,
+                    taskRunOccurrenceId = occurrenceId (claimedOccurrence claimed),
+                    taskRunBusinessKeySha256 = hexDigest (SHA256.hash (TextEncoding.encodeUtf8 (occurrenceIdempotencyKey (claimedOccurrence claimed))))
+                  }
+            )
             (driverTaskTimeoutSeconds environment)
       finishedAt <- clockNow (driverClock environment)
       case outcome of
@@ -658,14 +677,23 @@ dispatchPluginProcess root pluginName method params = do
                 (ClefProtocol.pluginFailureMessage failure)
                 (ClefProtocol.pluginFailureDetails failure)
 
-runTaskProcess :: FilePath -> FilePath -> Text -> Maybe FilePath -> FilePath -> Int -> IO ProcessOutcome
-runTaskProcess root script mode invocationPath resultPath timeoutSeconds = do
+runTaskProcess :: FilePath -> FilePath -> Text -> Maybe FilePath -> FilePath -> Maybe TaskRunContext -> Int -> IO ProcessOutcome
+runTaskProcess root script mode invocationPath resultPath taskContext timeoutSeconds = do
   inherited <- getEnvironment
   let overrides =
         [ ("SEGNO_MODE", Text.unpack mode),
           ("SEGNO_RESULT_PATH", resultPath)
         ]
           <> maybe [] (\path -> [("SEGNO_INVOCATION_PATH", path)]) invocationPath
+          <> maybe
+            []
+            ( \context ->
+                [ ("TACTUS_TASK_NAME", Text.unpack (taskRunTask context)),
+                  ("TACTUS_OCCURRENCE_ID", Text.unpack (taskRunOccurrenceId context)),
+                  ("TACTUS_BUSINESS_KEY_SHA256", Text.unpack (taskRunBusinessKeySha256 context))
+                ]
+            )
+            taskContext
       environment = mergeEnvironment inherited overrides
       command =
         ( proc

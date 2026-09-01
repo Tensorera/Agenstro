@@ -18,13 +18,20 @@ use thiserror::Error;
 
 use crate::{
     adapters::{SUPERVISED_PROCESS_GROUP_ENV, run_provider_host, run_workspace_paths_host},
+    executable::effective_path,
     journal::{
         JournalError, Presentation, PresentationCategory, RunJournal, RunSummary, TransitionGuard,
-        TransitionTrigger, TriggerKind, diagnostic_summary, diagnostic_value_summary,
+        TransitionTrigger, TriggerKind, diagnostic_failure_details, diagnostic_summary,
+        diagnostic_value_summary,
+    },
+    limits::RuntimeLimits,
+    outcome::{
+        OutcomeContext, OutcomeState, OutcomeUnknownDiagnostic, classify_outcome,
+        outcome_is_unknown,
     },
     process::{
-        CancellationToken, InvocationKind, ProcessError, ProcessOutcome, ProcessSpec,
-        ProcessSupervisor,
+        CancellationToken, CommandKind, CommandOutcome, InvocationKind, InvocationPhase,
+        InvocationProgress, ProcessError, ProcessOutcome, ProcessSpec, ProcessSupervisor,
     },
     protocol::{
         JsonField, PluginFailure, PluginFrame, PluginRequest, TerminalResult, decode_json,
@@ -34,7 +41,7 @@ use crate::{
     studio::{ControlFailure, ControlSuccess},
     workspace::{
         PluginNamespace, ResolvedPlugin, ScriptInfo, Workspace, WorkspaceError, discover_scripts,
-        doctor, effective_path, initialize_workspace,
+        doctor, initialize_workspace,
     },
 };
 
@@ -97,17 +104,26 @@ enum Command {
     },
     /// Type-check Haskell sources without running them.
     Check {
-        /// Explicit sources; defaults to every discovered Haskell source.
+        /// Explicit sources. Repeat as positional arguments to preserve order.
         scripts: Vec<PathBuf>,
+        /// Select every discovered Haskell source explicitly.
+        #[arg(long)]
+        all: bool,
+        /// Select numbered entries at or after this three-digit order.
+        #[arg(long, value_parser = validate_entry_order)]
+        from: Option<u16>,
+        /// Select numbered entries at or before this three-digit order.
+        #[arg(long, value_parser = validate_entry_order)]
+        through: Option<u16>,
         /// Continue after a source fails.
         #[arg(long)]
         keep_going: bool,
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Deadline for each Cabal/GHC process.
-        #[arg(long, default_value_t = 1800)]
-        timeout_seconds: u64,
+        /// Override the workspace deadline for each Cabal/GHC process; zero disables it.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         /// Additional Cabal library packages exposed while checking. Clef is
         /// always included. Repeat for more than one extension package.
         #[arg(long = "package", value_parser = validate_haskell_package)]
@@ -118,15 +134,24 @@ enum Command {
         /// Explicit entry source. Repeat to control selection and order.
         #[arg(long = "script")]
         scripts: Vec<PathBuf>,
+        /// Select every numbered entry explicitly.
+        #[arg(long)]
+        all: bool,
+        /// Select numbered entries at or after this three-digit order.
+        #[arg(long, value_parser = validate_entry_order)]
+        from: Option<u16>,
+        /// Select numbered entries at or before this three-digit order.
+        #[arg(long, value_parser = validate_entry_order)]
+        through: Option<u16>,
         /// Continue after an entry fails.
         #[arg(long)]
         keep_going: bool,
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Deadline for each Cabal/runghc process.
-        #[arg(long, default_value_t = 1800)]
-        timeout_seconds: u64,
+        /// Override the workspace deadline for each Cabal/runghc process; zero disables it.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         /// Additional Cabal library packages exposed while running. Clef is
         /// always included. Repeat for more than one extension package.
         #[arg(long = "package", value_parser = validate_haskell_package)]
@@ -146,9 +171,9 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Provider invocation deadline.
-        #[arg(long, default_value_t = 1800)]
-        timeout_seconds: u64,
+        /// Override the workspace outer provider deadline; zero disables it.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         /// Emit one terminal JSON report.
         #[arg(long)]
         json: bool,
@@ -168,9 +193,9 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Wall-clock deadline in seconds; zero disables it.
-        #[arg(long, default_value_t = 1800)]
-        timeout_seconds: u64,
+        /// Override the workspace invocation deadline; zero disables it.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         /// Emit one terminal JSON report on stdout.
         #[arg(long)]
         json: bool,
@@ -187,13 +212,13 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Wall-clock deadline in seconds; zero disables it.
-        #[arg(long, default_value_t = 1800)]
-        timeout_seconds: u64,
+        /// Override the workspace dispatch deadline; zero disables it.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
     /// Call the `smoke` method on selected unambiguous plugins.
     Smoke {
-        /// Plugin names. With none, checks all generic `[plugins]` entries.
+        /// Plugin selectors. With none, checks every provider, effect, and generic plugin.
         names: Vec<String>,
         /// Allow adapters to perform a live external probe.
         #[arg(long)]
@@ -210,6 +235,12 @@ enum Command {
         /// Read-only Studio query.
         #[command(subcommand)]
         command: StudioCommand,
+    },
+    /// Query and conservatively maintain local run journals.
+    Runs {
+        /// Run-journal operation.
+        #[command(subcommand)]
+        command: RunsCommand,
     },
     /// Read and answer durable human-in-the-loop sessions.
     Session {
@@ -261,6 +292,108 @@ enum StudioCommand {
         /// Maximum event bytes scanned for this page.
         #[arg(long, default_value_t = 4 * 1024 * 1024)]
         max_bytes: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsCommand {
+    /// List active run journals newest first.
+    List {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Canonical state or specific invocation kind.
+        #[arg(long)]
+        state: Option<String>,
+        /// Unix milliseconds or a relative age such as `24h` or `7d`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum records returned after filtering.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Emit one JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregate active runs by canonical state and invocation kind.
+    Summarize {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Canonical state or specific invocation kind.
+        #[arg(long)]
+        state: Option<String>,
+        /// Unix milliseconds or a relative age such as `24h` or `7d`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Emit one JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List runs that have no atomically published terminal summary.
+    Unfinished {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Unix milliseconds or a relative age such as `24h` or `7d`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum records returned after filtering.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Emit one JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one run and a bounded event page.
+    Show {
+        /// Opaque run identifier returned by `runs list`.
+        run_id: String,
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Return events whose sequence is greater than this cursor.
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        /// Maximum events in this page.
+        #[arg(long, default_value_t = 250)]
+        limit: usize,
+        /// Maximum retained event bytes in this page.
+        #[arg(long, default_value_t = 4 * 1024 * 1024)]
+        max_bytes: usize,
+        /// Emit one JSON result including redacted event payloads.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move eligible old runs into `.tactus/runs/archive`.
+    Archive {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Upper time bound as Unix milliseconds or a relative age.
+        #[arg(long)]
+        before: String,
+        /// Apply the previewed moves. Without this flag nothing changes.
+        #[arg(long)]
+        yes: bool,
+        /// Emit one JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete eligible runs already moved into the archive.
+    Gc {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Optional upper time bound as Unix milliseconds or a relative age.
+        #[arg(long)]
+        before: Option<String>,
+        /// Apply the previewed deletions. Without this flag nothing changes.
+        #[arg(long)]
+        yes: bool,
+        /// Emit one JSON result.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -346,13 +479,25 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
         Command::RuntimeJson { root } => runtime_json(&root),
         Command::Check {
             scripts,
+            all,
+            from,
+            through,
             keep_going,
             root,
             timeout_seconds,
             packages,
-        } => check(&root, &scripts, &packages, keep_going, timeout_seconds),
+        } => check(
+            &root,
+            ScriptSelection::new(&scripts, all, from, through),
+            &packages,
+            keep_going,
+            timeout_seconds,
+        ),
         Command::Run {
             scripts,
+            all,
+            from,
+            through,
             keep_going,
             root,
             timeout_seconds,
@@ -360,7 +505,7 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             arguments,
         } => run_scripts_command(
             &root,
-            &scripts,
+            ScriptSelection::new(&scripts, all, from, through),
             &packages,
             &arguments,
             keep_going,
@@ -409,6 +554,7 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             json,
         } => smoke(&root, &names, live, json),
         Command::Studio { command } => studio(command),
+        Command::Runs { command } => runs(command),
         Command::Session { command } => session(command),
         Command::ProviderHost { kind } => Ok(run_provider_host(
             &kind,
@@ -565,6 +711,222 @@ fn studio(command: StudioCommand) -> Result<i32, CliError> {
     }
 }
 
+fn runs(command: RunsCommand) -> Result<i32, CliError> {
+    match command {
+        RunsCommand::List {
+            root,
+            state,
+            since,
+            limit,
+            json,
+        } => present_runs_result(
+            "runs.list",
+            json,
+            crate::runs::list(&root, state.as_deref(), since.as_deref(), limit),
+            render_run_list,
+        ),
+        RunsCommand::Summarize {
+            root,
+            state,
+            since,
+            json,
+        } => present_runs_result(
+            "runs.summarize",
+            json,
+            crate::runs::summarize(&root, state.as_deref(), since.as_deref()),
+            render_run_aggregate,
+        ),
+        RunsCommand::Unfinished {
+            root,
+            since,
+            limit,
+            json,
+        } => present_runs_result(
+            "runs.unfinished",
+            json,
+            crate::runs::unfinished(&root, since.as_deref(), limit),
+            render_run_list,
+        ),
+        RunsCommand::Show {
+            run_id,
+            root,
+            after,
+            limit,
+            max_bytes,
+            json,
+        } => present_runs_result(
+            "runs.show",
+            json,
+            crate::runs::show(&root, &run_id, after, limit, max_bytes),
+            render_run_show,
+        ),
+        RunsCommand::Archive {
+            root,
+            before,
+            yes,
+            json,
+        } => present_runs_result(
+            "runs.archive",
+            json,
+            crate::runs::archive(&root, &before, yes),
+            render_maintenance_report,
+        ),
+        RunsCommand::Gc {
+            root,
+            before,
+            yes,
+            json,
+        } => present_runs_result(
+            "runs.gc",
+            json,
+            crate::runs::gc(&root, before.as_deref(), yes),
+            render_maintenance_report,
+        ),
+    }
+}
+
+fn present_runs_result<T: Serialize>(
+    command: &'static str,
+    json: bool,
+    result: Result<T, crate::runs::RunsError>,
+    render_human: impl FnOnce(&T),
+) -> Result<i32, CliError> {
+    match result {
+        Ok(value) => {
+            if json {
+                print_json(&value)?;
+            } else {
+                render_human(&value);
+            }
+            Ok(0)
+        }
+        Err(error) if json => {
+            print_json(&serde_json::json!({
+                "api":crate::runs::RUNS_API,
+                "command":command,
+                "status":"error",
+                "error":{
+                    "code":error.code(),
+                    "message":error.public_message(),
+                }
+            }))?;
+            Ok(1)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn render_run_list(result: &crate::runs::RunList) {
+    render_presentation(&Presentation::new(
+        PresentationCategory::Info,
+        format!(
+            "{} run journal(s) matched; {} shown.",
+            result.matched,
+            result.runs.len()
+        ),
+    ));
+    for run in &result.runs {
+        render_presentation(&Presentation::new(
+            run_record_category(run),
+            format!(
+                "{}: {} (started {}, {} event(s), integrity {:?}).",
+                run.run_id, run.state, run.started_unix_ms, run.events_recorded, run.integrity
+            ),
+        ));
+    }
+}
+
+fn render_run_aggregate(result: &crate::runs::RunAggregate) {
+    render_presentation(&Presentation::new(
+        PresentationCategory::Info,
+        format!(
+            "{} run journal(s) matched; {} are protected from maintenance.",
+            result.matched, result.protected
+        ),
+    ));
+    for (state, count) in &result.states {
+        render_presentation(&Presentation::new(
+            if matches!(state.as_str(), "outcome_unknown" | "open" | "corrupt") {
+                PresentationCategory::Warning
+            } else {
+                PresentationCategory::Info
+            },
+            format!("{state}: {count}"),
+        ));
+    }
+}
+
+fn render_run_show(result: &crate::runs::RunShow) {
+    render_presentation(&Presentation::new(
+        run_record_category(&result.run),
+        format!(
+            "{}: {} (integrity {:?}, {} event(s)).",
+            result.run.run_id, result.run.state, result.run.integrity, result.run.events_recorded
+        ),
+    ));
+    for event in &result.page.events {
+        if let Some(presentation) = event.presentation.as_ref() {
+            render_presentation(presentation);
+        } else {
+            render_presentation(&Presentation::new(
+                PresentationCategory::Info,
+                format!(
+                    "Event #{} at {}: {}.",
+                    event.seq, event.at_unix_ms, event.kind
+                ),
+            ));
+        }
+    }
+    if !result.page.complete {
+        render_presentation(&Presentation::new(
+            PresentationCategory::Warning,
+            format!(
+                "More or partial event evidence remains; continue after sequence {}.",
+                result.page.next_after
+            ),
+        ));
+    }
+}
+
+fn render_maintenance_report(result: &crate::runs::MaintenanceReport) {
+    render_presentation(&Presentation::new(
+        PresentationCategory::State,
+        if result.dry_run {
+            format!(
+                "Run {} preview selected {} action(s); no files changed.",
+                result.operation,
+                result.actions.len()
+            )
+        } else {
+            format!(
+                "Run {} applied {} action(s).",
+                result.operation,
+                result.actions.len()
+            )
+        },
+    ));
+    for action in &result.actions {
+        render_presentation(&Presentation::new(
+            PresentationCategory::Info,
+            format!("{}: {}.", action.run_id, action.action),
+        ));
+    }
+    for protected in &result.protected {
+        render_presentation(&Presentation::new(
+            PresentationCategory::Warning,
+            format!("{} was preserved: {}.", protected.run_id, protected.reason),
+        ));
+    }
+}
+
+fn run_record_category(run: &crate::runs::RunRecord) -> PresentationCategory {
+    if matches!(run.state.as_str(), "outcome_unknown" | "open" | "corrupt") {
+        PresentationCategory::Warning
+    } else {
+        PresentationCategory::Info
+    }
+}
+
 fn session(command: SessionCommand) -> Result<i32, CliError> {
     let (name, result) = match command {
         SessionCommand::List { root, limit } => (
@@ -622,16 +984,37 @@ fn runtime_json(start: &Path) -> Result<i32, CliError> {
     Ok(0)
 }
 
+#[derive(Clone, Copy)]
+struct ScriptSelection<'a> {
+    explicit: &'a [PathBuf],
+    all: bool,
+    from: Option<u16>,
+    through: Option<u16>,
+}
+
+impl<'a> ScriptSelection<'a> {
+    fn new(explicit: &'a [PathBuf], all: bool, from: Option<u16>, through: Option<u16>) -> Self {
+        Self {
+            explicit,
+            all,
+            from,
+            through,
+        }
+    }
+}
+
 fn check(
     start: &Path,
-    explicit: &[PathBuf],
+    selection: ScriptSelection<'_>,
     additional_packages: &[String],
     keep_going: bool,
-    timeout_seconds: u64,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?;
+    let timeout_seconds =
+        timeout_seconds.unwrap_or(workspace.load_config()?.limits.check_timeout_seconds);
     let cancellation = install_cancellation()?;
-    let scripts = select_scripts(&workspace, explicit, false)?;
+    let scripts = select_scripts(&workspace, selection, false)?;
     if scripts.is_empty() {
         return Err(CliError::InvalidArguments(
             "no Haskell scripts were selected for checking".to_owned(),
@@ -655,8 +1038,8 @@ fn check(
         timeout_seconds,
         &cancellation,
     )?;
-    if build != 0 {
-        return Ok(build);
+    if !build.is_success() {
+        return Ok(command_exit_code(&build));
     }
     let include = format!("-i{}", workspace.scripts_path.display());
     let mut first_failure = 0;
@@ -675,15 +1058,19 @@ fn check(
             command.push(package.clone());
         }
         command.extend([include.clone(), script.display().to_string()]);
-        let status = execute_tool(
+        let outcome = execute_tool(
             &workspace,
             command,
             environment,
             timeout_seconds,
             &cancellation,
         )?;
-        if status != 0 {
+        let status = command_exit_code(&outcome);
+        if !outcome.is_success() {
             first_failure = first_failure.max(status);
+            if outcome.kind != CommandKind::Exited {
+                break;
+            }
             if !keep_going {
                 break;
             }
@@ -694,15 +1081,17 @@ fn check(
 
 fn run_scripts_command(
     start: &Path,
-    explicit: &[PathBuf],
+    selection: ScriptSelection<'_>,
     additional_packages: &[String],
     arguments: &[String],
     keep_going: bool,
-    timeout_seconds: u64,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?;
+    let timeout_seconds =
+        timeout_seconds.unwrap_or(workspace.load_config()?.limits.script_timeout_seconds);
     let cancellation = install_cancellation()?;
-    let scripts = select_scripts(&workspace, explicit, true)?;
+    let scripts = select_scripts(&workspace, selection, true)?;
     if scripts.is_empty() {
         return Err(CliError::InvalidArguments(
             "no numbered Haskell entry scripts were found".to_owned(),
@@ -748,6 +1137,7 @@ fn run_scripts_command(
     );
     let mut reached_running = false;
     let mut clef_observation_error = None;
+    let mut script_results = Vec::new();
     let result = match ToolRuntime::create(&workspace) {
         Ok(mut tool_runtime) => {
             tool_runtime
@@ -790,39 +1180,91 @@ fn run_scripts_command(
                             note_journal_degradation(&mut journal_degradation, error);
                         }
                         render_presentation(&running_presentation);
+                        ClefSidecarFacts::default()
                     }
                     ScriptBatchObservation::Diagnostics(diagnostic_path) => {
-                        if journal_degradation.is_some() {
-                            return;
-                        }
+                        let authoritative = inspect_clef_sidecar_facts(diagnostic_path);
                         match import_clef_diagnostic_sidecar(&mut journal, diagnostic_path) {
-                            Ok(_) => {}
+                            Ok(mut facts) => {
+                                facts.outcome_unknown |= authoritative.outcome_unknown;
+                                facts.observation_ambiguous |= authoritative.observation_ambiguous;
+                                facts
+                            }
                             Err(ClefSidecarError::Journal(error)) => {
                                 note_journal_degradation(&mut journal_degradation, error);
+                                authoritative
                             }
                             Err(error) => {
                                 note_observation_degradation(&mut clef_observation_error, error);
+                                ClefSidecarFacts {
+                                    observation_ambiguous: true,
+                                    ..authoritative
+                                }
                             }
                         }
+                    }
+                    ScriptBatchObservation::ScriptFinished {
+                        script,
+                        outcome,
+                        clef_outcome_unknown,
+                    } => {
+                        let result = ScriptExecutionResult {
+                            script: workspace_relative_script(&workspace, script),
+                            exit_code: outcome.exit_code,
+                            command_kind: outcome.kind,
+                            outcome_unknown: clef_outcome_unknown
+                                || outcome.kind != CommandKind::Exited
+                                || outcome.exit_code.is_none(),
+                        };
+                        if journal_degradation.is_none()
+                            && let Err(error) = journal.record_with_presentation(
+                                if outcome.is_success() && !clef_outcome_unknown {
+                                    "script.completed"
+                                } else if result.outcome_unknown {
+                                    "script.outcome_unknown"
+                                } else {
+                                    "script.failed"
+                                },
+                                serde_json::to_value(&result)
+                                    .expect("script result serialization is infallible"),
+                                Some(Presentation::new(
+                                    if outcome.is_success() && !clef_outcome_unknown {
+                                        PresentationCategory::Info
+                                    } else if result.outcome_unknown {
+                                        PresentationCategory::Warning
+                                    } else {
+                                        PresentationCategory::Error
+                                    },
+                                    format!(
+                                        "Script {} ended as {:?} with exit code {:?}.",
+                                        result.script, result.command_kind, result.exit_code
+                                    ),
+                                )),
+                            )
+                        {
+                            note_journal_degradation(&mut journal_degradation, error);
+                        }
+                        script_results.push(result);
+                        ClefSidecarFacts::default()
                     }
                 },
             )
         }
         Err(error) => Err(error),
     };
-    let mut outcome = script_batch_outcome(&result, scripts.len(), started.elapsed());
+    let mut outcome =
+        script_batch_outcome(&result, scripts.len(), &script_results, started.elapsed());
+    let batch_exit_code = script_batch_exit_code(&result);
     outcome.observation_error = clef_observation_error.clone();
-    let state_after = if outcome.kind == InvocationKind::Succeeded {
-        "succeeded"
-    } else {
-        "failed"
-    };
+    let state_after = classify_outcome(&outcome).as_str();
     let terminal_presentation = Presentation::new(
         PresentationCategory::State,
-        if state_after == "succeeded" {
-            format!("Script batch {run_id} succeeded.")
-        } else {
-            format!("Script batch {run_id} entered the failed state.")
+        match state_after {
+            "succeeded" => format!("Script batch {run_id} succeeded."),
+            "outcome_unknown" => {
+                format!("Script batch {run_id} entered the outcome-unknown state.")
+            }
+            _ => format!("Script batch {run_id} entered the failed state."),
         },
     );
     if journal_degradation.is_none()
@@ -853,6 +1295,8 @@ fn run_scripts_command(
                 "tactus.script_batch",
                 if state_after == "succeeded" {
                     "script_batch.completed"
+                } else if state_after == "outcome_unknown" {
+                    "script_batch.outcome_unknown"
                 } else {
                     "script_batch.failed"
                 },
@@ -864,6 +1308,7 @@ fn run_scripts_command(
                 "outcome_kind":outcome_kind_name(outcome.kind),
                 "diagnostic":outcome.error.as_deref(),
                 "observation_error":outcome.observation_error.as_deref(),
+                "scripts":script_results,
             })),
             TransitionGuard::new(
                 "script batch result classified",
@@ -880,6 +1325,19 @@ fn run_scripts_command(
     {
         note_journal_degradation(&mut journal_degradation, error);
     }
+    if journal_degradation.is_none()
+        && outcome_is_unknown(&outcome)
+        && let Err(error) = journal.record_with_presentation(
+            "runtime.outcome_unknown",
+            outcome_unknown_diagnostic_value("workflow", "script_batch", "run", &outcome),
+            Some(Presentation::new(
+                PresentationCategory::Warning,
+                "A workflow script may have completed externally; Tactus did not retry it automatically.",
+            )),
+        )
+    {
+        note_journal_degradation(&mut journal_degradation, error);
+    }
     let (_, final_degradation) =
         finish_journal_preserving_outcome(&mut journal, outcome, journal_degradation);
     render_presentation(&terminal_presentation);
@@ -892,12 +1350,32 @@ fn run_scripts_command(
     if let Some(diagnostic) = final_degradation.as_deref() {
         render_journal_degradation(diagnostic);
     }
-    result
+    result.map(|_| batch_exit_code)
 }
 
 enum ScriptBatchObservation<'a> {
     Prepared,
     Diagnostics(&'a Path),
+    ScriptFinished {
+        script: &'a Path,
+        outcome: &'a CommandOutcome,
+        clef_outcome_unknown: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ScriptExecutionResult {
+    script: String,
+    exit_code: Option<i32>,
+    command_kind: CommandKind,
+    outcome_unknown: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ScriptBatchExecution {
+    command: CommandOutcome,
+    script_started: bool,
+    clef_outcome_unknown: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -911,8 +1389,8 @@ fn execute_script_batch(
     cancellation: &CancellationToken,
     environment: &BTreeMap<String, String>,
     diagnostic_directory: &Path,
-    mut on_observation: impl FnMut(ScriptBatchObservation<'_>),
-) -> Result<i32, CliError> {
+    mut on_observation: impl FnMut(ScriptBatchObservation<'_>) -> ClefSidecarFacts,
+) -> Result<ScriptBatchExecution, CliError> {
     let project = workspace.control.display().to_string();
     let packages = haskell_packages(additional_packages);
     let mut build_command = vec![
@@ -929,12 +1407,17 @@ fn execute_script_batch(
         timeout_seconds,
         cancellation,
     )?;
-    if build != 0 {
-        return Ok(build);
+    if !build.is_success() {
+        return Ok(ScriptBatchExecution {
+            command: build,
+            script_started: false,
+            clef_outcome_unknown: false,
+        });
     }
     on_observation(ScriptBatchObservation::Prepared);
     let include = format!("-i{}", workspace.scripts_path.display());
     let mut first_failure = 0;
+    let mut elapsed_ms = build.elapsed_ms;
     for (index, script) in scripts.iter().enumerate() {
         let mut command = vec![
             "cabal".to_owned(),
@@ -957,6 +1440,10 @@ fn execute_script_batch(
         ));
         let mut script_environment = environment.clone();
         script_environment.insert(
+            "TACTUS_WORKFLOW_NAME".to_owned(),
+            workspace_relative_script(workspace, script),
+        );
+        script_environment.insert(
             "TACTUS_DIAGNOSTIC_PATH".to_owned(),
             diagnostic_path.display().to_string(),
         );
@@ -967,47 +1454,187 @@ fn execute_script_batch(
             timeout_seconds,
             cancellation,
         );
-        on_observation(ScriptBatchObservation::Diagnostics(&diagnostic_path));
+        let facts = on_observation(ScriptBatchObservation::Diagnostics(&diagnostic_path));
         let status = status?;
-        if status != 0 {
-            first_failure = first_failure.max(status);
+        let clef_outcome_unknown =
+            facts.outcome_unknown || (facts.observation_ambiguous && !status.is_success());
+        elapsed_ms = elapsed_ms.saturating_add(status.elapsed_ms);
+        on_observation(ScriptBatchObservation::ScriptFinished {
+            script,
+            outcome: &status,
+            clef_outcome_unknown,
+        });
+        if status.kind != CommandKind::Exited || status.exit_code.is_none() || clef_outcome_unknown
+        {
+            return Ok(ScriptBatchExecution {
+                command: status,
+                script_started: true,
+                clef_outcome_unknown,
+            });
+        }
+        let exit_code = status.exit_code.unwrap_or(1);
+        if exit_code != 0 {
+            first_failure = first_failure.max(exit_code);
             if !keep_going {
                 break;
             }
         }
     }
-    Ok(first_failure)
+    Ok(ScriptBatchExecution {
+        command: CommandOutcome {
+            kind: CommandKind::Exited,
+            exit_code: Some(first_failure),
+            error: None,
+            elapsed_ms,
+        },
+        script_started: true,
+        clef_outcome_unknown: false,
+    })
+}
+
+fn workspace_relative_script(workspace: &Workspace, script: &Path) -> String {
+    script
+        .strip_prefix(&workspace.root)
+        .unwrap_or(script)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn script_batch_outcome(
-    result: &Result<i32, CliError>,
+    result: &Result<ScriptBatchExecution, CliError>,
     script_count: usize,
+    script_results: &[ScriptExecutionResult],
     elapsed: Duration,
 ) -> ProcessOutcome {
     let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     match result {
-        Ok(0) => ProcessOutcome {
-            kind: InvocationKind::Succeeded,
-            exit_code: Some(0),
-            terminal: Some(TerminalResult::Success {
-                value: serde_json::json!({"script_count":script_count,"exit_code":0}),
+        Ok(execution) if execution.command.is_success() && !execution.clef_outcome_unknown => {
+            ProcessOutcome {
+                kind: InvocationKind::Succeeded,
+                exit_code: Some(0),
+                terminal: Some(TerminalResult::Success {
+                    value: serde_json::json!({
+                        "script_count":script_count,
+                        "completed_script_count":script_results.len(),
+                        "scripts":script_results,
+                        "exit_code":0
+                    }),
+                }),
+                frames_seen: 0,
+                events_dropped: 0,
+                observation_error: None,
+                stderr: String::new(),
+                stderr_truncated: false,
+                error: None,
+                elapsed_ms,
+                progress: None,
+            }
+        }
+        Ok(execution) if !execution.script_started => ProcessOutcome {
+            kind: InvocationKind::PluginFailed,
+            exit_code: execution.command.exit_code,
+            terminal: Some(TerminalResult::Failure {
+                error: PluginFailure {
+                    code: "script_preparation_failed".to_owned(),
+                    message: "script batch preparation did not complete successfully".to_owned(),
+                    details: Some(serde_json::json!({
+                        "script_count":script_count,
+                        "completed_script_count":script_results.len(),
+                        "scripts":script_results,
+                        "command_kind":execution.command.kind,
+                        "exit_code":execution.command.exit_code,
+                    })),
+                },
             }),
             frames_seen: 0,
             events_dropped: 0,
             observation_error: None,
             stderr: String::new(),
             stderr_truncated: false,
-            error: None,
+            error: execution.command.error.clone(),
             elapsed_ms,
+            progress: None,
         },
-        Ok(exit_code) => ProcessOutcome {
+        Ok(execution) if execution.clef_outcome_unknown => ProcessOutcome {
             kind: InvocationKind::PluginFailed,
-            exit_code: Some(*exit_code),
+            exit_code: execution.command.exit_code,
             terminal: Some(TerminalResult::Failure {
                 error: PluginFailure {
+                    code: "outcome_unknown".to_owned(),
+                    message: "a Clef workflow reported an ambiguous external result".to_owned(),
+                    details: Some(serde_json::json!({
+                        "script_count":script_count,
+                        "completed_script_count":script_results.len(),
+                        "scripts":script_results,
+                    })),
+                },
+            }),
+            frames_seen: 1,
+            events_dropped: 0,
+            observation_error: None,
+            stderr: String::new(),
+            stderr_truncated: false,
+            error: execution.command.error.clone(),
+            elapsed_ms,
+            progress: Some(script_command_progress(
+                &execution.command,
+                InvocationPhase::TerminalReceived,
+            )),
+        },
+        Ok(execution) => {
+            let kind = match execution.command.kind {
+                CommandKind::Exited if execution.command.exit_code.is_none() => {
+                    InvocationKind::RuntimeFailed
+                }
+                CommandKind::Exited => InvocationKind::PluginFailed,
+                CommandKind::DeadlineExceeded => InvocationKind::DeadlineExceeded,
+                CommandKind::Cancelled => InvocationKind::Cancelled,
+                CommandKind::RuntimeFailed => InvocationKind::RuntimeFailed,
+            };
+            let terminal = (execution.command.kind == CommandKind::Exited
+                && execution.command.exit_code.is_some())
+            .then(|| TerminalResult::Failure {
+                error: PluginFailure {
                     code: "script_batch_failed".to_owned(),
-                    message: format!("script batch exited with code {exit_code}"),
-                    details: Some(serde_json::json!({"script_count":script_count})),
+                    message: format!(
+                        "script batch exited with code {}",
+                        execution.command.exit_code.unwrap_or(1)
+                    ),
+                    details: Some(serde_json::json!({
+                        "script_count":script_count,
+                        "completed_script_count":script_results.len(),
+                        "scripts":script_results,
+                    })),
+                },
+            });
+            ProcessOutcome {
+                kind,
+                exit_code: execution.command.exit_code,
+                terminal,
+                frames_seen: 0,
+                events_dropped: 0,
+                observation_error: None,
+                stderr: String::new(),
+                stderr_truncated: false,
+                error: execution.command.error.clone().or_else(|| {
+                    (execution.command.kind == CommandKind::Exited
+                        && execution.command.exit_code.is_none())
+                    .then(|| "script process terminated without an exit code".to_owned())
+                }),
+                elapsed_ms,
+                progress: (execution.command.kind != CommandKind::Exited
+                    || execution.command.exit_code.is_none())
+                .then(|| script_command_progress(&execution.command, InvocationPhase::Dispatched)),
+            }
+        }
+        Err(error) => ProcessOutcome {
+            kind: InvocationKind::PluginFailed,
+            exit_code: Some(1),
+            terminal: Some(TerminalResult::Failure {
+                error: PluginFailure {
+                    code: "script_supervisor_start_failed".to_owned(),
+                    message: error.to_string(),
+                    details: None,
                 },
             }),
             frames_seen: 0,
@@ -1017,19 +1644,33 @@ fn script_batch_outcome(
             stderr_truncated: false,
             error: None,
             elapsed_ms,
+            progress: None,
         },
-        Err(error) => ProcessOutcome {
-            kind: InvocationKind::RuntimeFailed,
-            exit_code: None,
-            terminal: None,
-            frames_seen: 0,
-            events_dropped: 0,
-            observation_error: None,
-            stderr: String::new(),
-            stderr_truncated: false,
-            error: Some(error.to_string()),
-            elapsed_ms,
-        },
+    }
+}
+
+fn script_batch_exit_code(result: &Result<ScriptBatchExecution, CliError>) -> i32 {
+    match result {
+        Ok(execution) if execution.command.is_success() && !execution.clef_outcome_unknown => 0,
+        Ok(execution) if execution.command.kind == CommandKind::Exited => execution
+            .command
+            .exit_code
+            .filter(|code| *code != 0)
+            .unwrap_or(1),
+        Ok(_) | Err(_) => 1,
+    }
+}
+
+fn script_command_progress(command: &CommandOutcome, phase: InvocationPhase) -> InvocationProgress {
+    InvocationProgress {
+        phase,
+        dispatched_unix_ms: current_unix_millis().saturating_sub(command.elapsed_ms),
+        first_response_unix_ms: None,
+        last_event_unix_ms: None,
+        cleanup_completed: matches!(
+            command.kind,
+            CommandKind::Exited | CommandKind::DeadlineExceeded | CommandKind::Cancelled
+        ),
     }
 }
 
@@ -1037,12 +1678,13 @@ fn generate(
     start: &Path,
     goal: &str,
     selected_provider: Option<&str>,
-    timeout_seconds: u64,
+    timeout_seconds: Option<u64>,
     json: bool,
 ) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?;
     let cancellation = install_cancellation()?;
     let config = workspace.load_config()?;
+    let timeout_seconds = timeout_seconds.unwrap_or(config.limits.provider_outer_timeout_seconds);
     let provider_name = selected_provider.unwrap_or(&config.default_provider);
     config
         .providers
@@ -1098,7 +1740,7 @@ fn generate(
         workspace: &workspace,
         invocation: &invocation,
         context: &context,
-        timeout_seconds,
+        timeout_seconds: config.limits.plugin_timeout_seconds,
         console_events: !json,
     };
     let mut active = Vec::new();
@@ -1118,7 +1760,7 @@ fn generate(
             begin_params,
             InvocationControl {
                 namespace: PluginNamespace::Effect,
-                timeout_seconds,
+                timeout_seconds: config.limits.plugin_timeout_seconds,
                 console_events: !json,
                 cancellation: &cancellation,
             },
@@ -1204,26 +1846,10 @@ fn generate(
             }
         }
     }
-    let observer_outcome = provider_report.as_ref().map_or_else(
-        || {
-            if provider_error
-                .as_deref()
-                .is_some_and(|error| error.contains("observe.begin"))
-            {
-                "begin_error"
-            } else {
-                "outcome_unknown"
-            }
-        },
-        |report| match report.summary.outcome.kind {
-            InvocationKind::Succeeded => "ok",
-            InvocationKind::PluginFailed => "error",
-            InvocationKind::ProcessFailed
-            | InvocationKind::ProtocolFailed
-            | InvocationKind::RuntimeFailed
-            | InvocationKind::DeadlineExceeded
-            | InvocationKind::Cancelled => "outcome_unknown",
-        },
+    let observer_outcome = generation_observer_outcome(
+        provider_report.as_ref(),
+        &evidence,
+        provider_error.as_deref(),
     );
     end_observers(
         &observer_context,
@@ -1234,51 +1860,84 @@ fn generate(
         &mut generation_journal,
         &mut generation_journal_degradation,
     )?;
-    let scripts = discover_scripts(&workspace)?;
-    let generated_delta = generated_script_delta(&script_baseline, &scripts)?;
+    let (scripts, generated_delta, workspace_inspection_error) = match discover_scripts(&workspace)
+    {
+        Ok(scripts) => match generated_script_delta(&script_baseline, &scripts) {
+            Ok(delta) => (scripts, delta, None),
+            Err(error) => (scripts, Vec::new(), Some(error.to_string())),
+        },
+        Err(error) => (Vec::new(), Vec::new(), Some(error.to_string())),
+    };
     record_journal_event(
         &mut generation_journal,
         &mut generation_journal_degradation,
         "generation.discovered_scripts",
-        serde_json::json!({"scripts":scripts, "generated_delta":generated_delta}),
+        serde_json::json!({
+            "scripts":scripts,
+            "generated_delta":generated_delta,
+            "inspection_error":workspace_inspection_error,
+        }),
     );
     let provider_ok = provider_report
         .as_ref()
         .is_some_and(|report| report.summary.outcome.is_success())
         && provider_error.is_none();
-    let generation_error = (provider_ok && generated_delta.is_empty()).then(|| {
+    let generation_error = (provider_ok
+        && workspace_inspection_error.is_none()
+        && generated_delta.is_empty())
+    .then(|| {
         "provider completed successfully but created or modified no non-empty numbered Haskell entry"
             .to_owned()
     });
-    let success = provider_ok && generation_error.is_none() && observer_errors.is_empty();
-    let mut generation_outcome = provider_report.as_ref().map_or_else(
-        || {
-            synthetic_runtime_failure(
-                provider_error
-                    .as_deref()
-                    .unwrap_or("provider was not invoked"),
-            )
-        },
-        |report| report.summary.outcome.clone(),
-    );
-    if !observer_errors.is_empty() {
-        generation_outcome = synthetic_runtime_failure(&format!(
-            "observer cleanup failed: {}",
-            observer_errors.join("; ")
-        ));
-    } else if let Some(error) = generation_error.as_deref() {
-        generation_outcome = synthetic_runtime_failure(error);
-    }
-    let generation_state = if success {
-        "succeeded"
-    } else if provider_report
+    // Ambiguity has priority over later, known cleanup/no-delta failures.  An
+    // observer is an external effect too, so losing its terminal fact makes
+    // the aggregate unsafe to retry even when the provider itself was known.
+    let unknown_outcome = provider_report
         .as_ref()
-        .is_some_and(|report| outcome_is_unknown(report.summary.outcome.kind))
-    {
-        "outcome_unknown"
+        .map(|report| &report.summary.outcome)
+        .filter(|outcome| outcome_is_unknown(outcome))
+        .or_else(|| {
+            evidence.iter().find_map(|item| {
+                item.report
+                    .as_ref()
+                    .map(|report| &report.summary.outcome)
+                    .filter(|outcome| outcome_is_unknown(outcome))
+            })
+        });
+    let inspection_unknown = workspace_inspection_error.as_deref().and_then(|error| {
+        provider_report
+            .as_ref()
+            .map(|report| post_execution_inspection_unknown(error, &report.summary.outcome))
+    });
+    let generation_outcome = if let Some(outcome) = unknown_outcome {
+        outcome.clone()
+    } else if let Some(outcome) = inspection_unknown {
+        outcome
+    } else if !observer_errors.is_empty() {
+        known_runtime_failure(
+            "observer_cleanup_failed",
+            &format!("observer cleanup failed: {}", observer_errors.join("; ")),
+        )
+    } else if let Some(error) = generation_error.as_deref() {
+        known_runtime_failure("generation_produced_no_script", error)
+    } else if let Some(error) = workspace_inspection_error.as_deref() {
+        known_runtime_failure("workspace_inspection_failed", error)
+    } else if let Some(report) = provider_report.as_ref() {
+        report.summary.outcome.clone()
     } else {
-        "failed"
+        known_runtime_failure(
+            "provider_invocation_failed",
+            provider_error
+                .as_deref()
+                .unwrap_or("provider was not invoked"),
+        )
     };
+    let generation_state = classify_outcome(&generation_outcome).as_str();
+    let success = provider_ok
+        && generation_error.is_none()
+        && workspace_inspection_error.is_none()
+        && observer_errors.is_empty()
+        && generation_state == "succeeded";
     if generation_journal_degradation.is_none()
         && let Err(error) = generation_journal.record_transition(
             "running",
@@ -1293,6 +1952,7 @@ fn generate(
                 "generated_script_count":generated_delta.len(),
                 "observer_error_count":observer_errors.len(),
                 "generation_error":generation_error.as_deref(),
+                "workspace_inspection_error":workspace_inspection_error.as_deref(),
             })),
             TransitionGuard::new(
                 "generation outcome classified",
@@ -1316,10 +1976,12 @@ fn generate(
         && generation_journal_degradation.is_none()
         && let Err(error) = generation_journal.record_with_presentation(
             "runtime.outcome_unknown",
-            serde_json::json!({
-                "provider":provider_name,
-                "reason":"provider execution did not yield a provable terminal result",
-            }),
+            outcome_unknown_diagnostic_value(
+                "workflow",
+                "generate",
+                "run",
+                &generation_outcome,
+            ),
             Some(Presentation::new(
                 PresentationCategory::Warning,
                 "The provider may have changed the workspace; Tactus did not retry it automatically.",
@@ -1352,6 +2014,7 @@ fn generate(
             "observer_errors": observer_errors,
             "error": provider_error,
             "generation_error": generation_error,
+            "workspace_inspection_error": workspace_inspection_error,
             "scripts": scripts,
         }))?;
     } else {
@@ -1368,6 +2031,12 @@ fn generate(
         }
         if let Some(error) = generation_error.as_deref() {
             render_presentation(&Presentation::new(PresentationCategory::Error, error));
+        }
+        if let Some(error) = workspace_inspection_error.as_deref() {
+            render_presentation(&Presentation::new(
+                PresentationCategory::Error,
+                format!("Workspace inspection failed after generation: {error}"),
+            ));
         }
         for error in observer_errors {
             render_presentation(&Presentation::new(
@@ -1428,6 +2097,38 @@ struct ObserverEvidence {
     report: Option<InvocationReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+fn generation_observer_outcome(
+    provider_report: Option<&InvocationReport>,
+    evidence: &[ObserverEvidence],
+    provider_error: Option<&str>,
+) -> &'static str {
+    let begin_reports = evidence.iter().filter(|item| item.phase == "observe.begin");
+    if begin_reports
+        .clone()
+        .filter_map(|item| item.report.as_ref())
+        .any(|report| classify_outcome(&report.summary.outcome) == OutcomeState::OutcomeUnknown)
+    {
+        return "outcome_unknown";
+    }
+    if begin_reports.clone().any(|item| {
+        item.error.is_some()
+            || item.report.as_ref().is_some_and(|report| {
+                classify_outcome(&report.summary.outcome) != OutcomeState::Succeeded
+            })
+    }) {
+        return "begin_error";
+    }
+    if let Some(report) = provider_report {
+        return match classify_outcome(&report.summary.outcome) {
+            OutcomeState::Succeeded => "ok",
+            OutcomeState::Failed => "error",
+            OutcomeState::OutcomeUnknown => "outcome_unknown",
+        };
+    }
+    debug_assert!(provider_error.is_some());
+    "error"
 }
 
 struct ActiveObserver {
@@ -1553,56 +2254,172 @@ fn end_observers(
     Ok(())
 }
 
-fn synthetic_runtime_failure(message: &str) -> ProcessOutcome {
+fn known_runtime_failure(code: &str, message: &str) -> ProcessOutcome {
     ProcessOutcome {
-        kind: InvocationKind::RuntimeFailed,
-        exit_code: None,
-        terminal: None,
+        kind: InvocationKind::PluginFailed,
+        exit_code: Some(1),
+        terminal: Some(TerminalResult::Failure {
+            error: PluginFailure {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                details: None,
+            },
+        }),
         frames_seen: 0,
         events_dropped: 0,
         observation_error: None,
         stderr: String::new(),
         stderr_truncated: false,
-        error: Some(message.to_owned()),
+        error: None,
         elapsed_ms: 0,
+        progress: None,
+    }
+}
+
+fn post_execution_inspection_unknown(message: &str, basis: &ProcessOutcome) -> ProcessOutcome {
+    ProcessOutcome {
+        kind: InvocationKind::RuntimeFailed,
+        exit_code: None,
+        terminal: None,
+        frames_seen: basis.frames_seen,
+        events_dropped: basis.events_dropped,
+        observation_error: basis.observation_error.clone(),
+        stderr: String::new(),
+        stderr_truncated: basis.stderr_truncated || !basis.stderr.is_empty(),
+        error: Some(format!(
+            "workspace inspection failed after provider execution: {message}"
+        )),
+        elapsed_ms: basis.elapsed_ms,
+        progress: basis.progress.clone().or_else(|| {
+            Some(InvocationProgress {
+                phase: InvocationPhase::TerminalReceived,
+                dispatched_unix_ms: current_unix_millis().saturating_sub(basis.elapsed_ms),
+                first_response_unix_ms: None,
+                last_event_unix_ms: None,
+                cleanup_completed: true,
+            })
+        }),
+    }
+}
+
+fn process_error_outcome(error: &ProcessError) -> ProcessOutcome {
+    if matches!(error, ProcessError::MissingPipe(_)) {
+        ProcessOutcome {
+            kind: InvocationKind::RuntimeFailed,
+            exit_code: None,
+            terminal: None,
+            frames_seen: 0,
+            events_dropped: 0,
+            observation_error: None,
+            stderr: String::new(),
+            stderr_truncated: false,
+            error: Some(error.to_string()),
+            elapsed_ms: 0,
+            progress: Some(InvocationProgress {
+                phase: InvocationPhase::Dispatched,
+                dispatched_unix_ms: current_unix_millis(),
+                first_response_unix_ms: None,
+                last_event_unix_ms: None,
+                cleanup_completed: true,
+            }),
+        }
+    } else {
+        known_runtime_failure("plugin_start_failed", &error.to_string())
     }
 }
 
 fn select_scripts(
     workspace: &Workspace,
-    explicit: &[PathBuf],
+    selection: ScriptSelection<'_>,
     entries_only: bool,
 ) -> Result<Vec<PathBuf>, CliError> {
-    if !explicit.is_empty() {
-        return explicit
-            .iter()
-            .map(|value| {
-                let candidate = if value.is_absolute() {
-                    value.clone()
-                } else {
-                    workspace.root.join(value)
-                };
-                let resolved = dunce::canonicalize(candidate)?;
-                let is_haskell = resolved.is_file()
-                    && resolved
-                        .extension()
-                        .and_then(|suffix| suffix.to_str())
-                        .is_some_and(|suffix| {
-                            suffix.eq_ignore_ascii_case("hs") || suffix.eq_ignore_ascii_case("lhs")
-                        });
-                if !is_haskell {
-                    return Err(CliError::InvalidArguments(format!(
-                        "not a Haskell source: {}",
-                        resolved.display()
-                    )));
-                }
-                Ok(resolved)
-            })
-            .collect();
+    let ScriptSelection {
+        explicit,
+        all,
+        from,
+        through,
+    } = selection;
+    let range_selected = from.is_some() || through.is_some();
+    if !explicit.is_empty() && (all || range_selected) {
+        return Err(CliError::InvalidArguments(
+            "explicit script paths cannot be combined with --all, --from, or --through".to_owned(),
+        ));
     }
-    Ok(discover_scripts(workspace)?
+    if all && range_selected {
+        return Err(CliError::InvalidArguments(
+            "--all cannot be combined with --from or --through".to_owned(),
+        ));
+    }
+    if from.is_some_and(|value| value > 999) || through.is_some_and(|value| value > 999) {
+        return Err(CliError::InvalidArguments(
+            "entry orders must be between 000 and 999".to_owned(),
+        ));
+    }
+    if from
+        .zip(through)
+        .is_some_and(|(from, through)| from > through)
+    {
+        return Err(CliError::InvalidArguments(
+            "--from must not be greater than --through".to_owned(),
+        ));
+    }
+    if explicit.is_empty() && !all && !range_selected {
+        return Err(CliError::InvalidArguments(
+            if entries_only {
+                "select at least one entry with --script, --all, --from, or --through"
+            } else {
+                "select at least one source path, --all, --from, or --through"
+            }
+            .to_owned(),
+        ));
+    }
+    let discovered = discover_scripts(workspace)?;
+    if !explicit.is_empty() {
+        let mut selected = Vec::with_capacity(explicit.len());
+        for value in explicit {
+            let candidate = if value.is_absolute() {
+                value.clone()
+            } else {
+                workspace.root.join(value)
+            };
+            let named_metadata = fs::symlink_metadata(&candidate)?;
+            if named_metadata.file_type().is_symlink() {
+                return Err(CliError::InvalidArguments(format!(
+                    "script path must not be a symbolic link: {}",
+                    value.display()
+                )));
+            }
+            let resolved = dunce::canonicalize(candidate)?;
+            let Some(script) = discovered.iter().find(|script| script.path == resolved) else {
+                return Err(CliError::InvalidArguments(format!(
+                    "script must be a discovered Haskell source below .tactus/scripts: {}",
+                    value.display()
+                )));
+            };
+            if entries_only && !script.runnable {
+                return Err(CliError::InvalidArguments(format!(
+                    "run accepts only numbered NNN_slug.hs or NNN_slug.lhs entries: {}",
+                    value.display()
+                )));
+            }
+            if !selected.contains(&resolved) {
+                selected.push(resolved);
+            }
+        }
+        return Ok(selected);
+    }
+    Ok(discovered
         .into_iter()
-        .filter(|script| !entries_only || script.runnable)
+        .filter(|script| {
+            if range_selected {
+                script.order.is_some_and(|order| {
+                    from.is_none_or(|lower| order >= lower)
+                        && through.is_none_or(|upper| order <= upper)
+                })
+            } else {
+                all && (!entries_only || script.runnable)
+            }
+        })
         .map(|script: ScriptInfo| script.path)
         .collect())
 }
@@ -1782,13 +2599,97 @@ enum ClefSidecarError {
     Journal(#[from] JournalError),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ClefSidecarFacts {
+    imported: usize,
+    outcome_unknown: bool,
+    observation_ambiguous: bool,
+}
+
+/// Classify an authoritative Clef workflow transition independently from
+/// journal projection.  A degraded journal or malformed trailing observation
+/// must never turn an already-recorded ambiguous external result into a known
+/// failure.
+fn inspect_clef_sidecar_facts(path: &Path) -> ClefSidecarFacts {
+    let mut facts = ClefSidecarFacts::default();
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return facts;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        facts.observation_ambiguous = true;
+        return facts;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        facts.observation_ambiguous = true;
+        return facts;
+    };
+    if metadata.len() > MAX_CLEF_SIDECAR_BYTES {
+        facts.observation_ambiguous = true;
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_CLEF_SIDECAR_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        facts.observation_ambiguous = true;
+        return facts;
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CLEF_SIDECAR_BYTES {
+        facts.observation_ambiguous = true;
+    }
+    let mut records_seen = 0_usize;
+    for raw_line in bytes.split(|byte| *byte == b'\n') {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+        if records_seen >= MAX_CLEF_SIDECAR_RECORDS || line.len() > MAX_CLEF_SIDECAR_LINE_BYTES {
+            facts.observation_ambiguous = true;
+            break;
+        }
+        records_seen += 1;
+        let Ok(record) = serde_json::from_slice::<ClefSidecarRecord>(line) else {
+            facts.observation_ambiguous = true;
+            break;
+        };
+        if let ClefSidecarRecord::StateTransition {
+            code,
+            level,
+            message,
+            subject,
+            state_before,
+            trigger,
+            guard,
+            state_after,
+            context,
+        } = record
+            && level == ClefPresentationLevel::State
+            && !message.trim().is_empty()
+            && message.len() <= 4_096
+            && !subject.trim().is_empty()
+            && is_stable_diagnostic_identifier(&subject)
+            && is_stable_diagnostic_identifier(&state_before)
+            && is_stable_diagnostic_identifier(&state_after)
+            && guard.passed
+            && state_before != state_after
+            && clef_transition_is_outcome_unknown(&code, &state_after, &trigger, &context)
+        {
+            facts.outcome_unknown = true;
+        }
+    }
+    facts
+}
+
 fn import_clef_diagnostic_sidecar(
     journal: &mut RunJournal,
     path: &Path,
-) -> Result<usize, ClefSidecarError> {
+) -> Result<ClefSidecarFacts, ClefSidecarError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ClefSidecarFacts::default());
+        }
         Err(error) => return Err(ClefSidecarError::Io(error)),
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -1919,7 +2820,7 @@ fn import_clef_diagnostic_sidecar(
         records.push(record);
     }
 
-    let mut imported = 0;
+    let mut facts = ClefSidecarFacts::default();
     for record in records {
         match record {
             ClefSidecarRecord::StateTransition {
@@ -1934,6 +2835,8 @@ fn import_clef_diagnostic_sidecar(
                 context,
             } => {
                 debug_assert_eq!(level, ClefPresentationLevel::State);
+                facts.outcome_unknown |=
+                    clef_transition_is_outcome_unknown(&code, &state_after, &trigger, &context);
                 let trigger = *trigger;
                 let guard = *guard;
                 let evidence = diagnostic_value_summary(&serde_json::json!({
@@ -1944,6 +2847,8 @@ fn import_clef_diagnostic_sidecar(
                     "guard_reason":guard.reason,
                     "context":context,
                 }));
+                let structured_context =
+                    project_clef_transition_context(&code, &state_after, &context);
                 let durable_message =
                     format!("Clef recorded transition {code}: {state_before} to {state_after}.");
                 journal.record_transition(
@@ -1953,6 +2858,7 @@ fn import_clef_diagnostic_sidecar(
                             "source":"clef.sidecar",
                             "code":code,
                             "evidence":evidence,
+                            "structured_context":structured_context,
                         })),
                     TransitionGuard::new(
                         "Clef sidecar record passed strict validation",
@@ -1992,15 +2898,194 @@ fn import_clef_diagnostic_sidecar(
                     serde_json::json!({
                         "source":"clef.sidecar",
                         "code":code,
-                        "context":diagnostic_value_summary(&Value::Object(context)),
+                        "context":project_clef_message_context(&code, &context),
                     }),
                     Some(Presentation::new(category, durable_message)),
                 )?;
             }
         }
-        imported += 1;
+        facts.imported += 1;
     }
-    Ok(imported)
+    Ok(facts)
+}
+
+fn clef_transition_is_outcome_unknown(
+    code: &str,
+    state_after: &str,
+    trigger: &ClefTransitionTrigger,
+    context: &Map<String, Value>,
+) -> bool {
+    code == "workflow.result.error"
+        && state_after == "outcome_unknown"
+        && trigger.code == "workflow.result.error"
+        && trigger.source == "clef.workflow"
+        && context
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            == Some("plugin.outcome_unknown")
+}
+
+fn project_clef_transition_context(
+    code: &str,
+    state_after: &str,
+    context: &Map<String, Value>,
+) -> Value {
+    if code != "workflow.result.error" || !matches!(state_after, "failed" | "outcome_unknown") {
+        return diagnostic_value_summary(&Value::Object(context.clone()));
+    }
+    let Some(error) = context.get("error").and_then(Value::as_object) else {
+        return diagnostic_value_summary(&Value::Object(context.clone()));
+    };
+    match error.get("code").and_then(Value::as_str) {
+        Some("workflow.validation_failed") => project_clef_validation_error(error),
+        Some("plugin.outcome_unknown") => project_clef_outcome_unknown_error(error),
+        _ => None,
+    }
+    .unwrap_or_else(|| diagnostic_value_summary(&Value::Object(context.clone())))
+}
+
+fn project_clef_message_context(code: &str, context: &Map<String, Value>) -> Value {
+    if code == "plugin.outcome_unknown"
+        && let Some(cause) = context.get("cause").and_then(Value::as_object)
+        && let Some(projected) = project_clef_outcome_unknown_cause(cause)
+    {
+        return projected;
+    }
+    diagnostic_value_summary(&Value::Object(context.clone()))
+}
+
+fn project_clef_validation_error(error: &Map<String, Value>) -> Option<Value> {
+    let failures = error.get("validation_failed")?.as_array()?;
+    if failures.is_empty() || failures.len() > 128 {
+        return None;
+    }
+    let mut projected_failures = Vec::with_capacity(failures.len());
+    for failure in failures {
+        let fields = failure.as_object()?;
+        let stage = fields.get("stage")?.as_str()?;
+        if !matches!(stage, "structure" | "readability" | "domain" | "reviewer") {
+            return None;
+        }
+        let severity = fields.get("severity")?.as_str()?;
+        if !is_stable_diagnostic_identifier(severity) {
+            return None;
+        }
+        let mut projected = Map::new();
+        projected.insert("stage".to_owned(), Value::String(stage.to_owned()));
+        projected.insert("severity".to_owned(), Value::String(severity.to_owned()));
+        if let Some(rule) = fields
+            .get("rule")
+            .and_then(Value::as_str)
+            .filter(|value| is_stable_diagnostic_identifier(value))
+        {
+            projected.insert("rule".to_owned(), Value::String(rule.to_owned()));
+        }
+        for name in ["expected", "observed", "provenance"] {
+            projected.insert(name.to_owned(), fields.get(name)?.clone());
+        }
+        projected_failures.push(Value::Object(projected));
+    }
+    let source = Value::Object(error.clone());
+    let mut projected = diagnostic_failure_details(&serde_json::json!({
+        "code":"workflow.validation_failed",
+        "validation_failed":projected_failures,
+    }));
+    if let Value::Object(fields) = &mut projected {
+        fields.insert(
+            "source_withheld".to_owned(),
+            diagnostic_value_summary(&source),
+        );
+    }
+    Some(projected)
+}
+
+fn project_clef_outcome_unknown_error(error: &Map<String, Value>) -> Option<Value> {
+    let cause = error.get("cause")?.as_object()?;
+    let mut projected = project_clef_outcome_unknown_cause(cause)?;
+    let Value::Object(fields) = &mut projected else {
+        return None;
+    };
+    fields.insert(
+        "code".to_owned(),
+        Value::String("plugin.outcome_unknown".to_owned()),
+    );
+    fields.insert(
+        "source_withheld".to_owned(),
+        diagnostic_value_summary(&Value::Object(error.clone())),
+    );
+    Some(projected)
+}
+
+fn project_clef_outcome_unknown_cause(cause: &Map<String, Value>) -> Option<Value> {
+    let cause_code = cause.get("code")?.as_str()?;
+    if !is_stable_diagnostic_identifier(cause_code) {
+        return None;
+    }
+    let details = cause.get("details")?.as_object()?;
+    let mut projected_details = Map::new();
+    for name in ["frames_seen", "last_event_unix_ms"] {
+        if let Some(Value::Number(value)) = details.get(name) {
+            projected_details.insert(name.to_owned(), Value::Number(value.clone()));
+        }
+    }
+    for name in ["external_effect_possible", "reported_details_withheld"] {
+        if let Some(Value::Bool(value)) = details.get(name) {
+            projected_details.insert(name.to_owned(), Value::Bool(*value));
+        }
+    }
+    if let Some(phase) = details
+        .get("phase")
+        .and_then(Value::as_str)
+        .filter(|value| is_stable_diagnostic_identifier(value))
+    {
+        projected_details.insert("phase".to_owned(), Value::String(phase.to_owned()));
+    }
+    if let Some(progress) = details.get("progress").and_then(Value::as_object) {
+        let mut projected_progress = Map::new();
+        if let Some(Value::Number(value)) = progress.get("event_frames_seen") {
+            projected_progress.insert("event_frames_seen".to_owned(), Value::Number(value.clone()));
+        }
+        if let Some(Value::Bool(value)) = progress.get("terminal_frame_seen") {
+            projected_progress.insert("terminal_frame_seen".to_owned(), Value::Bool(*value));
+        }
+        projected_details.insert("progress".to_owned(), Value::Object(projected_progress));
+    }
+    if let Some(last_event) = details.get("last_event").and_then(Value::as_object)
+        && let Some(kind) = last_event
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|value| is_stable_diagnostic_identifier(value))
+    {
+        projected_details.insert("last_event".to_owned(), serde_json::json!({"type":kind}));
+    }
+    if let Some(reconciliation) = details.get("reconciliation").and_then(Value::as_object) {
+        let mut projected_reconciliation = Map::new();
+        for name in ["required", "automatic_retry_safe"] {
+            if let Some(Value::Bool(value)) = reconciliation.get(name) {
+                projected_reconciliation.insert(name.to_owned(), Value::Bool(*value));
+            }
+        }
+        projected_details.insert(
+            "reconciliation".to_owned(),
+            Value::Object(projected_reconciliation),
+        );
+    }
+    let source = Value::Object(cause.clone());
+    let mut projected = diagnostic_failure_details(&serde_json::json!({
+        "cause":{
+            "code":cause_code,
+            "details":projected_details,
+        }
+    }));
+    if let Value::Object(fields) = &mut projected {
+        fields.insert(
+            "source_withheld".to_owned(),
+            diagnostic_value_summary(&source),
+        );
+    }
+    Some(projected)
 }
 
 fn execute_tool(
@@ -2009,7 +3094,7 @@ fn execute_tool(
     environment: &BTreeMap<String, String>,
     timeout_seconds: u64,
     cancellation: &CancellationToken,
-) -> Result<i32, CliError> {
+) -> Result<CommandOutcome, CliError> {
     let mut spec = ProcessSpec::new(command, &workspace.root);
     spec.environment = environment.clone();
     spec.limits.deadline = (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
@@ -2024,7 +3109,17 @@ fn execute_tool(
             ),
         ));
     }
-    Ok(outcome.exit_code.unwrap_or(1))
+    Ok(outcome)
+}
+
+fn command_exit_code(outcome: &CommandOutcome) -> i32 {
+    if outcome.is_success() {
+        0
+    } else if outcome.kind == CommandKind::Exited {
+        outcome.exit_code.filter(|code| *code != 0).unwrap_or(1)
+    } else {
+        1
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2056,11 +3151,15 @@ fn plugin_call(
     method: &str,
     params_json: &str,
     namespace: PluginNamespace,
-    timeout_seconds: u64,
+    timeout_seconds: Option<u64>,
     json: bool,
 ) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?;
     let cancellation = install_cancellation()?;
+    let config = workspace.load_config()?;
+    let definition = workspace.resolve_plugin(&config, name, namespace)?;
+    let timeout_seconds =
+        timeout_seconds.unwrap_or(default_invocation_timeout(&config.limits, definition, true));
     let params = parse_params(params_json)?;
     let report = invoke_registered(
         &workspace,
@@ -2133,6 +3232,8 @@ fn smoke(start: &Path, names: &[String], live: bool, json: bool) -> Result<i32, 
     let mut reports = Vec::new();
     let mut successful = true;
     for (selector, name, namespace) in selected {
+        let definition = workspace.resolve_plugin(&config, &name, namespace)?;
+        let timeout_seconds = default_invocation_timeout(&config.limits, definition, false);
         let mut params = Map::new();
         params.insert("live".to_owned(), Value::Bool(live));
         let report = invoke_registered(
@@ -2142,7 +3243,7 @@ fn smoke(start: &Path, names: &[String], live: bool, json: bool) -> Result<i32, 
             params,
             InvocationControl {
                 namespace,
-                timeout_seconds: 60,
+                timeout_seconds,
                 console_events: !json,
                 cancellation: &cancellation,
             },
@@ -2382,7 +3483,14 @@ fn invoke_registered(
 ) -> Result<InvocationReport, CliError> {
     let config = workspace.load_config()?;
     let definition = workspace.resolve_plugin(&config, name, control.namespace)?;
-    inject_registered_params(workspace, definition, &mut params)?;
+    inject_registered_params(
+        workspace,
+        definition,
+        &config.limits,
+        control.timeout_seconds,
+        method,
+        &mut params,
+    )?;
     let registry = match definition {
         ResolvedPlugin::Plugin(_) => "plugin",
         ResolvedPlugin::Provider(_) => "provider",
@@ -2398,7 +3506,10 @@ fn invoke_registered(
     let run_id = journal.run_id().to_owned();
     let started_presentation = Presentation::new(
         PresentationCategory::State,
-        format!("{registry}:{name} method {method} started."),
+        format!(
+            "{} started.",
+            safe_invocation_subject(registry, name, method)
+        ),
     );
     let initial_journal_error = if let Some(error) = journal_create_error {
         Some(error)
@@ -2438,6 +3549,7 @@ fn invoke_registered(
         resolve_builtin_command(definition.command())?,
         &workspace.root,
     );
+    apply_transport_limits(&mut spec, &config.limits);
     spec.environment = tool_runtime.environment.clone();
     attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
     spec.limits.deadline =
@@ -2462,59 +3574,14 @@ fn invoke_registered(
         Ok((journal, error)) => (Some(journal), error.map(|error| error.to_string())),
         Err(error) => (None, Some(error.to_string())),
     };
-    let outcome = match invocation {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let message = error.to_string();
-            let failed_presentation = Presentation::new(
-                PresentationCategory::State,
-                format!("{registry}:{name} entered the failed state before it could start."),
-            );
-            let synthetic = synthetic_runtime_failure(&message);
-            if let Some(journal) = journal.as_mut() {
-                if journal_degradation.is_none()
-                    && let Err(journal_error) = journal.record_transition(
-                        "running",
-                        TransitionTrigger::new(
-                            TriggerKind::InternalResult,
-                            "tactus.process",
-                            "plugin.spawn_failed",
-                        )
-                        .with_details(serde_json::json!({"error":message})),
-                        TransitionGuard::new(
-                            "process start attempt classified",
-                            true,
-                            "The process could not be started, so execution is a known failure.",
-                        ),
-                        "failed",
-                        failed_presentation.clone(),
-                    )
-                {
-                    note_journal_degradation(&mut journal_degradation, journal_error);
-                }
-                let (_, degradation) = finish_journal_preserving_outcome(
-                    journal,
-                    synthetic,
-                    journal_degradation.take(),
-                );
-                journal_degradation = degradation;
-            }
-            if control.console_events {
-                render_presentation(&failed_presentation);
-            }
-            if let Some(diagnostic) = journal_degradation.as_deref() {
-                render_journal_degradation(diagnostic);
-            }
-            return Err(CliError::Process(error));
-        }
-    };
+    let outcome = invocation.unwrap_or_else(|error| process_error_outcome(&error));
     if let Some(journal) = journal.as_mut()
         && journal_degradation.is_none()
     {
         if let Err(error) = record_outcome_transition(journal, registry, name, method, &outcome) {
             note_journal_degradation(&mut journal_degradation, error);
         }
-        if journal_degradation.is_none() && outcome_is_unknown(outcome.kind) {
+        if journal_degradation.is_none() && outcome_is_unknown(&outcome) {
             let warning_message = Presentation::new(
                 PresentationCategory::Warning,
                 format!(
@@ -2523,15 +3590,7 @@ fn invoke_registered(
             );
             if let Err(error) = journal.record_with_presentation(
                 "runtime.outcome_unknown",
-                serde_json::json!({
-                    "plugin":name,
-                    "namespace":registry,
-                    "method":method,
-                    "cause":outcome_kind_name(outcome.kind),
-                    "frames_seen":outcome.frames_seen,
-                    "events_dropped":outcome.events_dropped,
-                    "diagnostic":outcome.error.as_deref(),
-                }),
+                outcome_unknown_diagnostic_value(registry, name, method, &outcome),
                 Some(warning_message),
             ) {
                 note_journal_degradation(&mut journal_degradation, error);
@@ -2560,7 +3619,7 @@ fn invoke_registered(
             render_presentation(&failure);
         }
     }
-    if outcome_is_unknown(outcome.kind) {
+    if outcome_is_unknown(outcome) {
         let warning_message = Presentation::new(
             PresentationCategory::Warning,
             format!(
@@ -2600,6 +3659,9 @@ fn invoke_registered(
 fn inject_registered_params(
     workspace: &Workspace,
     definition: ResolvedPlugin<'_>,
+    limits: &RuntimeLimits,
+    supervisor_timeout_seconds: u64,
+    method: &str,
     params: &mut Map<String, Value>,
 ) -> Result<(), CliError> {
     params
@@ -2615,11 +3677,66 @@ fn inject_registered_params(
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Map<_, _>>();
+    if matches!(definition, ResolvedPlugin::Provider(_)) {
+        for (name, value) in [
+            ("native_max_line_bytes", limits.native_max_line_bytes),
+            ("native_max_stdout_bytes", limits.native_max_stdout_bytes),
+            ("native_max_result_bytes", limits.native_max_result_bytes),
+            ("native_max_stderr_bytes", limits.native_max_stderr_bytes),
+            (
+                "native_output_queue_bound",
+                limits.native_output_queue_bound,
+            ),
+        ] {
+            options
+                .entry(name.to_owned())
+                .or_insert_with(|| Value::from(u64::try_from(value).unwrap_or(u64::MAX)));
+        }
+    }
     if let Some(provided) = params.remove("options") {
         let provided = provided.as_object().ok_or_else(|| {
             CliError::InvalidArguments("plugin params.options must be a JSON object".to_owned())
         })?;
         options.extend(provided.clone());
+    }
+    if matches!(definition, ResolvedPlugin::Provider(_)) {
+        let configured_native_timeout = limits.provider_timeout_seconds.saturating_sub(60);
+        let supervised_native_timeout = if supervisor_timeout_seconds == 0 {
+            configured_native_timeout
+        } else {
+            supervisor_timeout_seconds
+                .checked_sub(60)
+                .filter(|timeout| *timeout > 0)
+                .ok_or_else(|| {
+                    CliError::InvalidArguments(
+                        "provider supervisor timeout must be at least 61 seconds".to_owned(),
+                    )
+                })?
+        };
+        let mut native_timeout = configured_native_timeout.min(supervised_native_timeout);
+        if method == "smoke" {
+            // Provider health commands are expected to be quick. Do not let a
+            // workspace's multi-hour generation budget replace the adapter's
+            // short smoke deadline, while retaining supervisor cleanup room.
+            native_timeout = native_timeout.min(20);
+        }
+        match options.get("timeout_seconds") {
+            None => {
+                options.insert("timeout_seconds".to_owned(), Value::from(native_timeout));
+            }
+            Some(Value::Number(value))
+                if method == "smoke"
+                    && value
+                        .as_f64()
+                        .is_some_and(|seconds| seconds > native_timeout as f64) =>
+            {
+                options.insert("timeout_seconds".to_owned(), Value::from(native_timeout));
+            }
+            Some(_) => {}
+        }
+        limits
+            .validate_provider_options(&options, supervisor_timeout_seconds)
+            .map_err(CliError::InvalidArguments)?;
     }
     params.insert("options".to_owned(), Value::Object(options));
 
@@ -2669,11 +3786,32 @@ fn runtime_document(workspace: &Workspace) -> Result<Value, CliError> {
         .map_err(CliError::Workspace)
 }
 
+fn apply_transport_limits(spec: &mut ProcessSpec, limits: &RuntimeLimits) {
+    spec.limits.max_request_bytes = limits.max_request_bytes;
+    spec.limits.max_frame_bytes = limits.max_frame_bytes;
+    spec.limits.max_stdout_bytes = limits.max_stdout_bytes;
+    spec.limits.max_frames = limits.max_event_frames;
+    spec.limits.max_stderr_bytes = limits.max_stderr_bytes;
+    spec.limits.event_queue_bound = limits.event_queue_bound;
+}
+
+fn default_invocation_timeout(
+    limits: &RuntimeLimits,
+    definition: ResolvedPlugin<'_>,
+    provider_outer: bool,
+) -> u64 {
+    match definition {
+        ResolvedPlugin::Provider(_) if provider_outer => limits.provider_outer_timeout_seconds,
+        ResolvedPlugin::Provider(_) => limits.provider_timeout_seconds,
+        ResolvedPlugin::Effect(_) | ResolvedPlugin::Plugin(_) => limits.plugin_timeout_seconds,
+    }
+}
+
 fn dispatch(
     start: &Path,
     name: &str,
     namespace: PluginNamespace,
-    timeout_seconds: u64,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32, CliError> {
     if namespace == PluginNamespace::Auto {
         return Err(CliError::InvalidArguments(
@@ -2684,16 +3822,31 @@ fn dispatch(
     let cancellation = install_cancellation()?;
     let config = workspace.load_config()?;
     let definition = workspace.resolve_plugin(&config, name, namespace)?;
+    let timeout_seconds = timeout_seconds.unwrap_or(default_invocation_timeout(
+        &config.limits,
+        definition,
+        false,
+    ));
     let mut input = Vec::new();
-    io::stdin().take(1024 * 1024 + 1).read_to_end(&mut input)?;
-    if input.len() > 1024 * 1024 {
-        return Err(CliError::InvalidArguments(
-            "plugin request exceeds 1048576 bytes".to_owned(),
-        ));
+    io::stdin()
+        .take(u64::try_from(config.limits.max_request_bytes).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut input)?;
+    if input.len() > config.limits.max_request_bytes {
+        return Err(CliError::InvalidArguments(format!(
+            "plugin request exceeds {} bytes",
+            config.limits.max_request_bytes
+        )));
     }
     let mut request =
         decode_request(&input).map_err(|error| CliError::InvalidArguments(error.to_string()))?;
-    inject_registered_params(&workspace, definition, &mut request.params)?;
+    inject_registered_params(
+        &workspace,
+        definition,
+        &config.limits,
+        timeout_seconds,
+        &request.method,
+        &mut request.params,
+    )?;
     let (mut journal, journal_create_error) = create_journal_preserving_execution(&workspace);
     let namespace_name = format!("{namespace:?}").to_lowercase();
     let parent_run_id = env::var("TACTUS_RUN_ID").ok();
@@ -2722,7 +3875,10 @@ fn dispatch(
                 "running",
                 Presentation::new(
                     PresentationCategory::State,
-                    format!("{namespace_name}:{name} method {} started.", request.method),
+                    format!(
+                        "{} started.",
+                        safe_invocation_subject(&namespace_name, name, &request.method)
+                    ),
                 ),
             )
             .err()
@@ -2732,6 +3888,7 @@ fn dispatch(
         resolve_builtin_command(definition.command())?,
         &workspace.root,
     );
+    apply_transport_limits(&mut spec, &config.limits);
     spec.environment = tool_runtime.environment.clone();
     attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
     spec.limits.deadline = (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
@@ -2763,8 +3920,7 @@ fn dispatch(
             }
         }
     });
-    let spawn_error = invocation.as_ref().err().map(ToString::to_string);
-    let outcome = invocation.unwrap_or_else(|error| synthetic_runtime_failure(&error.to_string()));
+    let outcome = invocation.unwrap_or_else(|error| process_error_outcome(&error));
     if !outcome.stderr.is_empty() {
         render_presentation(&Presentation::new(
             PresentationCategory::Warning,
@@ -2786,51 +3942,21 @@ fn dispatch(
     if let Some(journal) = journal.as_mut()
         && journal_degradation.is_none()
     {
-        let transition_result = if let Some(error) = spawn_error.as_deref() {
-            journal.record_transition(
-                "running",
-                TransitionTrigger::new(
-                    TriggerKind::InternalResult,
-                    "tactus.process",
-                    "plugin.spawn_failed",
-                )
-                .with_details(serde_json::json!({"error":error})),
-                TransitionGuard::new(
-                    "process start attempt classified",
-                    true,
-                    "The process could not be started, so execution is a known failure.",
-                ),
-                "failed",
-                Presentation::new(
-                    PresentationCategory::State,
-                    format!(
-                        "{namespace_name}:{name} entered the failed state before it could start."
-                    ),
-                ),
-            )
-            .map(|_| ())
-        } else {
-            record_outcome_transition(journal, &namespace_name, name, &request.method, &outcome)
-        };
+        let transition_result =
+            record_outcome_transition(journal, &namespace_name, name, &request.method, &outcome);
         if let Err(error) = transition_result {
             note_journal_degradation(&mut journal_degradation, error);
         }
         if journal_degradation.is_none()
-            && spawn_error.is_none()
-            && outcome_is_unknown(outcome.kind)
+            && outcome_is_unknown(&outcome)
             && let Err(error) = journal.record_with_presentation(
                 "runtime.outcome_unknown",
-                serde_json::json!({
-                    "plugin":name,
-                    "namespace":namespace_name,
-                    "method":request.method,
-                    "cause":outcome_kind_name(outcome.kind),
-                    "diagnostic":outcome.error.as_deref(),
-                }),
+                outcome_unknown_diagnostic_value(&namespace_name, name, &request.method, &outcome),
                 Some(Presentation::new(
                     PresentationCategory::Warning,
                     format!(
-                        "{namespace_name}:{name} may have completed externally; Tactus did not retry it automatically."
+                        "{} may have completed externally; Tactus did not retry it automatically.",
+                        safe_presentation_identifier(name)
                     ),
                 )),
             )
@@ -3014,6 +4140,16 @@ fn validate_haskell_package(value: &str) -> Result<String, String> {
     }
 }
 
+fn validate_entry_order(value: &str) -> Result<u16, String> {
+    let order = value
+        .parse::<u16>()
+        .map_err(|_| "entry order must be an integer between 000 and 999".to_owned())?;
+    if order > 999 {
+        return Err("entry order must be between 000 and 999".to_owned());
+    }
+    Ok(order)
+}
+
 fn haskell_packages(additional: &[String]) -> Vec<String> {
     let mut packages = vec!["clef-sdk".to_owned()];
     for package in additional {
@@ -3122,7 +4258,7 @@ fn diagnostic_frame(frame: &PluginFrame) -> (&'static str, Value) {
                 "error":{
                     "code":error.code,
                     "message":error.message,
-                    "details":error.details,
+                    "details_summary":error.details.as_ref().map(diagnostic_value_summary),
                 }
             }),
         ),
@@ -3140,15 +4276,7 @@ fn record_outcome_transition(
     method: &str,
     outcome: &ProcessOutcome,
 ) -> Result<(), JournalError> {
-    let state_after = match outcome.kind {
-        InvocationKind::Succeeded => "succeeded",
-        InvocationKind::PluginFailed => "failed",
-        InvocationKind::DeadlineExceeded => "timed_out",
-        InvocationKind::Cancelled => "cancelled",
-        InvocationKind::ProcessFailed
-        | InvocationKind::ProtocolFailed
-        | InvocationKind::RuntimeFailed => "outcome_unknown",
-    };
+    let state_after = classify_outcome(outcome).as_str();
     let presentation = outcome_presentation(namespace, name, method, outcome);
     let (trigger_kind, trigger_source, trigger_code, guard_condition, guard_reason) =
         match outcome.kind {
@@ -3190,7 +4318,7 @@ fn record_outcome_transition(
                 "frames_seen":outcome.frames_seen,
                 "events_dropped":outcome.events_dropped,
                 "observation_error":outcome.observation_error.as_deref(),
-                "side_effect_certainty":if outcome_is_unknown(outcome.kind) {
+                "side_effect_certainty":if outcome_is_unknown(outcome) {
                     "unknown"
                 } else {
                     "known"
@@ -3214,7 +4342,7 @@ fn record_outcome_transition(
                 "namespace":namespace,
                 "code":error.code,
                 "message":error.message,
-                "details":error.details,
+                "details_summary":error.details.as_ref().map(diagnostic_value_summary),
             }),
             _ => serde_json::json!({
                 "plugin":name,
@@ -3263,21 +4391,12 @@ fn outcome_presentation(
     method: &str,
     outcome: &ProcessOutcome,
 ) -> Presentation {
-    let message = match outcome.kind {
-        InvocationKind::Succeeded => format!("{namespace}:{name} method {method} succeeded."),
-        InvocationKind::PluginFailed => {
-            format!("{namespace}:{name} method {method} entered the failed state.")
-        }
-        InvocationKind::DeadlineExceeded => {
-            format!("{namespace}:{name} method {method} entered the timed-out state.")
-        }
-        InvocationKind::Cancelled => {
-            format!("{namespace}:{name} method {method} entered the cancelled state.")
-        }
-        InvocationKind::ProcessFailed
-        | InvocationKind::ProtocolFailed
-        | InvocationKind::RuntimeFailed => {
-            format!("{namespace}:{name} method {method} entered the outcome-unknown state.")
+    let subject = safe_invocation_subject(namespace, name, method);
+    let message = match classify_outcome(outcome) {
+        OutcomeState::Succeeded => format!("{subject} succeeded."),
+        OutcomeState::Failed => format!("{subject} entered the failed state."),
+        OutcomeState::OutcomeUnknown => {
+            format!("{subject} entered the outcome-unknown state.")
         }
     };
     Presentation::new(PresentationCategory::State, message)
@@ -3288,7 +4407,7 @@ fn known_failure_presentation(
     name: &str,
     outcome: &ProcessOutcome,
 ) -> Option<Presentation> {
-    if outcome.kind != InvocationKind::PluginFailed {
+    if classify_outcome(outcome) != OutcomeState::Failed {
         return None;
     }
     let message = match outcome.terminal.as_ref() {
@@ -3305,28 +4424,57 @@ fn durable_failure_presentation(
     name: &str,
     outcome: &ProcessOutcome,
 ) -> Option<Presentation> {
-    if outcome.kind != InvocationKind::PluginFailed {
+    if classify_outcome(outcome) != OutcomeState::Failed {
         return None;
     }
+    let subject = format!(
+        "{}:{}",
+        safe_presentation_identifier(namespace),
+        safe_presentation_identifier(name)
+    );
     let message = match outcome.terminal.as_ref() {
-        Some(TerminalResult::Failure { error }) => format!(
-            "{namespace}:{name} failed with diagnostic code {}.",
-            error.code
-        ),
-        _ => format!("{namespace}:{name} failed without a valid diagnostic."),
+        Some(TerminalResult::Failure { .. }) => {
+            format!("{subject} failed with a structured diagnostic.")
+        }
+        _ => format!("{subject} failed without a valid diagnostic."),
     };
     Some(Presentation::new(PresentationCategory::Error, message))
 }
 
-fn outcome_is_unknown(kind: InvocationKind) -> bool {
-    matches!(
-        kind,
-        InvocationKind::ProcessFailed
-            | InvocationKind::ProtocolFailed
-            | InvocationKind::RuntimeFailed
-            | InvocationKind::DeadlineExceeded
-            | InvocationKind::Cancelled
+fn safe_invocation_subject(namespace: &str, name: &str, method: &str) -> String {
+    format!(
+        "{}:{} method {}",
+        safe_presentation_identifier(namespace),
+        safe_presentation_identifier(name),
+        safe_presentation_method(method)
     )
+}
+
+fn safe_presentation_method(value: &str) -> String {
+    if matches!(
+        value,
+        "invoke"
+            | "smoke"
+            | "observe.begin"
+            | "observe.end"
+            | "snapshot"
+            | "diff"
+            | "commit"
+            | "rollback"
+            | "run"
+    ) {
+        value.to_owned()
+    } else {
+        "<redacted-method>".to_owned()
+    }
+}
+
+fn safe_presentation_identifier(value: &str) -> String {
+    if is_stable_diagnostic_identifier(value) {
+        value.to_owned()
+    } else {
+        "<redacted-identifier>".to_owned()
+    }
 }
 
 fn outcome_kind_name(kind: InvocationKind) -> &'static str {
@@ -3341,6 +4489,40 @@ fn outcome_kind_name(kind: InvocationKind) -> &'static str {
     }
 }
 
+fn outcome_unknown_diagnostic_value(
+    namespace: &str,
+    name: &str,
+    method: &str,
+    outcome: &ProcessOutcome,
+) -> Value {
+    let context = OutcomeContext {
+        workflow: bounded_environment_context("TACTUS_WORKFLOW_NAME", 1_024),
+        task: bounded_environment_context("TACTUS_TASK_NAME", 512),
+        business_key_sha256: bounded_environment_context("TACTUS_BUSINESS_KEY_SHA256", 64)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(|value| value.to_ascii_lowercase()),
+        occurrence_id: bounded_environment_context("TACTUS_OCCURRENCE_ID", 512),
+        provider: (namespace == "provider")
+            .then(|| bounded_context_value(name, 128))
+            .flatten(),
+    };
+    serde_json::to_value(OutcomeUnknownDiagnostic::from_outcome(
+        context, namespace, method, outcome,
+    ))
+    .expect("typed outcome-unknown diagnostic serialization is infallible")
+}
+
+fn bounded_environment_context(name: &str, max_bytes: usize) -> Option<String> {
+    env::var(name)
+        .ok()
+        .and_then(|value| bounded_context_value(&value, max_bytes))
+}
+
+fn bounded_context_value(value: &str, max_bytes: usize) -> Option<String> {
+    (!value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
+}
+
 fn print_json(value: &impl Serialize) -> Result<(), CliError> {
     println!("{}", serde_json::to_string(value)?);
     Ok(())
@@ -3352,6 +4534,9 @@ pub enum CliError {
     /// Workspace operation failed.
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// Run-journal query or maintenance failed.
+    #[error(transparent)]
+    Runs(#[from] crate::runs::RunsError),
     /// Process could not be started.
     #[error(transparent)]
     Process(#[from] ProcessError),
@@ -3399,6 +4584,275 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn batch_execution(
+        kind: CommandKind,
+        exit_code: Option<i32>,
+        script_started: bool,
+        clef_outcome_unknown: bool,
+    ) -> Result<ScriptBatchExecution, CliError> {
+        Ok(ScriptBatchExecution {
+            command: CommandOutcome {
+                kind,
+                exit_code,
+                error: None,
+                elapsed_ms: 1,
+            },
+            script_started,
+            clef_outcome_unknown,
+        })
+    }
+
+    fn exited_batch(exit_code: i32) -> Result<ScriptBatchExecution, CliError> {
+        batch_execution(CommandKind::Exited, Some(exit_code), true, false)
+    }
+
+    fn provider_definition(
+        options: BTreeMap<String, Value>,
+    ) -> crate::workspace::ProviderDefinition {
+        crate::workspace::ProviderDefinition {
+            command: vec![
+                "tactus".to_owned(),
+                "provider-host".to_owned(),
+                "codex".to_owned(),
+            ],
+            model: None,
+            effort: None,
+            options,
+        }
+    }
+
+    fn invocation_report(name: &str, outcome: ProcessOutcome) -> InvocationReport {
+        InvocationReport {
+            name: name.to_owned(),
+            run_path: PathBuf::from("fixture-run"),
+            summary: RunSummary {
+                api: crate::journal::TRACE_API.to_owned(),
+                run_id: format!("run-{name}"),
+                started_unix_ms: 1,
+                finished_unix_ms: 2,
+                events_recorded: 1,
+                outcome,
+            },
+            persisted: true,
+        }
+    }
+
+    fn injected_provider_timeout(
+        supervisor_timeout_seconds: u64,
+        method: &str,
+        definition: &crate::workspace::ProviderDefinition,
+        provided_options: Option<Value>,
+    ) -> Result<u64, CliError> {
+        let workspace = Workspace::at("fixture");
+        let mut params = Map::new();
+        if let Some(options) = provided_options {
+            params.insert("options".to_owned(), options);
+        }
+        inject_registered_params(
+            &workspace,
+            ResolvedPlugin::Provider(definition),
+            &RuntimeLimits::default(),
+            supervisor_timeout_seconds,
+            method,
+            &mut params,
+        )?;
+        params["options"]["timeout_seconds"]
+            .as_u64()
+            .ok_or_else(|| CliError::InvalidArguments("missing injected timeout".to_owned()))
+    }
+
+    #[test]
+    fn provider_timeout_derivation_respects_workspace_policy_and_actual_supervisor() {
+        let provider = provider_definition(BTreeMap::new());
+        assert_eq!(
+            injected_provider_timeout(14_400, "invoke", &provider, None).expect("default outer"),
+            13_440
+        );
+        assert_eq!(
+            injected_provider_timeout(7_200, "invoke", &provider, None).expect("short outer"),
+            7_140
+        );
+        assert_eq!(
+            injected_provider_timeout(20_000, "invoke", &provider, None).expect("long outer"),
+            13_440
+        );
+        assert_eq!(
+            injected_provider_timeout(0, "invoke", &provider, None).expect("unbounded outer"),
+            13_440
+        );
+        assert_eq!(
+            injected_provider_timeout(61, "invoke", &provider, None).expect("minimum outer"),
+            1
+        );
+
+        let configured = provider_definition(BTreeMap::from([(
+            "timeout_seconds".to_owned(),
+            Value::from(7_000_u64),
+        )]));
+        assert_eq!(
+            injected_provider_timeout(7_200, "invoke", &configured, None)
+                .expect("registry override"),
+            7_000
+        );
+        assert_eq!(
+            injected_provider_timeout(
+                7_200,
+                "invoke",
+                &configured,
+                Some(serde_json::json!({"timeout_seconds":7_140})),
+            )
+            .expect("call override"),
+            7_140
+        );
+        assert!(
+            injected_provider_timeout(
+                7_200,
+                "invoke",
+                &configured,
+                Some(serde_json::json!({"timeout_seconds":7_150})),
+            )
+            .expect_err("call override without cleanup headroom")
+            .to_string()
+            .contains("leave at least 60 seconds")
+        );
+        assert!(
+            injected_provider_timeout(60, "invoke", &provider, None)
+                .expect_err("too-short supervisor")
+                .to_string()
+                .contains("at least 61 seconds")
+        );
+    }
+
+    #[test]
+    fn provider_smoke_timeout_stays_short_and_keeps_supervisor_headroom() {
+        let provider = provider_definition(BTreeMap::new());
+        assert_eq!(
+            injected_provider_timeout(14_400, "smoke", &provider, None).expect("default smoke"),
+            20
+        );
+        assert_eq!(
+            injected_provider_timeout(70, "smoke", &provider, None).expect("short supervisor"),
+            10
+        );
+        assert_eq!(
+            injected_provider_timeout(0, "smoke", &provider, None).expect("unbounded supervisor"),
+            20
+        );
+
+        let configured_short = provider_definition(BTreeMap::from([(
+            "timeout_seconds".to_owned(),
+            Value::from(5_u64),
+        )]));
+        assert_eq!(
+            injected_provider_timeout(14_400, "smoke", &configured_short, None)
+                .expect("short registry timeout"),
+            5
+        );
+
+        let configured_long = provider_definition(BTreeMap::from([(
+            "timeout_seconds".to_owned(),
+            Value::from(7_000_u64),
+        )]));
+        assert_eq!(
+            injected_provider_timeout(14_400, "smoke", &configured_long, None)
+                .expect("long registry timeout is clamped"),
+            20
+        );
+        assert_eq!(
+            injected_provider_timeout(
+                14_400,
+                "smoke",
+                &configured_long,
+                Some(serde_json::json!({"timeout_seconds":8})),
+            )
+            .expect("short call timeout"),
+            8
+        );
+    }
+
+    #[test]
+    fn supervised_command_never_reports_timeout_or_cancellation_as_success() {
+        for kind in [
+            CommandKind::DeadlineExceeded,
+            CommandKind::Cancelled,
+            CommandKind::RuntimeFailed,
+        ] {
+            let outcome = CommandOutcome {
+                kind,
+                exit_code: Some(0),
+                error: None,
+                elapsed_ms: 1,
+            };
+            assert_eq!(command_exit_code(&outcome), 1);
+        }
+        assert_eq!(
+            command_exit_code(&CommandOutcome {
+                kind: CommandKind::Exited,
+                exit_code: Some(0),
+                error: None,
+                elapsed_ms: 1,
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn observer_cleanup_receives_the_factual_upstream_classification() {
+        let unknown = script_batch_outcome(
+            &batch_execution(CommandKind::DeadlineExceeded, None, true, false),
+            1,
+            &[],
+            Duration::from_millis(1),
+        );
+        let begin_unknown = vec![ObserverEvidence {
+            effect: "second".to_owned(),
+            phase: "observe.begin".to_owned(),
+            report: Some(invocation_report("begin-unknown", unknown.clone())),
+            error: None,
+        }];
+        assert_eq!(
+            generation_observer_outcome(None, &begin_unknown, Some("begin failed")),
+            "outcome_unknown"
+        );
+
+        let known_failure =
+            script_batch_outcome(&exited_batch(1), 1, &[], Duration::from_millis(1));
+        let begin_failed = vec![ObserverEvidence {
+            effect: "second".to_owned(),
+            phase: "observe.begin".to_owned(),
+            report: Some(invocation_report("begin-failed", known_failure)),
+            error: None,
+        }];
+        assert_eq!(
+            generation_observer_outcome(None, &begin_failed, Some("begin failed")),
+            "begin_error"
+        );
+        assert_eq!(
+            generation_observer_outcome(None, &[], Some("provider spawn failed")),
+            "error"
+        );
+        let provider_unknown = invocation_report("provider-unknown", unknown);
+        assert_eq!(
+            generation_observer_outcome(Some(&provider_unknown), &[], None),
+            "outcome_unknown"
+        );
+    }
+
+    #[test]
+    fn post_provider_workspace_inspection_failure_is_not_safe_to_retry() {
+        let provider_success =
+            script_batch_outcome(&exited_batch(0), 1, &[], Duration::from_millis(1));
+        let outcome = post_execution_inspection_unknown("fixture read failed", &provider_success);
+        assert_eq!(classify_outcome(&outcome), OutcomeState::OutcomeUnknown);
+        assert!(outcome.progress.is_some());
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("inspection failed"))
+        );
+    }
 
     #[test]
     fn params_reject_duplicate_keys_recursively() {
@@ -3451,6 +4905,100 @@ mod tests {
         assert!(validate_haskell_package("package with spaces").is_err());
     }
 
+    fn selection_fixture() -> (tempfile::TempDir, Workspace) {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        fs::create_dir_all(&workspace.scripts_path).expect("scripts directory");
+        for (name, source) in [
+            ("010_first.hs", "main = pure ()"),
+            ("020_second.hs", "main = pure ()"),
+            ("Support.hs", "module Support where"),
+        ] {
+            fs::write(workspace.scripts_path.join(name), source).expect("script");
+        }
+        (temporary, workspace)
+    }
+
+    #[test]
+    fn script_selection_requires_an_explicit_mode() {
+        let (_temporary, workspace) = selection_fixture();
+        let none = ScriptSelection::new(&[], false, None, None);
+        assert!(select_scripts(&workspace, none, false).is_err());
+        assert!(select_scripts(&workspace, none, true).is_err());
+
+        let all = ScriptSelection::new(&[], true, None, None);
+        let checked = select_scripts(&workspace, all, false).expect("explicit check all");
+        let run = select_scripts(&workspace, all, true).expect("explicit run all");
+        assert_eq!(checked.len(), 3);
+        assert_eq!(run.len(), 2);
+    }
+
+    #[test]
+    fn script_selection_ranges_are_ordered_and_mutually_exclusive() {
+        let (_temporary, workspace) = selection_fixture();
+        let ranged = select_scripts(
+            &workspace,
+            ScriptSelection::new(&[], false, Some(15), Some(20)),
+            true,
+        )
+        .expect("range");
+        assert_eq!(
+            ranged[0].file_name().and_then(|name| name.to_str()),
+            Some("020_second.hs")
+        );
+        assert!(
+            select_scripts(
+                &workspace,
+                ScriptSelection::new(&[], false, Some(21), Some(20)),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            select_scripts(
+                &workspace,
+                ScriptSelection::new(&[], true, Some(10), None),
+                true,
+            )
+            .is_err()
+        );
+        let explicit = [PathBuf::from(".tactus/scripts/010_first.hs")];
+        assert!(
+            select_scripts(
+                &workspace,
+                ScriptSelection::new(&explicit, true, None, None),
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_run_selection_rejects_helpers_and_workspace_escapes() {
+        let (temporary, workspace) = selection_fixture();
+        let helper = [PathBuf::from(".tactus/scripts/Support.hs")];
+        assert!(
+            select_scripts(
+                &workspace,
+                ScriptSelection::new(&helper, false, None, None),
+                true,
+            )
+            .is_err()
+        );
+        let outside = temporary.path().join("outside.hs");
+        fs::write(&outside, "main = pure ()").expect("outside fixture");
+        assert!(
+            select_scripts(
+                &workspace,
+                ScriptSelection::new(&[outside], false, None, None),
+                false,
+            )
+            .is_err()
+        );
+        assert_eq!(validate_entry_order("999"), Ok(999));
+        assert!(validate_entry_order("1000").is_err());
+    }
+
     #[test]
     fn journal_callback_failure_preserves_known_terminal_outcomes() {
         let outcomes = [
@@ -3467,6 +5015,7 @@ mod tests {
                 stderr_truncated: false,
                 error: None,
                 elapsed_ms: 1,
+                progress: None,
             },
             ProcessOutcome {
                 kind: InvocationKind::PluginFailed,
@@ -3485,6 +5034,7 @@ mod tests {
                 stderr_truncated: false,
                 error: None,
                 elapsed_ms: 1,
+                progress: None,
             },
         ];
 
@@ -3645,7 +5195,7 @@ command = ["tactus", "provider-host", "codex"]
         let workspace = Workspace::at(temporary.path());
         let mut journal = RunJournal::create(&workspace).expect("journal");
 
-        let mut success = script_batch_outcome(&Ok(0), 1, Duration::from_millis(1));
+        let mut success = script_batch_outcome(&exited_batch(0), 1, &[], Duration::from_millis(1));
         success.terminal = Some(TerminalResult::Success {
             value: serde_json::json!({"unknown":"DO_NOT_PERSIST_SUCCESS_VALUE"}),
         });
@@ -3666,7 +5216,7 @@ command = ["tactus", "provider-host", "codex"]
             .record("provider.completed", success_report.diagnostic_value())
             .expect("success diagnostic");
 
-        let mut failure = script_batch_outcome(&Ok(1), 1, Duration::from_millis(1));
+        let mut failure = script_batch_outcome(&exited_batch(1), 1, &[], Duration::from_millis(1));
         failure.terminal = Some(TerminalResult::Failure {
             error: PluginFailure {
                 code: "provider.failed".to_owned(),
@@ -3693,31 +5243,113 @@ command = ["tactus", "provider-host", "codex"]
             .record("observer.end", failure_report.diagnostic_value())
             .expect("failure diagnostic");
         journal
-            .finish(script_batch_outcome(&Ok(0), 1, Duration::from_millis(1)))
+            .finish(script_batch_outcome(
+                &exited_batch(0),
+                1,
+                &[],
+                Duration::from_millis(1),
+            ))
             .expect("finish");
 
         let durable = fs::read_to_string(journal.event_path()).expect("events");
         assert!(!durable.contains("DO_NOT_PERSIST"), "{durable}");
-        assert!(durable.contains("provider.failed"), "{durable}");
+        assert!(!durable.contains("provider.failed"), "{durable}");
+        assert!(durable.contains("invalid_identifier."), "{durable}");
         assert!(durable.contains("diagnostic_summary"), "{durable}");
     }
 
     #[test]
     fn script_batch_outcome_keeps_known_success_and_failure_terminal() {
-        let success = script_batch_outcome(&Ok(0), 3, Duration::from_millis(7));
+        let scripts = vec![
+            ScriptExecutionResult {
+                script: ".tactus/scripts/010_first.hs".to_owned(),
+                exit_code: Some(0),
+                command_kind: CommandKind::Exited,
+                outcome_unknown: false,
+            },
+            ScriptExecutionResult {
+                script: ".tactus/scripts/020_second.hs".to_owned(),
+                exit_code: Some(9),
+                command_kind: CommandKind::Exited,
+                outcome_unknown: false,
+            },
+        ];
+        let success =
+            script_batch_outcome(&exited_batch(0), 2, &scripts[..1], Duration::from_millis(7));
         assert_eq!(success.kind, InvocationKind::Succeeded);
-        assert!(matches!(
-            success.terminal,
-            Some(TerminalResult::Success { .. })
-        ));
+        match success.terminal {
+            Some(TerminalResult::Success { value }) => {
+                assert_eq!(value["completed_script_count"], 1);
+                assert_eq!(value["scripts"][0]["script"], scripts[0].script);
+            }
+            other => panic!("unexpected success terminal: {other:?}"),
+        }
 
-        let failure = script_batch_outcome(&Ok(9), 3, Duration::from_millis(7));
+        let failure = script_batch_outcome(&exited_batch(9), 3, &scripts, Duration::from_millis(7));
         assert_eq!(failure.kind, InvocationKind::PluginFailed);
         assert_eq!(failure.exit_code, Some(9));
-        assert!(matches!(
-            failure.terminal,
-            Some(TerminalResult::Failure { .. })
-        ));
+        match failure.terminal {
+            Some(TerminalResult::Failure { error }) => {
+                let details = error.details.expect("batch details");
+                assert_eq!(details["completed_script_count"], 2);
+                assert_eq!(details["scripts"][1]["exit_code"], 9);
+            }
+            other => panic!("unexpected failure terminal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_batch_preserves_timeout_signal_exit_and_clef_ambiguity() {
+        let deadline = batch_execution(CommandKind::DeadlineExceeded, Some(0), true, false);
+        let deadline_outcome = script_batch_outcome(&deadline, 1, &[], Duration::from_millis(7));
+        assert_eq!(
+            classify_outcome(&deadline_outcome),
+            OutcomeState::OutcomeUnknown
+        );
+        assert_eq!(script_batch_exit_code(&deadline), 1);
+        assert!(deadline_outcome.progress.is_some());
+
+        let signalled = batch_execution(CommandKind::Exited, None, true, false);
+        let signalled_outcome = script_batch_outcome(&signalled, 1, &[], Duration::from_millis(7));
+        assert_eq!(signalled_outcome.kind, InvocationKind::RuntimeFailed);
+        assert_eq!(
+            classify_outcome(&signalled_outcome),
+            OutcomeState::OutcomeUnknown
+        );
+        assert_eq!(script_batch_exit_code(&signalled), 1);
+        assert!(signalled_outcome.terminal.is_none());
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let mut journal = RunJournal::create(&workspace).expect("journal");
+        journal
+            .finish(signalled_outcome)
+            .expect("signalled outcome remains persistable");
+
+        let clef_unknown = batch_execution(CommandKind::Exited, Some(0), true, true);
+        let clef_outcome = script_batch_outcome(&clef_unknown, 1, &[], Duration::from_millis(7));
+        assert_eq!(
+            classify_outcome(&clef_outcome),
+            OutcomeState::OutcomeUnknown
+        );
+        assert_eq!(script_batch_exit_code(&clef_unknown), 1);
+        match clef_outcome.terminal {
+            Some(TerminalResult::Failure { error }) => {
+                assert_eq!(error.code, "outcome_unknown");
+            }
+            other => panic!("unexpected Clef outcome: {other:?}"),
+        }
+
+        let build_timeout = batch_execution(CommandKind::DeadlineExceeded, Some(1), false, false);
+        assert_eq!(
+            classify_outcome(&script_batch_outcome(
+                &build_timeout,
+                1,
+                &[],
+                Duration::from_millis(7),
+            )),
+            OutcomeState::Failed,
+            "preparation never dispatched workflow code"
+        );
     }
 
     #[test]
@@ -3738,11 +5370,18 @@ command = ["tactus", "provider-host", "codex"]
         .expect("sidecar");
 
         assert_eq!(
-            import_clef_diagnostic_sidecar(&mut journal, &sidecar).expect("import"),
+            import_clef_diagnostic_sidecar(&mut journal, &sidecar)
+                .expect("import")
+                .imported,
             2
         );
         journal
-            .finish(script_batch_outcome(&Ok(0), 1, Duration::from_millis(1)))
+            .finish(script_batch_outcome(
+                &exited_batch(0),
+                1,
+                &[],
+                Duration::from_millis(1),
+            ))
             .expect("finish");
         let encoded = fs::read_to_string(journal.event_path()).expect("events");
         let events = encoded
@@ -3772,6 +5411,80 @@ command = ["tactus", "provider-host", "codex"]
     }
 
     #[test]
+    fn clef_outcome_unknown_classification_survives_redaction_and_a_bad_tail() {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let sidecar = temporary.path().join("clef-unknown.jsonl");
+        let transition = r#"{"type":"state_transition","code":"workflow.result.error","level":"state","message":"Workflow entered outcome unknown.","subject":"workflow:1","state_before":"running","trigger":{"kind":"internal_result","source":"clef.workflow","code":"workflow.result.error"},"guard":{"condition":"typed workflow result","passed":true,"reason":"typed error decides the state"},"state_after":"outcome_unknown","context":{"provider":"DO_NOT_PERSIST_PROVIDER","error":{"code":"plugin.outcome_unknown","message":"DO_NOT_PERSIST_MESSAGE","cause":{"code":"plugin.deadline_exceeded","message":"DO_NOT_PERSIST_CAUSE","details":{"phase":"awaiting_terminal","frames_seen":3,"progress":{"event_frames_seen":2,"terminal_frame_seen":false},"last_event":{"type":"provider.progress","secret":"DO_NOT_PERSIST_EVENT"},"last_event_unix_ms":42,"external_effect_possible":true,"reported_details_withheld":true,"reconciliation":{"required":true,"automatic_retry_safe":false,"steps":["DO_NOT_PERSIST_STEP"]}}}}}}"#;
+        fs::write(&sidecar, format!("{transition}\n{{bad tail\n")).expect("sidecar with bad tail");
+        let facts = inspect_clef_sidecar_facts(&sidecar);
+        assert!(facts.outcome_unknown);
+
+        let mut rejected_journal = RunJournal::create(&workspace).expect("journal");
+        assert!(matches!(
+            import_clef_diagnostic_sidecar(&mut rejected_journal, &sidecar),
+            Err(ClefSidecarError::Invalid(_))
+        ));
+        let batch = batch_execution(CommandKind::Exited, Some(1), true, facts.outcome_unknown);
+        assert_eq!(
+            classify_outcome(&script_batch_outcome(
+                &batch,
+                1,
+                &[],
+                Duration::from_millis(1),
+            )),
+            OutcomeState::OutcomeUnknown
+        );
+
+        fs::write(&sidecar, format!("{transition}\n")).expect("valid sidecar");
+        let mut journal = RunJournal::create(&workspace).expect("second journal");
+        let imported = import_clef_diagnostic_sidecar(&mut journal, &sidecar).expect("import");
+        assert!(imported.outcome_unknown);
+        journal
+            .finish(script_batch_outcome(
+                &batch,
+                1,
+                &[],
+                Duration::from_millis(1),
+            ))
+            .expect("finish");
+        let durable = fs::read_to_string(journal.event_path()).expect("events");
+        assert!(!durable.contains("DO_NOT_PERSIST"), "{durable}");
+        assert!(durable.contains("plugin.outcome_unknown"), "{durable}");
+        assert!(durable.contains("awaiting_terminal"), "{durable}");
+        assert!(durable.contains("source_withheld"), "{durable}");
+    }
+
+    #[test]
+    fn an_unobservable_oversized_clef_sidecar_makes_a_failed_script_ambiguous() {
+        let temporary = tempdir().expect("temporary directory");
+        let sidecar = temporary.path().join("oversized-clef.jsonl");
+        fs::write(
+            &sidecar,
+            vec![b' '; usize::try_from(MAX_CLEF_SIDECAR_BYTES).unwrap() + 1],
+        )
+        .expect("oversized sidecar");
+        let facts = inspect_clef_sidecar_facts(&sidecar);
+        assert!(facts.observation_ambiguous);
+
+        let execution = batch_execution(
+            CommandKind::Exited,
+            Some(1),
+            true,
+            facts.outcome_unknown || facts.observation_ambiguous,
+        );
+        assert_eq!(
+            classify_outcome(&script_batch_outcome(
+                &execution,
+                1,
+                &[],
+                Duration::from_millis(1),
+            )),
+            OutcomeState::OutcomeUnknown
+        );
+    }
+
+    #[test]
     fn rejects_non_projection_clef_sidecar_without_poisoning_journal() {
         let temporary = tempdir().expect("temporary directory");
         let workspace = Workspace::at(temporary.path());
@@ -3791,7 +5504,12 @@ command = ["tactus", "provider-host", "codex"]
             .record("runtime.after_rejection", serde_json::json!({"ok":true}))
             .expect("journal remains usable");
         let summary = journal
-            .finish(script_batch_outcome(&Ok(0), 1, Duration::from_millis(1)))
+            .finish(script_batch_outcome(
+                &exited_batch(0),
+                1,
+                &[],
+                Duration::from_millis(1),
+            ))
             .expect("finish");
         assert_eq!(summary.outcome.kind, InvocationKind::Succeeded);
         assert_eq!(summary.events_recorded, 1);

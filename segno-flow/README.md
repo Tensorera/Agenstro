@@ -116,7 +116,7 @@ segno driver --root $projectRoot --poll-seconds 5
 ```
 
 Long-running jobs can set `--task-timeout-seconds` on `install`, `once`, and
-`driver`. It defaults to 1,800 seconds for each Tactus build/run phase, accepts
+`driver`. It defaults to 15,300 seconds for each Tactus build/run phase, accepts
 1 through 604,800, and rejects zero. `--poll-seconds` is only the driver's
 maximum idle wait; it does not change the 60-second trigger or task timeout.
 The driver derives a safe minimum Running lease from the task budget.

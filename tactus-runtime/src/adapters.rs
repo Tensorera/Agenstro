@@ -26,21 +26,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::protocol::{PLUGIN_API, PluginFailure, PluginRequest, RequestId, decode_request};
+use crate::{
+    executable::{ExecutableResolutionError, ExecutableResolver},
+    protocol::{PLUGIN_API, PluginFailure, PluginRequest, RequestId, decode_request},
+};
 
 const IMPLEMENTATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENCODE_WARNING: &str = "OpenCode --auto only approves ask decisions and does not override explicit deny or managed configuration; full bypass cannot be guaranteed.";
 const PATH_EFFECT_NAME: &str = "workspace.paths";
 const DEFAULT_SMOKE_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_POLL: Duration = Duration::from_millis(10);
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-// The outer plugin protocol keeps its 1 MiB frame / 64 MiB aggregate defaults.
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+// The outer plugin protocol is bounded independently by the validated
+// workspace limit (1 MiB by default, up to this 16 MiB host ceiling).
 // Native agent CLIs are consumed inside the provider host and may emit larger
 // stream-json tool payloads, so their drain budget is independent. Extracted
 // result text remains bounded separately before the host emits a plugin frame.
 const MAX_NATIVE_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NATIVE_STDOUT_BYTES: usize = 1024 * 1024 * 1024;
-const MAX_PROVIDER_RESULT_BYTES: usize = 512 * 1024;
+const MAX_PROVIDER_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NATIVE_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_HEALTH_STDOUT_BYTES: usize = 1024 * 1024;
 // Eight full-size lines bound queued native stdout to roughly 64 MiB while
@@ -348,10 +352,33 @@ impl Provider {
 #[derive(Debug)]
 struct InvocationOptions {
     command_prefix: Vec<String>,
+    executable: Option<String>,
     timeout: Option<Duration>,
+    native_limits: NativeProviderLimits,
     extra_args: Vec<String>,
     extra_env: BTreeMap<String, String>,
     open: Map<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeProviderLimits {
+    max_line_bytes: usize,
+    max_stdout_bytes: usize,
+    max_result_bytes: usize,
+    max_stderr_bytes: usize,
+    output_queue_bound: usize,
+}
+
+impl Default for NativeProviderLimits {
+    fn default() -> Self {
+        Self {
+            max_line_bytes: MAX_NATIVE_LINE_BYTES,
+            max_stdout_bytes: MAX_NATIVE_STDOUT_BYTES,
+            max_result_bytes: MAX_PROVIDER_RESULT_BYTES,
+            max_stderr_bytes: MAX_NATIVE_STDERR_BYTES,
+            output_queue_bound: NATIVE_OUTPUT_QUEUE,
+        }
+    }
 }
 
 fn handle_provider<W: Write, E: Write>(
@@ -392,7 +419,13 @@ fn provider_description(provider: Provider) -> Value {
             "additionalProperties":true,
             "properties": {
                 "command_prefix":{"type":"array", "items":{"type":"string"}},
+                "executable":{"type":"string", "minLength":1},
                 "timeout_seconds":{"type":"number", "exclusiveMinimum":0},
+                "native_max_line_bytes":{"type":"integer", "minimum":1, "maximum":33554432},
+                "native_max_stdout_bytes":{"type":"integer", "minimum":1, "maximum":4294967296_u64},
+                "native_max_result_bytes":{"type":"integer", "minimum":1, "maximum":5242880},
+                "native_max_stderr_bytes":{"type":"integer", "minimum":1, "maximum":16777216},
+                "native_output_queue_bound":{"type":"integer", "minimum":1, "maximum":128},
                 "extra_args":{"type":"array", "items":{"type":"string"}},
                 "extra_env":{"type":"object", "additionalProperties":{"type":"string"}},
                 "auth_status":{"type":"boolean"}
@@ -413,7 +446,7 @@ fn provider_smoke<W: Write, E: Write>(
 ) -> Result<Value, AdapterError> {
     let options = invocation_options(params, Some(DEFAULT_SMOKE_TIMEOUT))?;
     let workspace = optional_workspace(params)?;
-    let executable = resolved_executable(provider, &options);
+    let executable = resolved_executable(provider, &options, workspace.as_deref())?;
     let environment = provider_environment(provider, &options.extra_env)?;
     let version_argv = command_with_prefix(
         &options.command_prefix,
@@ -528,7 +561,7 @@ fn provider_invoke<W: Write, E: Write>(
             .or(reasoning);
     }
     let environment = provider_environment(provider, &options.extra_env)?;
-    let executable = resolved_executable(provider, &options);
+    let executable = resolved_executable(provider, &options, Some(&workspace))?;
     let temporary = if provider == Provider::Codex {
         Some(TemporaryDirectory::create("tactus-codex")?)
     } else {
@@ -554,14 +587,30 @@ fn provider_invoke<W: Write, E: Write>(
             environment: &environment,
             prompt: &prompt,
             timeout: options.timeout,
+            limits: options.native_limits,
         },
         writer,
         diagnostics,
     )?;
-    let text = match last_message {
-        Some(path) => read_codex_last_message(&path)?.unwrap_or(completed.text),
-        None => completed.text,
+    let reported_failure = completed.reported_failure;
+    let (text, result_recognized) = match last_message {
+        Some(path) => match read_codex_last_message(&path, options.native_limits.max_result_bytes)?
+        {
+            Some(text) => (text, true),
+            None => (completed.text, completed.result_recognized),
+        },
+        None => (completed.text, completed.result_recognized),
     };
+    if reported_failure {
+        return Err(AdapterError::new(
+            "provider_reported_failure",
+            format!("{} reported a terminal native failure", provider.name()),
+        )
+        .with_details(json!({
+            "provider":provider.name(),
+            "cause":"native_reported_failure",
+        })));
+    }
     if !completed.status.success() {
         let mut details = json!({
             "provider":provider.name(),
@@ -581,6 +630,19 @@ fn provider_invoke<W: Write, E: Write>(
             ),
         )
         .with_details(details));
+    }
+    if !result_recognized {
+        return Err(AdapterError::new(
+            "outcome_unknown",
+            format!(
+                "{} completed without a recognized native result record",
+                provider.name()
+            ),
+        )
+        .with_details(json!({
+            "provider":provider.name(),
+            "cause":"native_result_unrecognized",
+        })));
     }
 
     let mut value = json!({
@@ -690,6 +752,7 @@ fn invocation_options(
         }
     };
     let command_prefix = string_array(open.get("command_prefix"), "options.command_prefix", false)?;
+    let executable = optional_string(&open, "executable")?;
     let timeout = match open.get("timeout_seconds") {
         None => default_timeout,
         Some(Value::Number(number)) => {
@@ -743,13 +806,99 @@ fn invocation_options(
             ));
         }
     }
+    let native_limits = native_provider_limits(&open)?;
     Ok(InvocationOptions {
         command_prefix,
+        executable,
         timeout,
+        native_limits,
         extra_args,
         extra_env,
         open,
     })
+}
+
+fn native_provider_limits(open: &Map<String, Value>) -> Result<NativeProviderLimits, AdapterError> {
+    let defaults = NativeProviderLimits::default();
+    let limits = NativeProviderLimits {
+        max_line_bytes: bounded_usize_option(
+            open,
+            "native_max_line_bytes",
+            defaults.max_line_bytes,
+            32 * 1024 * 1024,
+        )?,
+        max_stdout_bytes: bounded_usize_option(
+            open,
+            "native_max_stdout_bytes",
+            defaults.max_stdout_bytes,
+            4usize * 1024 * 1024 * 1024,
+        )?,
+        max_result_bytes: bounded_usize_option(
+            open,
+            "native_max_result_bytes",
+            defaults.max_result_bytes,
+            5 * 1024 * 1024,
+        )?,
+        max_stderr_bytes: bounded_usize_option(
+            open,
+            "native_max_stderr_bytes",
+            defaults.max_stderr_bytes,
+            16 * 1024 * 1024,
+        )?,
+        output_queue_bound: bounded_usize_option(
+            open,
+            "native_output_queue_bound",
+            defaults.output_queue_bound,
+            128,
+        )?,
+    };
+    if limits.max_stdout_bytes < limits.max_line_bytes {
+        return Err(AdapterError::new(
+            "invalid_params",
+            "options.native_max_stdout_bytes must not be smaller than native_max_line_bytes",
+        ));
+    }
+    let resident = limits
+        .max_line_bytes
+        .checked_mul(limits.output_queue_bound)
+        .ok_or_else(|| AdapterError::new("invalid_params", "native output queue size overflows"))?;
+    if resident > 256 * 1024 * 1024 {
+        return Err(AdapterError::new(
+            "invalid_params",
+            "native line size multiplied by queue bound must not exceed 268435456 bytes",
+        ));
+    }
+    Ok(limits)
+}
+
+fn bounded_usize_option(
+    open: &Map<String, Value>,
+    name: &str,
+    default: usize,
+    maximum: usize,
+) -> Result<usize, AdapterError> {
+    let Some(value) = open.get(name) else {
+        return Ok(default);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(AdapterError::new(
+            "invalid_params",
+            format!("options.{name} must be a positive integer"),
+        ));
+    };
+    let converted = usize::try_from(number).map_err(|_| {
+        AdapterError::new(
+            "invalid_params",
+            format!("options.{name} is outside the supported integer range"),
+        )
+    })?;
+    if converted == 0 || converted > maximum {
+        return Err(AdapterError::new(
+            "invalid_params",
+            format!("options.{name} must be between 1 and {maximum}"),
+        ));
+    }
+    Ok(converted)
 }
 
 fn string_array(
@@ -830,75 +979,74 @@ fn provider_environment(
     Ok(result)
 }
 
-fn resolved_executable(provider: Provider, options: &InvocationOptions) -> String {
+fn resolved_executable(
+    provider: Provider,
+    options: &InvocationOptions,
+    workspace: Option<&Path>,
+) -> Result<String, AdapterError> {
+    let configured = options
+        .executable
+        .as_deref()
+        .unwrap_or_else(|| provider.executable());
     if !options.command_prefix.is_empty() {
-        return provider.executable().to_owned();
+        return Ok(configured.to_owned());
     }
-    resolve_on_path(provider.executable()).unwrap_or_else(|| provider.executable().to_owned())
-}
-
-fn resolve_on_path(executable: &str) -> Option<String> {
-    let candidate = Path::new(executable);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate.to_string_lossy().into_owned());
-    }
-    let path = env::var_os("PATH")?;
-    #[cfg(windows)]
-    {
-        let extensions: Vec<String> = env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
-            .split(';')
-            .filter(|extension| !extension.is_empty())
-            .map(str::to_owned)
-            .collect();
-        for directory in env::split_paths(&path) {
-            if let Some(resolved) = resolve_windows_command(&directory, executable, &extensions) {
-                return Some(resolved.to_string_lossy().into_owned());
-            }
-        }
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        for directory in env::split_paths(&path) {
-            let direct = directory.join(executable);
-            if direct.is_file() {
-                return Some(direct.to_string_lossy().into_owned());
-            }
-        }
-        None
-    }
-}
-
-/// Resolve a bare command using Windows `PATHEXT` semantics. In particular,
-/// do not select an extensionless npm POSIX shim before its `.cmd` launcher.
-#[cfg(windows)]
-fn resolve_windows_command(
-    directory: &Path,
-    executable: &str,
-    extensions: &[String],
-) -> Option<PathBuf> {
-    let supplied_extension = Path::new(executable)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!(".{extension}"));
-    if supplied_extension.as_ref().is_some_and(|supplied| {
-        extensions
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(supplied))
-    }) {
-        let direct = directory.join(executable);
-        return direct.is_file().then_some(direct);
-    }
-    extensions.iter().find_map(|extension| {
-        let candidate = directory.join(format!("{executable}{extension}"));
-        candidate.is_file().then_some(candidate)
+    let working_directory = match workspace {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().map_err(|error| {
+            AdapterError::new(
+                "provider_resolution_failed",
+                format!("cannot determine the provider working directory: {error}"),
+            )
+        })?,
+    };
+    let resolver = ExecutableResolver::environment(working_directory);
+    let resolved = resolver
+        .resolve(configured)
+        .map_err(|error| executable_resolution_error(provider, configured, &error))?;
+    resolved.into_os_string().into_string().map_err(|path| {
+        AdapterError::new(
+            "provider_executable_not_utf8",
+            format!(
+                "{} native executable path is not valid UTF-8",
+                provider.name()
+            ),
+        )
+        .with_details(json!({
+            "provider":provider.name(),
+            "executable":path.to_string_lossy()
+        }))
     })
+}
+
+fn executable_resolution_error(
+    provider: Provider,
+    configured: &str,
+    error: &ExecutableResolutionError,
+) -> AdapterError {
+    AdapterError::new(
+        error.code(),
+        format!(
+            "cannot resolve {} native executable: {error}",
+            provider.name()
+        ),
+    )
+    .with_details(json!({
+        "provider":provider.name(),
+        "executable":configured,
+        "candidates":error
+            .candidates()
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+    }))
 }
 
 struct ProviderCompletion {
     status: ExitStatus,
     text: String,
+    result_recognized: bool,
+    reported_failure: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -926,6 +1074,7 @@ struct ProviderResultAccumulator {
     observed_bytes: usize,
     max_result_bytes: usize,
     overflow: Option<ProviderResultOverflow>,
+    reported_failure: bool,
 }
 
 impl ProviderResultAccumulator {
@@ -937,9 +1086,11 @@ impl ProviderResultAccumulator {
             observed_bytes: 0,
             max_result_bytes,
             overflow: None,
+            reported_failure: false,
         }
     }
 
+    #[cfg(test)]
     fn observe_plain(&mut self, text: &str) {
         if self.overflow.is_some() || self.kind != ProviderResultKind::Plain {
             return;
@@ -973,6 +1124,10 @@ impl ProviderResultAccumulator {
         // the last one wins.
         self.reset(ProviderResultKind::Final);
         self.append(text, "");
+    }
+
+    fn observe_reported_failure(&mut self) {
+        self.reported_failure = true;
     }
 
     fn reset(&mut self, kind: ProviderResultKind) {
@@ -1010,6 +1165,26 @@ impl ProviderResultAccumulator {
             None => Ok(self.text),
         }
     }
+
+    fn has_authoritative_result(&self, provider: Provider) -> bool {
+        self.items > 0
+            && match provider {
+                Provider::Codex | Provider::ClaudeCode => self.kind == ProviderResultKind::Final,
+                // OpenCode's JSON stream currently exposes text records rather
+                // than a separate terminal result record; successful process
+                // exit completes the accumulated text sequence.
+                Provider::OpenCode => {
+                    matches!(
+                        self.kind,
+                        ProviderResultKind::Fragments | ProviderResultKind::Final
+                    )
+                }
+            }
+    }
+
+    fn reported_failure(&self) -> bool {
+        self.reported_failure
+    }
 }
 
 fn finish_provider_result(
@@ -1033,6 +1208,22 @@ fn finish_provider_result(
     })
 }
 
+fn finalize_provider_result(
+    provider: Provider,
+    result: ProviderResultAccumulator,
+) -> Result<(String, bool, bool), AdapterError> {
+    let reported_failure = result.reported_failure();
+    if reported_failure {
+        // A provider-owned terminal failure is authoritative by itself. Any
+        // earlier assistant text is non-terminal and must not turn that known
+        // failure into an ambiguous result-size error.
+        return Ok((String::new(), true, true));
+    }
+    let result_recognized = result.has_authoritative_result(provider);
+    let text = finish_provider_result(provider, result)?;
+    Ok((text, result_recognized, false))
+}
+
 #[derive(Default)]
 struct ProviderEventDiagnostics {
     native_events: u64,
@@ -1044,7 +1235,7 @@ struct ProviderEventDiagnostics {
     stderr_lines: u64,
     stderr_truncated: bool,
     stderr_sha256: Option<String>,
-    event_types: BTreeMap<String, u64>,
+    event_type_fingerprints: BTreeMap<String, u64>,
 }
 
 impl ProviderEventDiagnostics {
@@ -1070,8 +1261,17 @@ impl ProviderEventDiagnostics {
         {
             self.thinking_events_suppressed = self.thinking_events_suppressed.saturating_add(1);
         }
-        if self.event_types.len() < 64 || self.event_types.contains_key(event_type) {
-            let count = self.event_types.entry(event_type.to_owned()).or_default();
+        let event_type_digest = format!("{:x}", Sha256::digest(event_type.as_bytes()));
+        let event_type_fingerprint = format!("sha256:{}", &event_type_digest[..16]);
+        if self.event_type_fingerprints.len() < 64
+            || self
+                .event_type_fingerprints
+                .contains_key(&event_type_fingerprint)
+        {
+            let count = self
+                .event_type_fingerprints
+                .entry(event_type_fingerprint)
+                .or_default();
             *count = count.saturating_add(1);
         }
     }
@@ -1115,7 +1315,10 @@ impl ProviderEventDiagnostics {
             ("stderr_lines".to_owned(), json!(self.stderr_lines)),
             ("stderr_truncated".to_owned(), json!(self.stderr_truncated)),
             ("stderr_sha256".to_owned(), json!(self.stderr_sha256)),
-            ("event_types".to_owned(), json!(self.event_types)),
+            (
+                "event_type_fingerprints".to_owned(),
+                json!(self.event_type_fingerprints),
+            ),
         ])
     }
 }
@@ -1125,25 +1328,61 @@ fn observe_provider_output(
     line: &[u8],
     result: &mut ProviderResultAccumulator,
     diagnostics: &mut ProviderEventDiagnostics,
-) {
-    let text = String::from_utf8_lossy(line);
+) -> Result<(), AdapterError> {
+    let text = std::str::from_utf8(line).map_err(|error| {
+        AdapterError::new(
+            "outcome_unknown",
+            format!(
+                "{} may have completed externally before emitting invalid UTF-8 output",
+                provider.name()
+            ),
+        )
+        .with_details(json!({
+            "provider":provider.name(),
+            "cause":"native_output_invalid_utf8",
+            "valid_up_to":error.valid_up_to(),
+        }))
+    })?;
     if text.trim().is_empty() {
-        return;
+        return Ok(());
     }
-    match serde_json::from_str::<Value>(&text) {
+    match serde_json::from_str::<Value>(text) {
         Ok(raw) => {
             diagnostics.observe_json(provider, &raw, line.len());
+            if provider == Provider::ClaudeCode
+                && raw.get("type").and_then(Value::as_str) == Some("result")
+                && (raw.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || raw
+                        .get("subtype")
+                        .and_then(Value::as_str)
+                        .is_some_and(|subtype| subtype.starts_with("error_")))
+            {
+                result.observe_reported_failure();
+            }
             let (event_fragments, event_final) = provider_event_text(provider, &raw);
             result.observe_fragments(&event_fragments);
             if let Some(event_final) = event_final {
                 result.observe_final(event_final);
             }
         }
-        Err(_) => {
+        Err(error) => {
             diagnostics.observe_plain(line.len());
-            result.observe_plain(&text);
+            return Err(AdapterError::new(
+                "outcome_unknown",
+                format!(
+                    "{} may have completed externally before emitting malformed JSON output",
+                    provider.name()
+                ),
+            )
+            .with_details(json!({
+                "provider":provider.name(),
+                "cause":"native_output_malformed_json",
+                "line_bytes":line.len(),
+                "reason":error.to_string(),
+            })));
         }
     }
+    Ok(())
 }
 
 enum NativeChildInner {
@@ -1226,6 +1465,18 @@ struct ProviderRun<'a> {
     environment: &'a BTreeMap<String, String>,
     prompt: &'a str,
     timeout: Option<Duration>,
+    limits: NativeProviderLimits,
+}
+
+fn dispatched_provider_failure(
+    provider: Provider,
+    cause: &'static str,
+    message: impl Into<String>,
+) -> AdapterError {
+    AdapterError::new("outcome_unknown", message).with_details(json!({
+        "provider":provider.name(),
+        "cause":cause,
+    }))
 }
 
 enum OutputMessage {
@@ -1247,16 +1498,29 @@ fn run_provider_command<W: Write, E: Write>(
         environment,
         prompt,
         timeout,
+        limits,
     } = run;
     let mut child = spawn_group(argv, Some(workspace), environment, true)?;
     let stdin = child.inner().stdin.take().ok_or_else(|| {
-        AdapterError::new("provider_spawn_failed", "provider stdin was unavailable")
+        dispatched_provider_failure(
+            provider,
+            "native_stdin_unavailable",
+            "native provider started but its stdin pipe was unavailable",
+        )
     })?;
     let stdout = child.inner().stdout.take().ok_or_else(|| {
-        AdapterError::new("provider_spawn_failed", "provider stdout was unavailable")
+        dispatched_provider_failure(
+            provider,
+            "native_stdout_unavailable",
+            "native provider started but its stdout pipe was unavailable",
+        )
     })?;
     let stderr = child.inner().stderr.take().ok_or_else(|| {
-        AdapterError::new("provider_spawn_failed", "provider stderr was unavailable")
+        dispatched_provider_failure(
+            provider,
+            "native_stderr_unavailable",
+            "native provider started but its stderr pipe was unavailable",
+        )
     })?;
     let prompt = prompt.as_bytes().to_vec();
     let input_worker = thread::spawn(move || -> io::Result<()> {
@@ -1264,23 +1528,25 @@ fn run_provider_command<W: Write, E: Write>(
         stdin.write_all(&prompt)?;
         stdin.flush()
     });
-    let (sender, receiver) = mpsc::sync_channel(NATIVE_OUTPUT_QUEUE);
+    let (sender, receiver) = mpsc::sync_channel(limits.output_queue_bound);
     let output_worker = thread::spawn(move || {
         read_lf_lines(
             stdout,
             sender,
-            MAX_NATIVE_LINE_BYTES,
-            MAX_NATIVE_STDOUT_BYTES,
+            limits.max_line_bytes,
+            limits.max_stdout_bytes,
         )
     });
     let diagnostics_worker =
-        thread::spawn(move || read_bounded_and_drain(stderr, MAX_NATIVE_STDERR_BYTES));
+        thread::spawn(move || read_bounded_and_drain(stderr, limits.max_stderr_bytes));
 
     let started = Instant::now();
     let mut status = None;
     let mut output_done = false;
-    let mut result = ProviderResultAccumulator::new(MAX_PROVIDER_RESULT_BYTES);
+    let mut result = ProviderResultAccumulator::new(limits.max_result_bytes);
     let mut event_diagnostics = ProviderEventDiagnostics::default();
+    let mut native_lines_seen = 0_u64;
+    let mut next_progress_milestone = 1_u64;
     while status.is_none()
         || !output_done
         || !input_worker.is_finished()
@@ -1288,13 +1554,46 @@ fn run_provider_command<W: Write, E: Write>(
     {
         match receiver.recv_timeout(PROCESS_POLL) {
             Ok(OutputMessage::Line(line)) => {
-                observe_provider_output(provider, &line, &mut result, &mut event_diagnostics);
+                native_lines_seen = native_lines_seen.saturating_add(1);
+                if native_lines_seen >= next_progress_milestone {
+                    writer
+                        .event(
+                            "provider.progress",
+                            Map::from_iter([
+                                (
+                                    "provider".to_owned(),
+                                    Value::String(provider.name().to_owned()),
+                                ),
+                                (
+                                    "phase".to_owned(),
+                                    Value::String("partial_output".to_owned()),
+                                ),
+                                ("native_lines_seen".to_owned(), json!(native_lines_seen)),
+                            ]),
+                        )
+                        .map_err(|error| {
+                            dispatched_provider_failure(
+                                provider,
+                                "host_progress_write_failed",
+                                error.message,
+                            )
+                        })?;
+                    next_progress_milestone = next_progress_milestone.saturating_mul(2).max(2);
+                }
+                if let Err(error) =
+                    observe_provider_output(provider, &line, &mut result, &mut event_diagnostics)
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
             }
             Ok(OutputMessage::ReadError(error)) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(AdapterError::new(
-                    "provider_io_failed",
+                return Err(dispatched_provider_failure(
+                    provider,
+                    "native_stdout_read_failed",
                     format!("cannot read provider stdout: {error}"),
                 ));
             }
@@ -1312,8 +1611,8 @@ fn run_provider_command<W: Write, E: Write>(
                     "provider":provider.name(),
                     "cause":"native_output_limit",
                     "reason":message,
-                    "max_line_bytes":MAX_NATIVE_LINE_BYTES,
-                    "max_stdout_bytes":MAX_NATIVE_STDOUT_BYTES
+                    "max_line_bytes":limits.max_line_bytes,
+                    "max_stdout_bytes":limits.max_stdout_bytes
                 })));
             }
             Ok(OutputMessage::End) | Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1322,12 +1621,18 @@ fn run_provider_command<W: Write, E: Write>(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if status.is_none() {
-            status = child.try_wait().map_err(|error| {
-                AdapterError::new(
-                    "provider_wait_failed",
-                    format!("cannot wait for {}: {error}", provider.name()),
-                )
-            })?;
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(dispatched_provider_failure(
+                        provider,
+                        "native_wait_failed",
+                        format!("cannot wait for {}: {error}", provider.name()),
+                    ));
+                }
+            };
         }
         // The native CLI leader can exit while a descendant still owns one of
         // the inherited pipes. The deadline governs the whole supervised I/O
@@ -1359,20 +1664,40 @@ fn run_provider_command<W: Write, E: Write>(
     let status = match status {
         Some(status) => status,
         None => child.wait().map_err(|error| {
-            AdapterError::new(
-                "provider_wait_failed",
+            dispatched_provider_failure(
+                provider,
+                "native_wait_failed",
                 format!("cannot wait for {}: {error}", provider.name()),
             )
         })?,
     };
-    let _ = output_worker.join();
-    if let Ok(Err(error)) = input_worker.join() {
-        return Err(AdapterError::new(
-            "provider_io_failed",
-            format!("cannot write provider prompt: {error}"),
+    if output_worker.join().is_err() {
+        return Err(dispatched_provider_failure(
+            provider,
+            "native_stdout_reader_failed",
+            "native provider stdout reader panicked",
         ));
     }
-    let captured = join_capture(diagnostics_worker, "provider stderr")?;
+    match input_worker.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return Err(dispatched_provider_failure(
+                provider,
+                "native_prompt_write_failed",
+                format!("cannot write provider prompt: {error}"),
+            ));
+        }
+        Err(_) => {
+            return Err(dispatched_provider_failure(
+                provider,
+                "native_prompt_writer_failed",
+                "native provider prompt writer panicked",
+            ));
+        }
+    }
+    let captured = join_capture(diagnostics_worker, "provider stderr").map_err(|error| {
+        dispatched_provider_failure(provider, "native_stderr_capture_failed", error.message)
+    })?;
     event_diagnostics.observe_stderr(&captured.bytes, captured.truncated);
     forward_diagnostics(provider, &captured.bytes, diagnostics);
     if captured.truncated {
@@ -1380,35 +1705,47 @@ fn run_provider_command<W: Write, E: Write>(
             diagnostics,
             "[warning] {} stderr truncated after {} bytes.",
             provider.name(),
-            MAX_NATIVE_STDERR_BYTES
+            limits.max_stderr_bytes
         );
     }
     // Native provider formats are intentionally not part of plugin-v1. Keep
     // one bounded diagnostic aggregate instead of forwarding token-level raw
     // JSON. This protects both the durable trace and human observers while
     // retaining enough evidence to diagnose event-shape changes.
-    writer.event("provider.diagnostic", event_diagnostics.payload(provider))?;
+    writer
+        .event("provider.diagnostic", event_diagnostics.payload(provider))
+        .map_err(|error| {
+            dispatched_provider_failure(provider, "host_diagnostic_write_failed", error.message)
+        })?;
     child.disarm();
-    let text = finish_provider_result(provider, result)?;
-    Ok(ProviderCompletion { status, text })
+    let (text, result_recognized, reported_failure) = finalize_provider_result(provider, result)?;
+    Ok(ProviderCompletion {
+        status,
+        text,
+        result_recognized,
+        reported_failure,
+    })
 }
 
-fn read_codex_last_message(path: &Path) -> Result<Option<String>, AdapterError> {
+fn read_codex_last_message(
+    path: &Path,
+    max_result_bytes: usize,
+) -> Result<Option<String>, AdapterError> {
     let file = match File::open(path) {
         Ok(file) => file,
         // Codex may exit before publishing the optional file. Its normalized
         // stdout remains a valid fallback, matching the pre-bounded behavior.
         Err(_) => return Ok(None),
     };
-    let mut bytes = Vec::with_capacity(MAX_PROVIDER_RESULT_BYTES + 1);
+    let mut bytes = Vec::with_capacity(max_result_bytes + 1);
     if file
-        .take((MAX_PROVIDER_RESULT_BYTES + 1) as u64)
+        .take((max_result_bytes + 1) as u64)
         .read_to_end(&mut bytes)
         .is_err()
     {
         return Ok(None);
     }
-    if bytes.len() > MAX_PROVIDER_RESULT_BYTES {
+    if bytes.len() > max_result_bytes {
         return Err(AdapterError::new(
             "outcome_unknown",
             "Codex completed but its last-message file exceeded the host transport budget",
@@ -1417,7 +1754,7 @@ fn read_codex_last_message(path: &Path) -> Result<Option<String>, AdapterError> 
             "provider":"codex",
             "cause":"provider_result_limit",
             "result_bytes_at_least":bytes.len(),
-            "max_result_bytes":MAX_PROVIDER_RESULT_BYTES
+            "max_result_bytes":max_result_bytes
         })));
     }
     String::from_utf8(bytes).map(Some).map_err(|error| {
@@ -3187,45 +3524,51 @@ fn remove_empty_state_directory(workspace: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::{Arc, Barrier};
 
-    #[cfg(windows)]
     #[test]
-    fn windows_path_resolution_skips_extensionless_npm_shims() {
-        let temporary = tempfile::tempdir().expect("temporary command directory");
-        let unix_shim = temporary.path().join("claude");
-        let windows_launcher = temporary.path().join("claude.cmd");
-        fs::write(&unix_shim, "#!/bin/sh\nexit 0\n").expect("npm POSIX shim");
-        fs::write(
-            &windows_launcher,
-            "@echo off\r\nif \"%~1\"==\"--version\" echo fake-claude 1.0\r\n",
-        )
-        .expect("npm Windows launcher");
-
-        let extensions = vec![
-            ".COM".to_owned(),
-            ".EXE".to_owned(),
-            ".BAT".to_owned(),
-            ".CMD".to_owned(),
-        ];
-        let resolved = resolve_windows_command(temporary.path(), "claude", &extensions)
-            .expect("Windows launcher");
-        assert!(
-            resolved
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&windows_launcher.to_string_lossy())
+    fn builtin_host_accepts_requests_above_the_default_but_below_the_hard_ceiling() {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "api":PLUGIN_API,
+            "id":"large-request",
+            "method":"fixture",
+            "params":{"payload":"x".repeat(1536 * 1024)},
+        }))
+        .expect("large request JSON");
+        assert!(request.len() > 1024 * 1024);
+        assert!(request.len() < MAX_REQUEST_BYTES);
+        let mut output = Vec::new();
+        let status = run_host(
+            Cursor::new(request),
+            &mut output,
+            Vec::new(),
+            |_request, _writer, _diagnostics| Ok(serde_json::json!({"accepted":true})),
         );
+        assert_eq!(status, 0);
+        assert!(
+            String::from_utf8(output)
+                .expect("host output")
+                .contains("\"accepted\":true")
+        );
+    }
 
-        let output = Command::new(&resolved)
-            .arg("--version")
-            .output()
-            .expect("spawn resolved cmd launcher");
-        assert!(output.status.success());
+    #[test]
+    fn invocation_options_accept_an_explicit_native_executable() {
+        let params = json!({
+            "options": {
+                "executable": "tools/中文 provider/claude.exe"
+            }
+        });
+        let options = invocation_options(
+            params.as_object().expect("params object"),
+            Some(DEFAULT_SMOKE_TIMEOUT),
+        )
+        .expect("provider options");
+
         assert_eq!(
-            String::from_utf8(output.stdout)
-                .expect("launcher stdout")
-                .trim(),
-            "fake-claude 1.0"
+            options.executable.as_deref(),
+            Some("tools/中文 provider/claude.exe")
         );
     }
 
@@ -3363,8 +3706,21 @@ mod tests {
                 .expect("cleanup worker")
                 .expect("concurrent cleanup");
         }
-        cleanup_expired_observation_files_with_retention(temporary.path(), Duration::ZERO)
-            .expect("final cleanup after concurrent iterators close");
+        // Cleanup is deliberately time-bounded. Under parallel test load one
+        // pass may make only partial progress, so exercise the same eventual
+        // maintenance contract a caller would use on later invocations.
+        for _ in 0..8 {
+            cleanup_expired_observation_files_with_retention(temporary.path(), Duration::ZERO)
+                .expect("final cleanup after concurrent iterators close");
+            if !state.exists()
+                || fs::read_dir(&state)
+                    .expect("remaining state directory")
+                    .next()
+                    .is_none()
+            {
+                break;
+            }
+        }
         assert!(
             !state.exists()
                 || fs::read_dir(&state)
@@ -3380,13 +3736,14 @@ mod tests {
         let path = temporary.path().join("last-message.txt");
         fs::write(&path, "孔洞").expect("small last message");
         assert_eq!(
-            read_codex_last_message(&path).expect("bounded read"),
+            read_codex_last_message(&path, MAX_PROVIDER_RESULT_BYTES).expect("bounded read"),
             Some("孔洞".to_owned())
         );
 
         fs::write(&path, vec![b'x'; MAX_PROVIDER_RESULT_BYTES + 1])
             .expect("oversized last message");
-        let error = read_codex_last_message(&path).expect_err("result limit");
+        let error =
+            read_codex_last_message(&path, MAX_PROVIDER_RESULT_BYTES).expect_err("result limit");
         assert_eq!(error.code, "outcome_unknown");
         assert_eq!(
             error.details.as_ref().expect("error details")["cause"],
@@ -3419,20 +3776,22 @@ mod tests {
         let mut diagnostics = ProviderEventDiagnostics::default();
         observe_provider_output(
             Provider::ClaudeCode,
-            b"abcde",
+            br#"{"type":"result","result":"abcde"}"#,
             &mut result,
             &mut diagnostics,
-        );
+        )
+        .expect("valid oversized result event");
         observe_provider_output(
             Provider::ClaudeCode,
             br#"{"type":"thinking"}"#,
             &mut result,
             &mut diagnostics,
-        );
+        )
+        .expect("valid diagnostic event");
 
         assert_eq!(diagnostics.native_events, 2);
-        assert_eq!(diagnostics.plain_lines, 1);
-        assert_eq!(diagnostics.json_events, 1);
+        assert_eq!(diagnostics.plain_lines, 0);
+        assert_eq!(diagnostics.json_events, 2);
         let error = finish_provider_result(Provider::ClaudeCode, result)
             .expect_err("oversized result must remain outcome-unknown");
         assert_eq!(error.code, "outcome_unknown");
@@ -3476,5 +3835,124 @@ mod tests {
             recovered_final.finish().expect("later bounded final text"),
             "last"
         );
+    }
+
+    #[test]
+    fn native_output_must_be_utf8_json_and_contain_a_recognized_result() {
+        let mut invalid_utf8 = ProviderResultAccumulator::new(64);
+        let mut diagnostics = ProviderEventDiagnostics::default();
+        let error = observe_provider_output(
+            Provider::ClaudeCode,
+            b"answer:\xff",
+            &mut invalid_utf8,
+            &mut diagnostics,
+        )
+        .expect_err("invalid UTF-8 cannot become a successful result");
+        assert_eq!(error.code, "outcome_unknown");
+        assert_eq!(
+            error.details.expect("UTF-8 details")["cause"],
+            "native_output_invalid_utf8"
+        );
+
+        let mut malformed = ProviderResultAccumulator::new(64);
+        let error = observe_provider_output(
+            Provider::ClaudeCode,
+            b"not-json",
+            &mut malformed,
+            &mut diagnostics,
+        )
+        .expect_err("malformed JSON cannot become a plain-text fallback");
+        assert_eq!(
+            error.details.expect("JSON details")["cause"],
+            "native_output_malformed_json"
+        );
+
+        let mut unknown = ProviderResultAccumulator::new(64);
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"future.schema","payload":1}"#,
+            &mut unknown,
+            &mut diagnostics,
+        )
+        .expect("unknown valid JSON remains observational");
+        assert!(!unknown.has_authoritative_result(Provider::ClaudeCode));
+
+        let mut partial = ProviderResultAccumulator::new(64);
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#,
+            &mut partial,
+            &mut diagnostics,
+        )
+        .expect("valid partial result");
+        assert!(!partial.has_authoritative_result(Provider::ClaudeCode));
+
+        let mut reported_failure = ProviderResultAccumulator::new(64);
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"failed"}"#,
+            &mut reported_failure,
+            &mut diagnostics,
+        )
+        .expect("valid terminal failure record");
+        assert!(reported_failure.has_authoritative_result(Provider::ClaudeCode));
+        assert!(reported_failure.reported_failure());
+
+        let mut failure_after_oversized_partial = ProviderResultAccumulator::new(4);
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"assistant","message":{"content":[{"type":"text","text":"oversized partial"}]}}"#,
+            &mut failure_after_oversized_partial,
+            &mut diagnostics,
+        )
+        .expect("oversized partial remains observational");
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"result","subtype":"error_during_execution","is_error":true}"#,
+            &mut failure_after_oversized_partial,
+            &mut diagnostics,
+        )
+        .expect("terminal failure without result text");
+        let (text, recognized, reported) =
+            finalize_provider_result(Provider::ClaudeCode, failure_after_oversized_partial)
+                .expect("known terminal failure outranks partial overflow");
+        assert!(text.is_empty());
+        assert!(recognized);
+        assert!(reported);
+
+        let mut empty = ProviderResultAccumulator::new(64);
+        observe_provider_output(
+            Provider::ClaudeCode,
+            br#"{"type":"result","result":""}"#,
+            &mut empty,
+            &mut diagnostics,
+        )
+        .expect("empty but explicit result");
+        assert!(empty.has_authoritative_result(Provider::ClaudeCode));
+        assert_eq!(empty.finish().expect("empty result"), "");
+
+        let mut opencode = ProviderResultAccumulator::new(64);
+        observe_provider_output(
+            Provider::OpenCode,
+            br#"{"type":"text","part":{"text":"done"}}"#,
+            &mut opencode,
+            &mut diagnostics,
+        )
+        .expect("OpenCode text record");
+        assert!(opencode.has_authoritative_result(Provider::OpenCode));
+    }
+
+    #[test]
+    fn every_post_spawn_infrastructure_failure_is_ambiguous() {
+        for cause in [
+            "native_stdout_read_failed",
+            "native_wait_failed",
+            "native_prompt_write_failed",
+            "native_stderr_capture_failed",
+        ] {
+            let error = dispatched_provider_failure(Provider::Codex, cause, "bounded fixture");
+            assert_eq!(error.code, "outcome_unknown");
+            assert_eq!(error.details.expect("details")["cause"], cause);
+        }
     }
 }

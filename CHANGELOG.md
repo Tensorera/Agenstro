@@ -17,21 +17,33 @@ do not imply a package-registry release or compatibility guarantee.
 - Reproducible local `Fast`, `Full`, `Release`, `Audit`, `Bootstrap`, and
   Cargo-clean quality profiles with machine-readable receipts and opt-in Git
   hooks.
+- Workspace-owned resource limits, bounded provider concurrency, structured
+  validation gates, and conservative `tactus runs` query/archive/GC commands.
 
 ### Changed
 
 - Clef now gives ordinary plugins a finite one-hour transport deadline and
-  layers a 13,500-second Tactus provider deadline below its four-hour outer
-  provider supervisor.
+  nests a 13,440-second native provider deadline below Tactus dispatch at
+  13,500 seconds, Clef's outer provider supervisor at 14,400 seconds, and the
+  workflow script's 15,300-second outer deadline.
+- `tactus check` and `tactus run` require an explicit path, `--all`, or an
+  inclusive `--from` / `--through` entry range; empty selection no longer
+  means the whole workspace.
+- Provider executable discovery rejects ambiguous PATH matches and supports an
+  exact `options.executable` pin, including Unicode and spaced Windows paths.
 - Published documentation carries checked ownership, applicability, platform,
   status, and verification metadata; the manual GitHub workflow remains a
   low-frequency cross-platform compiler matrix.
 
 ### Fixed
 
-- Provider adapters retain at most 512 KiB of terminal result text while still
-  draining bounded native output, and keep the safe 64 MiB generic process
-  stdout default separate from provider-specific limits.
+- Provider adapters retain at most 4 MiB of terminal result text by default
+  while streaming and draining up to a configurable 1 GiB of native output;
+  resident queues, individual frames, stderr, and generic plugin stdout remain
+  separately bounded.
+- `OutcomeUnknown` journals now retain typed, allowlisted workflow/task,
+  provider, progress, timestamp, reconciliation, and safe business-key hash
+  evidence without persisting provider result text.
 - Norm checks reject malformed bounds, loci, degenerate consistency groups,
   oversized sources/patterns, and non-terminating Python regex evaluation
   without falsely reporting a pass.

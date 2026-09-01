@@ -43,7 +43,8 @@ successful call to a live provider account.
 
 | Command | Offline by default | Can execute arbitrary trusted code | Can contact a provider |
 | --- | --- | --- | --- |
-| `init`, `list`, `prompt`, `doctor`, `studio inspect/events`, `session list/show` | Yes | Plugin commands may be inspected, not invoked by these queries | No |
+| `init`, `list`, `prompt`, `doctor`, `studio inspect/events`, `runs list/summarize/unfinished/show`, `session list/show` | Yes | Plugin commands may be inspected, not invoked by these queries | No |
+| `runs archive/gc` | Yes | Moves or deletes only validated eligible local journals; dry-run unless `--yes` | No |
 | `session answer` | Yes | Updates one local typed session and its answer transcript | No |
 | `check` | Yes apart from package resolution | Runs Cabal/GHC | No model call |
 | `run` | Depends on script | Yes, ordinary Haskell `IO` | Yes if the script invokes a provider/plugin |
@@ -58,8 +59,9 @@ successful call to a live provider account.
 
 | Control or outcome | Supported contract |
 | --- | --- |
-| Direct `tactus check/run --timeout-seconds` | 1,800-second default; `0` disables the direct Tactus deadline |
-| `segno install/once/driver --task-timeout-seconds` | 1,800-second default for each Tactus build/run phase; accepted range 1 through 604,800; `0` is rejected |
+| Direct `tactus check/run --timeout-seconds` | Explicit option overrides workspace policy; otherwise check defaults to 1,800 seconds and each complete workflow script has a 15,300-second outer deadline; `0` explicitly disables the direct deadline |
+| `segno install/once/driver --task-timeout-seconds` | 15,300-second default for each Tactus build/run phase; accepted range 1 through 604,800; `0` is rejected |
+| Provider dispatch | Defaults nest native CLI 13,440 seconds, Tactus dispatch 13,500 seconds, and Clef outer supervision 14,400 seconds below the workflow script's 15,300-second outer deadline; workspace `limits` also bound stdout/frame/result retention and provider concurrency |
 | `segno driver --poll-seconds` | Positive finite maximum idle wait; default 1 second; it is neither the trigger interval nor a task deadline |
 | Observation delivery | Bounded and non-authoritative; provider/UI layers may aggregate or coalesce progress, while Tactus drops excess low-priority callbacks into `events_dropped`; callback degradation becomes `observation_error`, and neither changes the authoritative invocation terminal |
 | Motivo action-output projection | A byte/frame overrun emits one `[warning]`, discards later raw projection, and continues draining Tactus without changing the child outcome |

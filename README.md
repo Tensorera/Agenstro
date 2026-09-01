@@ -92,13 +92,23 @@ type-check them, and run them:
 ```powershell
 tactus generate --provider codex "Create a typed multi-step workflow for this project."
 tactus list
-tactus check
-tactus run
+tactus check --all
+tactus run --all
 ```
 
 `generate` can contact or bill the selected provider. `check` compiles without
 executing workflow code. `run` executes trusted Haskell and any effects it
-calls with the current user's operating-system authority.
+calls with the current user's operating-system authority. Both commands require
+an explicit script selection: paths, `--all`, or an inclusive `--from` /
+`--through` entry range.
+
+Inspect recent evidence without opening journal files by hand:
+
+```powershell
+tactus runs summarize --since 24h
+tactus runs list --state outcome_unknown
+tactus runs unfinished
+```
 
 For the complete Windows and Ubuntu source-install procedure, upgrades,
 optional Segno installation, and Motivo deployment, use the

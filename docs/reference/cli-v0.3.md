@@ -2,7 +2,7 @@
 title: Agenstro CLI reference
 status: alpha
 owners: [tactus]
-last_verified: 2026-08-20
+last_verified: 2026-09-01
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -31,11 +31,17 @@ contains spaces.
 | `tactus prompt` | Print resolved generation instructions | `--root` |
 | `tactus doctor` | Validate config, GHC/Cabal, SDK, and plugin commands | `--root`, `--json` |
 | `tactus runtime-json` | Print Clef's normalized runtime config | `--root` |
-| `tactus check [SCRIPT...]` | Compile-check without executing | `--package NAME`, `--keep-going`, `--timeout-seconds` |
-| `tactus run` | Execute selected or ordered entry scripts | repeatable `--script`, `--package NAME`, `--keep-going`, `-- ARG...` |
+| `tactus check [SCRIPT...]` | Compile-check an explicit selection without executing | `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds` |
+| `tactus run` | Execute an explicit selection of ordered entry scripts | repeatable `--script`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `-- ARG...` |
 | `tactus generate GOAL...` | Ask one provider to write numbered Haskell scripts | `--provider NAME`, `--timeout-seconds`, `--json` |
 | `tactus plugin-call NAME METHOD` | Invoke a registry entry directly | `--namespace`, `--params JSON`, `--timeout-seconds`, `--json` |
 | `tactus smoke [NAME...]` | Probe configured plugins | `--live`, `--json` |
+| `tactus runs list` | List completed outcomes plus valid `open` and protected `corrupt` journals, newest first | `--state`, `--since`, `--limit`, `--json` |
+| `tactus runs summarize` | Aggregate run states and invocation kinds | `--state`, `--since`, `--json` |
+| `tactus runs unfinished` | List valid `open` journals only; use `list --state corrupt` for malformed evidence | `--since`, `--limit`, `--json` |
+| `tactus runs show RUN_ID` | Read one bounded durable-event page | `--after`, `--limit`, `--max-bytes`, `--json` |
+| `tactus runs archive` | Preview or move eligible old journals | required `--before`; `--yes` applies |
+| `tactus runs gc` | Preview or delete eligible archived journals | optional `--before`; `--yes` applies |
 | `tactus studio inspect` | Return a redacted Studio workspace projection | `--exact-root`, `--run-limit` |
 | `tactus studio events RUN_ID` | Read one bounded trace page | `--after`, `--limit`, `--max-bytes` |
 | `tactus session list` | Return newest validated session views | `--root`, `--limit` |
@@ -59,6 +65,13 @@ tactus check --root D:\work\project --package segno-flow `
 tactus run --root D:\work\project --package segno-flow `
   --script .tactus\scripts\900_record_active_window.hs
 ```
+
+`check` and `run` never infer “all” from an empty selection. Supply one or more
+paths, `--all`, or an inclusive `--from` / `--through` range. Archive and GC
+are dry-run previews unless `--yes` is present; open, corrupt, and unresolved
+`outcome_unknown` journals are always protected. JSON from `runs show` exposes
+the journal's validated durable diagnostic data; treat it as potentially
+sensitive even though reads are byte- and event-bounded.
 
 `generate` and `smoke --live` may contact or bill a provider. Plain `smoke` is
 an offline executable/capability probe. `check` does not execute workflow code;
@@ -101,7 +114,7 @@ the [session control API](session-control-v1.md).
 | `segno status` | Inspect runtime-owned lifecycle | `--job TASK`, `--json` |
 | `segno history` | Inspect lifecycle or business-state history | `--state-key`, `--occurrence`, `--limit`, `--json` |
 
-The task timeout is per Tactus build/run phase, defaults to 1,800 seconds, and
+The task timeout is per Tactus build/run phase, defaults to 15,300 seconds, and
 accepts 1–604,800 seconds. Segno derives a longer Running lease from it.
 
 `history --state-key` and `history --occurrence` are mutually exclusive.

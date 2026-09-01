@@ -115,11 +115,14 @@ itself never sleeps.
 
 There are three independent timing controls:
 
-- Direct `tactus check/run --timeout-seconds N` bounds its Cabal/GHC/runghc
-  phase. The default is 1,800 seconds; `0` disables that direct deadline.
+- Direct `tactus check/run --timeout-seconds N` overrides the corresponding
+  workspace limit for its Cabal/GHC/runghc phase. Without an override, check
+  uses `limits.check_timeout_seconds` and run uses
+  `limits.script_timeout_seconds`.
 - `segno install/once/driver --task-timeout-seconds N` bounds each Tactus
-  build/run phase started by Segno. The default is 1,800, the accepted range is
-  1 through 604,800, and zero is rejected.
+  build/run phase started by Segno. The default is 15,300 seconds, aligned
+  with a newly initialized workspace's script limit; the accepted range is 1
+  through 604,800, and zero is rejected.
 - `segno driver --poll-seconds N` controls only the maximum idle wait before
   polling again. It does not change the task's one-minute interval or its
   execution deadline.

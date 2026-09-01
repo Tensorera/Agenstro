@@ -102,7 +102,7 @@ After restoring or moving the project:
 3. rerun `segno init --root PROJECT --sdk SEGNO_PATH` when the Segno source path
    changed;
 4. run `tactus doctor`;
-5. run `tactus check` before any workflow execution; and
+5. run `tactus check --all` before any workflow execution; and
 6. inspect `segno status` before restarting the driver.
 
 Do not copy one project's lifecycle database into another project while
@@ -118,7 +118,7 @@ tactus --version
 segno --version
 tactus check --help | Select-String -Pattern '--package'
 tactus doctor
-tactus check
+tactus check --all
 ```
 
 An executable version string alone is insufficient when testing an untagged
@@ -127,20 +127,48 @@ commit used for installation.
 
 ## Run-journal retention
 
-Each run ID is an opaque directory name below `.tactus/runs`. Delete only
-complete, inactive directories selected by an operator policy—for example,
-after exporting an incident record and keeping the most recent N days.
+Each run ID is an opaque directory name below `.tactus/runs`. Inspect and
+summarize local evidence without opening the JSON files by hand:
+
+```powershell
+tactus runs list --state outcome_unknown
+tactus runs summarize --since 7d
+tactus runs unfinished
+tactus runs show RUN_ID
+```
+
+Time filters accept Unix milliseconds, `now`, or a relative age such as `24h`
+or `7d`. JSON output is available with `--json`. `list` includes valid
+completed outcomes, valid `open` journals, and `corrupt` journals that require
+investigation. `unfinished` is the narrower view of valid `open` journals;
+inspect corrupt records through `list --state corrupt`.
+
+Archive only complete, inactive directories selected by an operator policy—for
+example, after exporting an incident record and keeping the most recent N days:
+
+```powershell
+tactus runs archive --before 30d
+tactus runs archive --before 30d --yes
+tactus runs gc --before 90d
+tactus runs gc --before 90d --yes
+```
+
+`archive` moves eligible records below `.tactus/runs/archive`; `gc` considers
+only that archive. Both commands are previews by default. They do not create,
+move, or delete anything until `--yes` is supplied.
 
 Before deletion:
 
 - confirm no Tactus command is using the workspace;
-- inspect whether `summary.json` exists;
-- retain records referenced by an unresolved `OutcomeUnknown`;
-- avoid following symlinks or junctions; and
-- delete exact validated paths, never a broad computed root.
+- inspect the preview before supplying `--yes`;
+- retain records referenced by an unresolved `OutcomeUnknown`; and
+- investigate every `open`, `corrupt`, linked, reparse-point, or otherwise
+  protected path instead of trying to force maintenance past it.
 
-Tactus does not currently expose a user-facing journal-prune command. Manual
-retention is therefore an operational responsibility.
+Tactus validates exact contained run paths and refuses unsafe directory trees.
+It never treats a missing summary or incomplete evidence as permission to
+delete. Retention policy and the final `--yes` decision remain operator
+responsibilities.
 
 ## `OutcomeUnknown` procedure
 

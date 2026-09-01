@@ -18,6 +18,8 @@ use thiserror::Error;
 
 use crate::{
     journal::{Presentation, RunSummary, TRACE_API, TraceEvent},
+    limits::MAX_FRAME_BYTES_CEILING,
+    outcome::{classify_outcome, validate_outcome_consistency},
     process::{InvocationKind, ProcessOutcome},
     workspace::{RuntimeConfig, Workspace, WorkspaceError, discover_scripts, doctor},
 };
@@ -29,10 +31,12 @@ pub const STUDIO_API: &str = "agenstro.studio/v1";
 
 const MAX_RUN_LIMIT: usize = 200;
 const MAX_EVENT_LIMIT: usize = 1_000;
-const MAX_EVENT_PAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_EVENT_LINE_BYTES: usize = 1024 * 1024;
+const MAX_EVENT_LINE_BYTES: usize = MAX_FRAME_BYTES_CEILING + 4 * 1024 * 1024;
+const MAX_EVENT_PAGE_BYTES: usize = MAX_EVENT_LINE_BYTES;
+const MAX_EVENT_SCAN_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_DIRECTORIES_SCANNED: usize = 2_000;
+const MAX_RUN_DIRECTORY_ENTRIES_VISITED: usize = 100_000;
 const MAX_DIAGNOSTIC_CHARACTERS: usize = 4_096;
 
 /// A successful machine-control response.
@@ -203,7 +207,7 @@ pub struct StudioPlugin {
 pub struct StudioRun {
     /// Opaque, path-safe identifier.
     pub run_id: String,
-    /// `open`, `corrupt`, or one `InvocationKind` value.
+    /// `open`, `corrupt`, `succeeded`, `failed`, or `outcome_unknown`.
     pub state: String,
     /// Trace integrity seen while projecting the run.
     pub integrity: StudioIntegrity,
@@ -406,7 +410,7 @@ pub fn events(
     validate_run_id(run_id)?;
     let workspace = Workspace::discover(start)?;
     let run_path = workspace.runs_path.join(run_id);
-    if !is_plain_directory(&run_path)? {
+    if !require_contained_run_directory(&workspace.runs_path, &run_path)? {
         return Err(StudioError::RunNotFound(run_id.to_owned()));
     }
     let summary = read_summary(&run_path, run_id)?;
@@ -415,7 +419,8 @@ pub fn events(
     require_plain_file(&event_path)?;
     let file = File::open(&event_path).map_err(StudioError::Io)?;
     let mut reader = BufReader::new(file);
-    let mut bytes_read = 0usize;
+    let mut scanned_bytes = 0usize;
+    let mut retained_bytes = 0usize;
     let mut expected = 1u64;
     let mut page = Vec::new();
     let mut next_after = after;
@@ -426,20 +431,15 @@ pub fn events(
         if page.len() == limit {
             break;
         }
-        if bytes_read >= max_bytes {
-            integrity = StudioIntegrity::Partial;
-            break;
-        }
         let line = read_bounded_line(&mut reader, MAX_EVENT_LINE_BYTES)?;
         let Some(line) = line else {
             reached_eof = true;
             break;
         };
-        if bytes_read.saturating_add(line.bytes.len()) > max_bytes {
-            integrity = StudioIntegrity::Partial;
-            break;
+        scanned_bytes = scanned_bytes.saturating_add(line.bytes.len());
+        if scanned_bytes > MAX_EVENT_SCAN_BYTES {
+            return Err(StudioError::BudgetExceeded(event_path));
         }
-        bytes_read = bytes_read.saturating_add(line.bytes.len());
         if !line.terminated {
             integrity = StudioIntegrity::Partial;
             break;
@@ -459,6 +459,16 @@ pub fn events(
         if trace.seq <= after {
             continue;
         }
+        if retained_bytes.saturating_add(line.bytes.len()) > max_bytes {
+            if page.is_empty() {
+                return Err(StudioError::InvalidLimit(
+                    "the next event exceeds maxBytes; increase the event byte limit".to_owned(),
+                ));
+            }
+            integrity = StudioIntegrity::Partial;
+            break;
+        }
+        retained_bytes = retained_bytes.saturating_add(line.bytes.len());
         next_after = trace.seq;
         page.push(StudioEvent {
             seq: trace.seq.to_string(),
@@ -503,7 +513,8 @@ fn project_registries(
             name: name.clone(),
             namespace: "provider",
             available: availability
-                .get(format!("provider:{name}").as_str())
+                .get(format!("provider-native:{name}").as_str())
+                .or_else(|| availability.get(format!("provider:{name}").as_str()))
                 .copied()
                 .unwrap_or(false),
             default: *name == config.default_provider,
@@ -553,37 +564,80 @@ fn project_registries(
 }
 
 fn recent_runs(workspace: &Workspace, limit: usize) -> Result<Vec<StudioRun>, StudioError> {
-    let mut directories = fs::read_dir(&workspace.runs_path)
+    let mut directories = BTreeMap::new();
+    for (index, entry) in fs::read_dir(&workspace.runs_path)
         .map_err(StudioError::Io)?
-        .take(MAX_RUN_DIRECTORIES_SCANNED)
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| {
-            let name = entry.file_name().to_str()?.to_owned();
-            validate_run_id(&name).ok()?;
-            Some((name, entry.path()))
-        })
-        .collect::<Vec<_>>();
-    directories.sort_by(|left, right| right.0.cmp(&left.0));
+        .enumerate()
+    {
+        if index >= MAX_RUN_DIRECTORY_ENTRIES_VISITED {
+            return Err(StudioError::BudgetExceeded(workspace.runs_path.clone()));
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        if validate_run_id(&name).is_err() {
+            continue;
+        }
+        retain_newest_run_directory(&mut directories, name, entry.path());
+    }
     directories
         .into_iter()
+        .rev()
         .take(limit)
-        .map(|(run_id, path)| match read_summary(&path, &run_id) {
-            Ok(summary) => Ok(project_run(&path, &run_id, summary.as_ref())),
-            Err(
-                StudioError::Json(_)
-                | StudioError::CorruptTrace(_)
-                | StudioError::BudgetExceeded(_)
-                | StudioError::UnsafeTracePath(_),
-            ) => {
-                let mut run = project_run(&path, &run_id, None);
-                run.state = "corrupt".to_owned();
-                run.integrity = StudioIntegrity::Corrupt;
-                Ok(run)
-            }
-            Err(error) => Err(error),
-        })
+        .map(
+            |(run_id, path)| match require_contained_run_directory(&workspace.runs_path, &path) {
+                Ok(true) => match read_summary(&path, &run_id) {
+                    Ok(summary) => Ok(project_run(&path, &run_id, summary.as_ref())),
+                    Err(
+                        StudioError::Json(_)
+                        | StudioError::CorruptTrace(_)
+                        | StudioError::BudgetExceeded(_)
+                        | StudioError::UnsafeTracePath(_),
+                    ) => {
+                        let mut run = project_run(&path, &run_id, None);
+                        run.state = "corrupt".to_owned();
+                        run.integrity = StudioIntegrity::Corrupt;
+                        Ok(run)
+                    }
+                    Err(error) => Err(error),
+                },
+                Ok(false) | Err(StudioError::UnsafeTracePath(_)) => Ok(project_unsafe_run(&run_id)),
+                Err(error) => Err(error),
+            },
+        )
         .collect()
+}
+
+fn retain_newest_run_directory(
+    directories: &mut BTreeMap<String, PathBuf>,
+    run_id: String,
+    path: PathBuf,
+) {
+    directories.insert(run_id, path);
+    if directories.len() > MAX_RUN_DIRECTORIES_SCANNED
+        && let Some(oldest) = directories.keys().next().cloned()
+    {
+        directories.remove(&oldest);
+    }
+}
+
+fn project_unsafe_run(run_id: &str) -> StudioRun {
+    StudioRun {
+        run_id: run_id.to_owned(),
+        state: "corrupt".to_owned(),
+        integrity: StudioIntegrity::Corrupt,
+        started_unix_ms: run_id_timestamp(run_id).unwrap_or(0).to_string(),
+        finished_unix_ms: None,
+        events_recorded: "0".to_owned(),
+        label: "Unsafe run journal".to_owned(),
+        namespace: None,
+        subject: None,
+        method: None,
+        outcome: None,
+    }
 }
 
 fn project_run(path: &Path, run_id: &str, summary: Option<&RunSummary>) -> StudioRun {
@@ -601,7 +655,7 @@ fn project_run(path: &Path, run_id: &str, summary: Option<&RunSummary>) -> Studi
         },
         |summary| {
             (
-                invocation_kind_name(summary.outcome.kind).to_owned(),
+                classify_outcome(&summary.outcome).as_str().to_owned(),
                 summary.started_unix_ms,
                 Some(summary.finished_unix_ms),
                 summary.events_recorded,
@@ -819,6 +873,8 @@ fn read_summary(path: &Path, run_id: &str) -> Result<Option<RunSummary>, StudioE
     if summary.api != TRACE_API || summary.run_id != run_id {
         return Err(StudioError::CorruptTrace(run_id.to_owned()));
     }
+    validate_outcome_consistency(&summary.outcome)
+        .map_err(|_| StudioError::CorruptTrace(run_id.to_owned()))?;
     Ok(Some(summary))
 }
 
@@ -836,9 +892,22 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, StudioError
     Ok(bytes)
 }
 
-fn is_plain_directory(path: &Path) -> Result<bool, StudioError> {
+fn require_contained_run_directory(root: &Path, path: &Path) -> Result<bool, StudioError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.file_type().is_dir()),
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+            {
+                return Err(StudioError::UnsafeTracePath(path.to_path_buf()));
+            }
+            let canonical_root = dunce::canonicalize(root).map_err(StudioError::Io)?;
+            let canonical = dunce::canonicalize(path).map_err(StudioError::Io)?;
+            if canonical.parent() != Some(canonical_root.as_path()) {
+                return Err(StudioError::UnsafeTracePath(path.to_path_buf()));
+            }
+            Ok(true)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(StudioError::Io(error)),
     }
@@ -846,10 +915,34 @@ fn is_plain_directory(path: &Path) -> Result<bool, StudioError> {
 
 fn require_plain_file(path: &Path) -> Result<(), StudioError> {
     let metadata = fs::symlink_metadata(path).map_err(StudioError::Io)?;
-    if !metadata.file_type().is_file() {
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+    {
+        return Err(StudioError::UnsafeTracePath(path.to_path_buf()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| StudioError::UnsafeTracePath(path.to_path_buf()))?;
+    let canonical_parent = dunce::canonicalize(parent).map_err(StudioError::Io)?;
+    let canonical = dunce::canonicalize(path).map_err(StudioError::Io)?;
+    if canonical.parent() != Some(canonical_parent.as_path()) {
         return Err(StudioError::UnsafeTracePath(path.to_path_buf()));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 struct BoundedLine {
@@ -963,7 +1056,7 @@ pub enum StudioError {
     #[error("studio read budget exceeded for {0}")]
     BudgetExceeded(PathBuf),
     /// One event exceeded the control-plane frame budget.
-    #[error("studio event line exceeds the 1 MiB limit")]
+    #[error("studio event line exceeds the durable trace line limit")]
     EventLineTooLarge,
     /// A trace component was not a plain file or directory.
     #[error("studio refused a non-plain trace path: {0}")]
@@ -1026,7 +1119,9 @@ mod tests {
         ProcessOutcome {
             kind: InvocationKind::Succeeded,
             exit_code: Some(0),
-            terminal: None,
+            terminal: Some(crate::protocol::TerminalResult::Success {
+                value: serde_json::json!({"fixture": true}),
+            }),
             frames_seen: 1,
             events_dropped: 0,
             observation_error: None,
@@ -1034,6 +1129,7 @@ mod tests {
             stderr_truncated: false,
             error: None,
             elapsed_ms: 3,
+            progress: None,
         }
     }
 
@@ -1140,6 +1236,38 @@ mod tests {
     }
 
     #[test]
+    fn skipped_prefix_bytes_do_not_exhaust_the_return_page() {
+        let temporary = tempdir().expect("temporary");
+        let sdk = temporary.path().join("clef-sdk");
+        fs::create_dir(&sdk).expect("sdk");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("manifest");
+        let project = temporary.path().join("project");
+        let report = initialize_workspace(&project, Some(&sdk)).expect("workspace");
+        let mut journal = RunJournal::create(&report.workspace).expect("journal");
+        journal
+            .record_with_presentation(
+                "fixture.large_prefix",
+                serde_json::json!({"fixture": true}),
+                Some(crate::journal::Presentation::new(
+                    crate::journal::PresentationCategory::Info,
+                    "x".repeat(1_024),
+                )),
+            )
+            .expect("large prefix");
+        journal
+            .record("fixture.after_cursor", serde_json::json!({"fixture": true}))
+            .expect("selected event");
+        let run_id = journal.run_id().to_owned();
+        journal.finish(outcome()).expect("summary");
+
+        let page = events(&project, &run_id, 1, 10, 512).expect("page after prefix");
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].kind, "fixture.after_cursor");
+        assert_eq!(page.next_after, "2");
+        assert!(page.complete);
+    }
+
+    #[test]
     fn invalid_run_id_never_reaches_the_filesystem() {
         assert!(matches!(
             validate_run_id("../summary"),
@@ -1168,6 +1296,132 @@ mod tests {
             snapshot.runs[0].integrity,
             StudioIntegrity::Corrupt
         ));
+    }
+
+    fn assert_linked_run_is_not_read(project: &Path, run_id: &str) {
+        let error = events(project, run_id, 0, 10, 1024).expect_err("linked run rejected");
+        assert!(matches!(error, StudioError::UnsafeTracePath(_)));
+        let snapshot = inspect(project, 10).expect("unsafe run remains projectable");
+        let encoded = serde_json::to_string(&snapshot).expect("snapshot JSON");
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(snapshot.runs[0].state, "corrupt");
+        assert_eq!(snapshot.runs[0].label, "Unsafe run journal");
+        assert!(!encoded.contains("DO_NOT_READ_OUTSIDE"));
+    }
+
+    fn write_outside_run(path: &Path, run_id: &str) {
+        fs::create_dir(path).expect("outside run");
+        let event = TraceEvent {
+            api: TRACE_API.to_owned(),
+            run_id: run_id.to_owned(),
+            seq: 1,
+            at_unix_ms: 1,
+            kind: "runtime.state_transition".to_owned(),
+            presentation: Some(crate::journal::Presentation::new(
+                crate::journal::PresentationCategory::State,
+                "DO_NOT_READ_OUTSIDE",
+            )),
+            data: serde_json::json!({"state_after":"running"}),
+        };
+        fs::write(
+            path.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&event).expect("outside event JSON")
+            ),
+        )
+        .expect("outside event");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn studio_rejects_a_linked_run_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().expect("temporary");
+        let sdk = temporary.path().join("clef-sdk");
+        fs::create_dir(&sdk).expect("sdk");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("manifest");
+        let project = temporary.path().join("project");
+        let report = initialize_workspace(&project, Some(&sdk)).expect("workspace");
+        let run_id = "run-9999999999999-1-0";
+        let outside = temporary.path().join("outside-run");
+        write_outside_run(&outside, run_id);
+        symlink(&outside, report.workspace.runs_path.join(run_id)).expect("run symlink");
+        assert_linked_run_is_not_read(&project, run_id);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn studio_rejects_a_run_junction() {
+        let temporary = tempdir().expect("temporary");
+        let sdk = temporary.path().join("clef-sdk");
+        fs::create_dir(&sdk).expect("sdk");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("manifest");
+        let project = temporary.path().join("project");
+        let report = initialize_workspace(&project, Some(&sdk)).expect("workspace");
+        let run_id = "run-9999999999999-1-0";
+        let outside = temporary.path().join("outside-run");
+        write_outside_run(&outside, run_id);
+        let linked = report.workspace.runs_path.join(run_id);
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:TACTUS_TEST_JUNCTION -Target $env:TACTUS_TEST_TARGET | Out-Null",
+            ])
+            .env("TACTUS_TEST_JUNCTION", &linked)
+            .env("TACTUS_TEST_TARGET", &outside)
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_linked_run_is_not_read(&project, run_id);
+    }
+
+    #[test]
+    fn recent_runs_sort_before_applying_the_scan_cap() {
+        let temporary = tempdir().expect("temporary");
+        let sdk = temporary.path().join("clef-sdk");
+        fs::create_dir(&sdk).expect("sdk");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("manifest");
+        let project = temporary.path().join("project");
+        let report = initialize_workspace(&project, Some(&sdk)).expect("workspace");
+        for timestamp in 1..=MAX_RUN_DIRECTORIES_SCANNED + 5 {
+            let run_id = format!("run-{timestamp:013}-1-0");
+            let run_path = report.workspace.runs_path.join(&run_id);
+            fs::create_dir(&run_path).expect("run directory");
+            fs::write(run_path.join("events.jsonl"), []).expect("empty events");
+        }
+
+        let snapshot = inspect(&project, 1).expect("snapshot");
+        assert_eq!(
+            snapshot.runs[0].run_id,
+            format!("run-{:013}-1-0", MAX_RUN_DIRECTORIES_SCANNED + 5)
+        );
+    }
+
+    #[test]
+    fn newest_run_retention_has_a_fixed_memory_bound() {
+        let mut retained = BTreeMap::new();
+        for timestamp in 1..=MAX_RUN_DIRECTORIES_SCANNED + 5 {
+            let run_id = format!("run-{timestamp:013}-1-0");
+            retain_newest_run_directory(&mut retained, run_id.clone(), PathBuf::from(run_id));
+            assert!(retained.len() <= MAX_RUN_DIRECTORIES_SCANNED);
+        }
+        assert_eq!(retained.len(), MAX_RUN_DIRECTORIES_SCANNED);
+        assert_eq!(
+            retained.keys().next().map(String::as_str),
+            Some("run-0000000000006-1-0")
+        );
+        assert_eq!(
+            retained.keys().next_back().map(String::as_str),
+            Some("run-0000000002005-1-0")
+        );
     }
 
     #[test]

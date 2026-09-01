@@ -67,6 +67,11 @@ as one validated `PluginTransportLimits` value through `callPluginWithLimits`;
 post-spawn limit or deadline failure remains outcome-unknown because external
 work may already have happened.
 
+The workspace-owned Tactus/Clef path normally supplies a 1 MiB request default
+and a 32 MiB frame budget. The frame budget cannot exceed 33,554,432 bytes;
+built-in Tactus provider/effect hosts accept larger configured requests only up
+to their 16 MiB hard ceiling.
+
 ## Request
 
 ```json
@@ -222,14 +227,15 @@ The bundled provider adapters expose `invoke` with open parameters shaped like:
 OpenCode uses `variant` as its native reasoning selector and accepts effort as
 a compatibility fallback. Adapters use native streaming output to derive the
 live terminal object, but project token-level JSON/free text as one bounded
-`provider.diagnostic` aggregate of counts, byte sizes, event types, truncation,
-and hashes. The live terminal still contains at least the resulting text and
+`provider.diagnostic` aggregate of counts, byte sizes, event-type fingerprints,
+truncation, and hashes. The live terminal still contains at least the resulting text and
 process/provider metadata; durable journals summarize that value. Session reuse
 is not implicit. Native provider stdout has an adapter-local 8 MiB line and
 1 GiB drain limit because tool payloads can be larger than plugin frames, with
 at most eight lines queued between the pipe reader and parser. The adapter
-incrementally retains at most 512 KiB of extracted result text; if that result
-budget is exceeded it keeps draining the supervised stream. A later,
+incrementally retains at most 4 MiB of extracted result text by default, with
+a validated 5 MiB ceiling; if that result budget is exceeded it keeps draining
+the supervised stream. A later,
 higher-precedence candidate may replace an oversized fallback; if the final
 selected candidate is still oversized, the adapter reports `OutcomeUnknown`
 without constructing the oversized result.

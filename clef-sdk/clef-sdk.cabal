@@ -77,6 +77,7 @@ test-suite clef-sdk-tests
       process,
       scientific,
       text,
+      time,
       transformers
 
 executable clef-typed-example

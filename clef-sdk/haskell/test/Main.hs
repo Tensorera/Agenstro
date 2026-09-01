@@ -19,7 +19,8 @@ import Clef.Plugin.Protocol
 import Control.Concurrent (forkIO, threadDelay)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
-  ( modifyMVar_,
+  ( modifyMVar,
+    modifyMVar_,
     newEmptyMVar,
     newMVar,
     putMVar,
@@ -63,7 +64,15 @@ import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
-import System.Directory (getCurrentDirectory, removeFile)
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.Directory
+  ( createDirectory,
+    doesFileExist,
+    getCurrentDirectory,
+    listDirectory,
+    removeDirectoryRecursive,
+    removeFile,
+  )
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (hClose, openBinaryTempFile, stderr)
@@ -88,10 +97,12 @@ main = do
     ["--fake-stream"] -> fakeStream
     ["--fake-block"] -> fakeBlock
     ["--fake-block-end"] -> fakeBlockEnd
+    ["--fake-gated-provider", markerDirectory, releasePath] -> fakeGatedProvider markerDirectory releasePath
     ["--fake-cli-error", configPath] -> fakeCliError configPath
     ["--fake-cli-provider", configPath] -> fakeCliProvider configPath
     ["--fake-cli-unknown", configPath] -> fakeCliUnknown configPath
     ["--fake-cli-unexpected", configPath] -> fakeCliUnexpected configPath
+    ["--quality-stage-tests"] -> runQualityStageTests
     _ -> runTests
 
 runTests :: IO ()
@@ -101,9 +112,11 @@ runTests = do
   let tests =
         [ ("Workflow monad and require", testWorkflowMonad workspace executable),
           ("parallel uses structured concurrency", testParallel workspace executable),
+          ("provider concurrency is bounded by runtime limits", testProviderConcurrency workspace executable),
           ("text and JSON task decoders", testTaskDecoders),
           ("norm wire format is explicit and forward compatible", testNormWire),
           ("rubrics batch serialisable checks through an ordinary plugin", testNormRubric workspace executable),
+          ("rubric validation gates emit structured failures", testValidationGate workspace executable),
           ("refinement is bounded and feeds critiques back", testNormRefinement workspace executable),
           ("runtime config schema", testRuntimeConfig executable workspace),
           ("JSONL terminal protocol", testProtocolRules),
@@ -133,6 +146,22 @@ runTests = do
           ("Segno execute checkpoints through the generic state plugin", testSegnoExecute workspace executable),
           ("Segno gate ignores before loading the Clef runtime", testSegnoGate workspace)
         ]
+  runTestGroup tests
+
+runQualityStageTests :: IO ()
+runQualityStageTests = do
+  executable <- getExecutablePath
+  workspace <- getCurrentDirectory
+  runTestGroup
+    [ ("parallel uses structured concurrency", testParallel workspace executable),
+      ("provider concurrency is bounded by runtime limits", testProviderConcurrency workspace executable),
+      ("rubric validation gates emit structured failures", testValidationGate workspace executable),
+      ("runtime config schema", testRuntimeConfig executable workspace),
+      ("direct Clef plugin transport is bounded", testDirectPluginTransportBounds workspace executable)
+    ]
+
+runTestGroup :: [(String, IO ())] -> IO ()
+runTestGroup tests = do
   outcomes <- forM tests runOne
   unless (and outcomes) exitFailure
   where
@@ -178,6 +207,110 @@ testParallel workspace executable = do
   assertEqual "heterogeneous parallel result" (Just ("left", 42)) outcome
   allResult <- runWorkflow runtime (parallelAll [pure (1 :: Int), pure 2, pure 3])
   assertEqual "homogeneous parallelAll result" [1, 2, 3] allResult
+  active <- newMVar (0 :: Int)
+  peak <- newMVar (0 :: Int)
+  let boundedBranch index = liftIO $
+        bracket
+          ( modifyMVar active $ \count -> do
+              let next = count + 1
+              modifyMVar_ peak (pure . max next)
+              pure (next, ())
+          )
+          (\_ -> modifyMVar_ active (pure . subtract 1))
+          (\_ -> threadDelay ((4 - index) * 50000) >> pure index)
+  boundedResult <-
+    runWorkflow runtime (parallelAllBounded 2 (boundedBranch <$> [1 :: Int, 2, 3]))
+  assertEqual "parallelAllBounded preserves traversal order" [1, 2, 3] boundedResult
+  assertEqual "parallelAllBounded caps active branches" 2 =<< readMVar peak
+  assertWorkflowError
+    "parallelAllBounded rejects a non-positive limit"
+    (\case RequirementFailed message -> "parallelAllBounded" `Text.isInfixOf` message; _ -> False)
+    (runWorkflow runtime (parallelAllBounded 0 [pure (1 :: Int)]))
+
+  siblingStarted <- newEmptyMVar
+  siblingCancelled <- newEmptyMVar
+  let blockedSibling =
+        liftIO $
+          (putMVar siblingStarted () >> threadDelay 10000000 >> pure (1 :: Int))
+            `finally` putMVar siblingCancelled ()
+      failingSibling = liftIO $ do
+        takeMVar siblingStarted
+        throwIO (RequirementFailed "bounded branch failed")
+  assertWorkflowError
+    "parallelAllBounded propagates the first branch failure"
+    (== RequirementFailed "bounded branch failed")
+    (runWorkflow runtime (parallelAllBounded 2 [blockedSibling, failingSibling]))
+  assertEqual
+    "parallelAllBounded cancels sibling branches"
+    (Just ())
+    =<< timeout 1000000 (takeMVar siblingCancelled)
+
+testProviderConcurrency :: FilePath -> FilePath -> IO ()
+testProviderConcurrency workspace executable = do
+  markerDirectory <- vacantTemporaryPath workspace "provider-permits-*"
+  releasePath <- vacantTemporaryPath workspace "provider-release-*"
+  createDirectory markerDirectory
+  let baseConfig = testConfig workspace executable
+      limitedConfig =
+        baseConfig
+          { runtimeProviders =
+              Map.singleton
+                "fake"
+                ProviderConfig
+                  { providerCommand = [Text.pack executable, "--fake-gated-provider", Text.pack markerDirectory, Text.pack releasePath],
+                    providerModel = Nothing,
+                    providerEffort = Nothing,
+                    providerOptions = mempty
+                  },
+            runtimeEffects = Map.empty,
+            runtimeLimits =
+              (runtimeLimits baseConfig)
+                { limitMaxConcurrentProviderCalls = 2
+                }
+          }
+  runtime <- newRuntime limitedConfig
+  worker <-
+    Async.async . runWorkflow runtime . parallelAll $
+      [ invoke (textTask "bounded-provider" id) ("first" :: Text),
+        invoke (textTask "bounded-provider" id) "second",
+        invoke (textTask "bounded-provider" id) "third"
+      ]
+  let releaseAndClean = do
+        writeFile releasePath "released"
+        Async.cancel worker
+        closeRuntime runtime
+        removeIfPresent releasePath
+        removeDirectoryRecursive markerDirectory `catch` (\(_ :: SomeException) -> pure ())
+  flip finally releaseAndClean $ do
+    twoStarted <- waitUntil 5000000 ((== 2) . length <$> listDirectory markerDirectory)
+    assertEqual "two provider calls acquire the shared permits" True twoStarted
+    threadDelay 200000
+    assertEqual "a third provider waits for a permit" 2 . length =<< listDirectory markerDirectory
+    writeFile releasePath "released"
+    completed <- timeout 5000000 (Async.wait worker)
+    case completed of
+      Just values -> assertEqual "provider results retain input order" 3 (length values)
+      Nothing -> failTest "provider permit test did not finish after release"
+    assertEqual "all providers eventually crossed the boundary" 3 . length =<< listDirectory markerDirectory
+    failed <-
+      runWorkflow runtime (attempt (invoke (textTask "bounded-provider" id) ("fail" :: Text)))
+    case failed of
+      Left PluginReportedFailure {} -> pure ()
+      other -> failTest $ "expected a fake provider failure, received " <> show other
+    afterFailure <-
+      timeout 2000000 (runWorkflow runtime (invoke (textTask "bounded-provider" id) ("after-failure" :: Text)))
+    case afterFailure of
+      Just _ -> pure ()
+      Nothing -> failTest "provider failure leaked its shared permit"
+
+waitUntil :: Int -> IO Bool -> IO Bool
+waitUntil budgetMicros predicate = do
+  outcome <- timeout budgetMicros loop
+  pure (maybe False id outcome)
+  where
+    loop = do
+      ready <- predicate
+      if ready then pure True else threadDelay 10000 >> loop
 
 data Answer = Answer
   { answer :: Int
@@ -396,6 +529,70 @@ testNormRubric workspace executable =
       (\case RequirementFailed message -> "pattern must not be empty" `Text.isInfixOf` message; _ -> False)
       (runWorkflow runtime (judgeWith checker (rubric [invalidPatternNorm]) "article"))
 
+testValidationGate :: FilePath -> FilePath -> IO ()
+testValidationGate workspace executable =
+  withRuntime (testConfig workspace executable) $ \runtime -> do
+    let makeFailingNorm :: NormId -> Severity -> Provenance -> Norm Text
+        makeFailingNorm selectedIdentity selectedSeverity selectedProvenance =
+          (norm selectedIdentity "Required output contract." selectedSeverity)
+            { normGuidance = Just "Produce every required section.",
+              normProvenance = selectedProvenance,
+              normCheck =
+                Just . NativeCheck $ \_ ->
+                  pure
+                    [ (violation selectedIdentity selectedSeverity "required section was absent")
+                        { violationEvidence = Just (object ["missing" .= (["b"] :: [Text])])
+                        }
+                    ]
+            }
+        correctnessNorm =
+          makeFailingNorm
+            (NormId "answer.missing-subquestion")
+            Correctness
+            (Authored "project-reviewer")
+        blockingNorm =
+          makeFailingNorm
+            (NormId "answer.invalid-structure")
+            Blocking
+            (MinedFromEdits 12)
+        styleNorm =
+          makeFailingNorm
+            (NormId "answer.readability")
+            Style
+            (Authored "style-guide")
+        selectedRubric = rubric [correctnessNorm, blockingNorm, styleNorm]
+    critique <- runWorkflow runtime (judge selectedRubric "candidate")
+    let failures = validationFailures StructureStage Correctness selectedRubric critique
+    assertEqual "Correctness gate also includes Blocking" 2 (length failures)
+    assertEqual
+      "validation stages remain explicit"
+      [StructureStage, StructureStage]
+      (validationFailureStage <$> failures)
+    assertEqual
+      "validation rules reuse norm identities"
+      ["answer.missing-subquestion", "answer.invalid-structure"]
+      (validationFailureRule <$> failures)
+    let structuredFailure = LazyByteString.toStrict (encode failures)
+    forM_ ["stage", "rule", "expected", "observed", "provenance"] $ \field ->
+      unless (ByteString.Char8.pack field `ByteString.isInfixOf` structuredFailure) $
+        failTest ("validation failure omitted " <> field)
+
+    validationOutcome <-
+      try (runWorkflow runtime (validate DomainStage Correctness selectedRubric "candidate")) :: IO (Either WorkflowError Critique)
+    case validationOutcome of
+      Left workflowError@(ValidationFailed gatedFailures) -> do
+        assertEqual "typed validation error code" "workflow.validation_failed" (workflowErrorCode workflowError)
+        assertEqual "typed validation error retains gated failures" 2 (length gatedFailures)
+        let diagnostic = LazyByteString.toStrict (encode (workflowErrorDiagnostic workflowError))
+        unless (ByteString.Char8.pack "validation_failed" `ByteString.isInfixOf` diagnostic) $
+          failTest "workflow diagnostic omitted validation_failed"
+      other -> failTest $ "expected structured ValidationFailed, received " <> show other
+
+    let styleRubric = rubric [styleNorm]
+    styleCritique <- runWorkflow runtime (judge styleRubric "candidate")
+    accepted <- runWorkflow runtime (gateCritique ReviewerStage Correctness styleRubric styleCritique)
+    assertEqual "Style remains advisory at a Correctness gate" [Style] (violationSeverity <$> critiqueViolations accepted)
+
 testNormRefinement :: FilePath -> FilePath -> IO ()
 testNormRefinement workspace executable =
   withRuntime (testConfig workspace executable) $ \runtime -> do
@@ -470,10 +667,34 @@ testRuntimeConfig executable workspace = do
                         "options" .= object ["mode" .= ("test" :: Text)]
                       ]
                 ],
-            "instructions" .= ("system instructions" :: Text)
+            "instructions" .= ("system instructions" :: Text),
+            "limits"
+              .= object
+                [ "max_concurrent_provider_calls" .= (2 :: Int),
+                  "plugin_timeout_seconds" .= (120 :: Int),
+                  "provider_timeout_seconds" .= (3600 :: Int),
+                  "provider_outer_timeout_seconds" .= (4500 :: Int),
+                  "max_request_bytes" .= (2048 :: Int),
+                  "max_frame_bytes" .= (1024 :: Int),
+                  "max_stdout_bytes" .= (4096 :: Int),
+                  "max_event_frames" .= (7 :: Int),
+                  "max_stderr_bytes" .= (1024 :: Int)
+                ]
           ]
       legacyWithoutPlugins = case valid of
         Object fields -> Object (KeyMap.delete "plugins" fields)
+        _ -> valid
+      legacyWithoutLimits = case valid of
+        Object fields -> Object (KeyMap.delete "limits" (KeyMap.delete "plugins" fields))
+        _ -> valid
+      derivedOuterLimit = case legacyWithoutLimits of
+        Object fields ->
+          Object
+            ( KeyMap.insert
+                "limits"
+                (object ["provider_timeout_seconds" .= (3600 :: Int)])
+                fields
+            )
         _ -> valid
       invalidRelativeWorkspace =
         object
@@ -484,6 +705,15 @@ testRuntimeConfig executable workspace = do
             "effects" .= object [],
             "instructions" .= ("" :: Text)
           ]
+      invalidLimits = case valid of
+        Object fields ->
+          Object
+            ( KeyMap.insert
+                "limits"
+                (object ["max_concurrent_provider_calls" .= (0 :: Int)])
+                fields
+            )
+        _ -> valid
       dispatchConfig =
         object
           [ "api" .= ("clef.runtime/v1" :: Text),
@@ -498,7 +728,12 @@ testRuntimeConfig executable workspace = do
                 ],
             "effects" .= object ["dispatch-effect" .= object ["command" .= ([Text.pack executable, "dispatch"] :: [Text])]],
             "plugins" .= object ["dispatch-plugin" .= object ["command" .= ([Text.pack executable, "dispatch"] :: [Text])]],
-            "instructions" .= ("" :: Text)
+            "instructions" .= ("" :: Text),
+            "limits"
+              .= object
+                [ "provider_timeout_seconds" .= (3600 :: Int),
+                  "provider_outer_timeout_seconds" .= (4500 :: Int)
+                ]
           ]
   case decodeRuntimeConfig (strictEncode valid) of
     Left workflowError -> failTest $ "valid config failed: " <> show workflowError
@@ -506,9 +741,35 @@ testRuntimeConfig executable workspace = do
       assertEqual "runtime api" "clef.runtime/v1" (runtimeApi config)
       assertEqual "default provider" "fake" (runtimeDefaultProvider config)
       assertEqual "generic plugin registry" True (Map.member "generic" (runtimePlugins config))
+      let limits = runtimeLimits config
+      assertEqual "provider concurrency limit" 2 (limitMaxConcurrentProviderCalls limits)
+      assertEqual "plugin timeout limit" 120 (limitPluginTimeoutSeconds limits)
+      assertEqual "provider inner timeout limit" 3600 (limitProviderTimeoutSeconds limits)
+      assertEqual "provider outer timeout limit" 4500 (limitProviderOuterTimeoutSeconds limits)
+      assertEqual "request byte limit" 2048 (limitMaxRequestBytes limits)
+      assertEqual "frame byte limit" 1024 (limitMaxFrameBytes limits)
+      assertEqual "stdout byte limit" 4096 (limitMaxStdoutBytes limits)
+      assertEqual "event frame limit" 7 (limitMaxEventFrames limits)
+      assertEqual "stderr byte limit" 1024 (limitMaxStderrBytes limits)
   case decodeRuntimeConfig (strictEncode legacyWithoutPlugins) of
-    Right config -> assertEqual "legacy config defaults plugins" Map.empty (runtimePlugins config)
+    Right config -> do
+      assertEqual "legacy config defaults plugins" Map.empty (runtimePlugins config)
+      -- Removing only @plugins@ retains the explicit limits from @valid@.
+      assertEqual "other additive fields survive legacy plugin omission" 2 (limitMaxConcurrentProviderCalls (runtimeLimits config))
     Left workflowError -> failTest $ "legacy config without plugins failed: " <> show workflowError
+  case decodeRuntimeConfig (strictEncode legacyWithoutLimits) of
+    Right config -> do
+      assertEqual "legacy config defaults plugins" Map.empty (runtimePlugins config)
+      assertEqual "legacy config defaults provider concurrency" 4 (limitMaxConcurrentProviderCalls (runtimeLimits config))
+      assertEqual "legacy config defaults transport limits" defaultRuntimeLimits (runtimeLimits config)
+    Left workflowError -> failTest $ "legacy config without limits failed: " <> show workflowError
+  case decodeRuntimeConfig (strictEncode derivedOuterLimit) of
+    Right config ->
+      assertEqual
+        "missing provider outer limit derives cleanup headroom"
+        4500
+        (limitProviderOuterTimeoutSeconds (runtimeLimits config))
+    Left workflowError -> failTest $ "derived provider outer limit failed: " <> show workflowError
   case decodeRuntimeConfig (strictEncode invalidRelativeWorkspace) of
     Left (RuntimeConfigError _) -> pure ()
     other -> failTest $ "relative workspace should fail, received " <> show other
@@ -518,6 +779,10 @@ testRuntimeConfig executable workspace = do
   case decodeRuntimeConfig "{\"options\":1e-999}" of
     Left (RuntimeConfigError _) -> pure ()
     other -> failTest $ "underflowing runtime number should fail, received " <> show other
+  case decodeRuntimeConfig (strictEncode invalidLimits) of
+    Left (RuntimeConfigError message)
+      | "max_concurrent_provider_calls" `Text.isInfixOf` message -> pure ()
+    other -> failTest $ "invalid runtime limits should fail, received " <> show other
   bracket
     (do
        configPath <- temporaryFile workspace "clef-runtime-config.json"
@@ -526,7 +791,7 @@ testRuntimeConfig executable workspace = do
     removeIfPresent
     (\configPath -> do
        loaded <- withEnvironment [("TACTUS_RUNTIME_CONFIG", configPath)] loadRuntimeConfigFromEnv
-       let injected = Text.pack (show providerDispatchDeadlineSeconds)
+       let injected = "3600"
        assertEqual
          "dispatch receives a finite inner deadline"
          [Text.pack executable, "dispatch", "--provider", "fake", "--timeout-seconds", injected]
@@ -749,8 +1014,17 @@ testPluginExit workspace executable = do
     (\case PluginOutcomeUnknown "bad-invoke" "invoke" _ -> True; _ -> False)
     (callPlugin runtime "bad-invoke" [Text.pack executable, "--fake-exit"] "invoke" mempty)
   assertWorkflowError
-    "reported outcome unknown retains its classification for a generic method"
-    (\case PluginOutcomeUnknown "reported-unknown" "compute" cause -> "timeout" `Text.isInfixOf` workflowCauseMessage cause; _ -> False)
+    "reported outcome unknown retains its classification without copying provider details"
+    ( \case
+        PluginOutcomeUnknown "reported-unknown" "compute" cause ->
+          "timeout" `Text.isInfixOf` workflowCauseMessage cause
+            && case workflowCauseDetails cause of
+              Just (Object details) ->
+                KeyMap.lookup "cause" details == Nothing
+                  && KeyMap.lookup "reported_details_withheld" details == Just (Bool True)
+              _ -> False
+        _ -> False
+    )
     (callPlugin runtime "reported-unknown" [Text.pack executable, "--fake-outcome-unknown"] "compute" mempty)
   assertWorkflowError
     "empty plugin method"
@@ -846,12 +1120,13 @@ testDirectPluginTransportBounds workspace executable = do
   unless
     (any (\case PluginDiagnosticRecord "stderr-limit" message -> "truncated after 64 bytes" `Text.isInfixOf` message; _ -> False) stderrRecords)
     (failTest "stderr truncation was not recorded")
+  deadlineStartedUnixMillis <- (floor . (* 1000) <$> getPOSIXTime) :: IO Integer
   deadlineOutcome <-
     timeout
-      3000000
+      4000000
       ( try
           ( callPluginWithLimits
-              baseLimits {transportDeadlineSeconds = Just 1}
+              baseLimits {transportDeadlineSeconds = Just 2}
               runtime
               "deadline"
               (command "--fake-block")
@@ -859,9 +1134,34 @@ testDirectPluginTransportBounds workspace executable = do
               mempty
           ) :: IO (Either WorkflowError PluginCallResult)
       )
+  deadlineFinishedUnixMillis <- (floor . (* 1000) <$> getPOSIXTime) :: IO Integer
   case deadlineOutcome of
-    Just (Left (PluginOutcomeUnknown "deadline" "probe" cause)) ->
+    Just (Left (PluginOutcomeUnknown "deadline" "probe" cause)) -> do
       assertEqual "deadline cause code" "plugin.deadline_exceeded" (workflowCauseCode cause)
+      case workflowCauseDetails cause of
+        Just (Object details) -> do
+          assertEqual "outcome unknown phase" (Just (String "awaiting_terminal")) (KeyMap.lookup "phase" details)
+          assertEqual "outcome unknown frame progress" (Just (Number 1)) (KeyMap.lookup "frames_seen" details)
+          assertEqual "outcome unknown flags possible external effects" (Just (Bool True)) (KeyMap.lookup "external_effect_possible" details)
+          case KeyMap.lookup "last_event" details of
+            Just (Object eventSummary) ->
+              assertEqual "outcome unknown retains only the last event type" (Just (String "progress")) (KeyMap.lookup "type" eventSummary)
+            other -> failTest $ "outcome unknown omitted its safe last-event summary: " <> show other
+          case KeyMap.lookup "last_event_unix_ms" details of
+            Just (Number eventUnixMillis) -> do
+              unless (eventUnixMillis >= fromIntegral deadlineStartedUnixMillis) $
+                failTest "last event time predates the invocation"
+              unless (eventUnixMillis <= fromIntegral deadlineFinishedUnixMillis) $
+                failTest "last event time follows the completed diagnostic"
+              unless (fromIntegral deadlineFinishedUnixMillis - eventUnixMillis >= 500) $
+                failTest "last event time appears to be the later diagnostic-generation time"
+            other -> failTest $ "outcome unknown omitted last_event_unix_ms: " <> show other
+          case KeyMap.lookup "reconciliation" details of
+            Just (Object reconciliation) -> do
+              assertEqual "outcome unknown requires reconciliation" (Just (Bool True)) (KeyMap.lookup "required" reconciliation)
+              assertEqual "outcome unknown forbids blind retry" (Just (Bool False)) (KeyMap.lookup "automatic_retry_safe" reconciliation)
+            other -> failTest $ "outcome unknown omitted reconciliation policy: " <> show other
+        other -> failTest $ "outcome unknown omitted structured progress: " <> show other
     Just other -> failTest $ "deadline returned the wrong outcome: " <> show other
     Nothing -> failTest "direct Clef deadline did not terminate the plugin"
 
@@ -1743,7 +2043,8 @@ testConfig workspace executable =
                 }
             )
           ],
-      runtimeInstructions = "test instructions"
+      runtimeInstructions = "test instructions",
+      runtimeLimits = defaultRuntimeLimits
     }
   where
     pluginCommand = [Text.pack executable, "--fake-plugin"]
@@ -1932,8 +2233,58 @@ fakePlugin = do
 
 fakeBlock :: IO ()
 fakeBlock = do
-  _ <- ByteString.Char8.getLine
+  requestLine <- ByteString.Char8.getLine
+  request <- either (failTest . ("fake block plugin received invalid JSON: " <>)) pure (eitherDecodeStrict' requestLine)
+  requestId <- parseFakeParams (withObject "plugin request" (.: "id")) request :: IO Text
+  LazyChar8.putStrLn . encode $
+    object
+      [ "type" .= ("event" :: Text),
+        "id" .= requestId,
+        "event" .= object ["type" .= ("progress" :: Text), "phase" .= ("started" :: Text)]
+      ]
+  IO.hFlush IO.stdout
   threadDelay 10000000
+
+fakeGatedProvider :: FilePath -> FilePath -> IO ()
+fakeGatedProvider markerDirectory releasePath = do
+  requestLine <- ByteString.Char8.getLine
+  request <- either (failTest . ("fake gated provider received invalid JSON: " <>)) pure (eitherDecodeStrict' requestLine)
+  (requestId, prompt) <-
+    parseFakeParams
+      ( withObject "plugin request" $ \objectValue -> do
+          params <- objectValue .: "params"
+          (,) <$> objectValue .: "id" <*> withObject "provider params" (.: "prompt") params
+      )
+      request :: IO (Text, Text)
+  writeFile (markerDirectory </> Text.unpack requestId <> ".started") "started"
+  waitForRelease
+  LazyChar8.putStrLn . encode $
+    object
+      [ "type" .= ("event" :: Text),
+        "id" .= requestId,
+        "event" .= object ["type" .= ("progress" :: Text)]
+      ]
+  if "fail" `Text.isSuffixOf` prompt
+    then
+      LazyChar8.putStrLn . encode $
+        object
+          [ "type" .= ("result" :: Text),
+            "id" .= requestId,
+            "ok" .= False,
+            "error" .= object ["code" .= ("fake_failure" :: Text), "message" .= ("requested failure" :: Text)]
+          ]
+    else
+      LazyChar8.putStrLn . encode $
+        object
+          [ "type" .= ("result" :: Text),
+            "id" .= requestId,
+            "ok" .= True,
+            "value" .= object ["text" .= prompt]
+          ]
+  where
+    waitForRelease = do
+      released <- doesFileExist releasePath
+      unless released (threadDelay 10000 >> waitForRelease)
 
 fakeBlockEnd :: IO ()
 fakeBlockEnd = do

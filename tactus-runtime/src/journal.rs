@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{process::ProcessOutcome, workspace::Workspace};
+use crate::{outcome::validate_outcome_consistency, process::ProcessOutcome, workspace::Workspace};
 
 /// Version of the factual trace envelope. It does not promise replay.
 pub const TRACE_API: &str = "agenstro.trace/v1";
@@ -55,7 +55,20 @@ impl Presentation {
     /// always occupies one human log line.
     #[must_use]
     pub fn new(category: PresentationCategory, message: impl Into<String>) -> Self {
-        let message = message.into().replace(['\r', '\n'], " ");
+        // Presentation strings may include plugin-owned error text.  Flatten
+        // every control character so neither terminals nor Studio logs can be
+        // manipulated with escape sequences.
+        let message = message
+            .into()
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
         Self {
             category,
             message: truncate_utf8(&message, 1_024),
@@ -208,7 +221,7 @@ pub struct RunJournal {
 impl RunJournal {
     /// Create a unique run directory below `.tactus/runs`.
     pub fn create(workspace: &Workspace) -> Result<Self, JournalError> {
-        fs::create_dir_all(&workspace.runs_path).map_err(JournalError::Io)?;
+        ensure_safe_journal_root(workspace)?;
         let started_unix_ms = unix_millis();
         let (run_id, run_path) = loop {
             let ordinal = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
@@ -226,7 +239,13 @@ impl RunJournal {
             .create_new(true)
             .open(&event_path)
             .map(BufWriter::new)
-            .map_err(JournalError::Io)?;
+            .map_err(|error| {
+                // A directory without its mandatory event stream is not a
+                // journal. Best-effort cleanup prevents a transient create
+                // failure from becoming a durable false-corrupt record.
+                let _ = fs::remove_dir(&run_path);
+                JournalError::Io(error)
+            })?;
         let summary_path = run_path.join("summary.json");
         Ok(Self {
             run_id,
@@ -343,6 +362,7 @@ impl RunJournal {
         if self.finished {
             return Err(JournalError::AlreadyFinished);
         }
+        validate_outcome_consistency(&outcome).map_err(JournalError::InvalidOutcome)?;
         let summary = self.snapshot_summary(outcome);
         if let Some(events) = self.events.as_mut() {
             events.flush().map_err(JournalError::Io)?;
@@ -362,6 +382,7 @@ impl RunJournal {
         if self.finished {
             return Err(JournalError::AlreadyFinished);
         }
+        validate_outcome_consistency(&outcome).map_err(JournalError::InvalidOutcome)?;
         let summary = self.snapshot_summary(outcome);
         if self.events.is_some() {
             self.publish_summary(&summary)?;
@@ -428,6 +449,52 @@ impl RunJournal {
     }
 }
 
+fn ensure_safe_journal_root(workspace: &Workspace) -> Result<(), JournalError> {
+    let root = dunce::canonicalize(&workspace.root).map_err(JournalError::Io)?;
+    ensure_plain_direct_child(&workspace.control, &root, ".tactus")?;
+    let control = dunce::canonicalize(&workspace.control).map_err(JournalError::Io)?;
+    ensure_plain_direct_child(&workspace.runs_path, &control, ".tactus/runs")
+}
+
+fn ensure_plain_direct_child(
+    path: &Path,
+    canonical_parent: &Path,
+    label: &'static str,
+) -> Result<(), JournalError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(JournalError::Io)?;
+        }
+        Err(error) => return Err(JournalError::Io(error)),
+    }
+    let metadata = fs::symlink_metadata(path).map_err(JournalError::Io)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+    {
+        return Err(JournalError::UnsafePath(label));
+    }
+    let canonical = dunce::canonicalize(path).map_err(JournalError::Io)?;
+    if canonical.parent() != Some(canonical_parent) {
+        return Err(JournalError::UnsafePath(label));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 pub(crate) fn diagnostic_summary(summary: &RunSummary) -> RunSummary {
     let mut summary = summary.clone();
     summary.outcome.stderr_truncated |= !summary.outcome.stderr.is_empty();
@@ -450,12 +517,268 @@ pub(crate) fn diagnostic_summary(summary: &RunSummary) -> RunSummary {
             }
             crate::protocol::TerminalResult::Failure { error } => {
                 let mut error = error.clone();
+                error.code = durable_diagnostic_code(&error.code);
                 error.message = diagnostic_text_summary(&error.message);
+                // Terminal details belong to the plugin and are not trusted to
+                // claim runtime-owned reconciliation metadata. Typed runtime
+                // diagnostics and validated Clef sidecars are projected at
+                // their respective ingestion points instead.
                 error.details = error.details.as_ref().map(diagnostic_value_summary);
                 crate::protocol::TerminalResult::Failure { error }
             }
         });
     summary
+}
+
+/// Retain only explicitly safe reconciliation/validation fields from a
+/// structured failure.  The complete payload is still represented by a size
+/// and digest so an operator can correlate it with live output without
+/// persisting prompts, paths, or provider text.
+pub(crate) fn diagnostic_failure_details(value: &Value) -> Value {
+    let summary = diagnostic_value_summary(value);
+    let mut projected = project_failure_object(value, 0);
+    projected.insert("withheld".to_owned(), summary);
+    Value::Object(projected)
+}
+
+const MAX_FAILURE_PROJECTION_DEPTH: usize = 8;
+const MAX_FAILURE_PROJECTION_ITEMS: usize = 128;
+
+fn project_failure_object(value: &Value, depth: usize) -> serde_json::Map<String, Value> {
+    let mut projected = serde_json::Map::new();
+    if depth >= MAX_FAILURE_PROJECTION_DEPTH {
+        return projected;
+    }
+    let Value::Object(object) = value else {
+        return projected;
+    };
+    for (key, field) in object {
+        if failure_field_is_allowlisted(key) {
+            projected.insert(
+                key.clone(),
+                safe_failure_field(key, field, depth.saturating_add(1)),
+            );
+        }
+    }
+    projected
+}
+
+fn failure_field_is_allowlisted(key: &str) -> bool {
+    matches!(
+        key,
+        "cause"
+            | "code"
+            | "details"
+            | "error"
+            | "exit_code"
+            | "phase"
+            | "progress"
+            | "dispatched"
+            | "first_response_received"
+            | "partial_output_generated"
+            | "terminal_received"
+            | "dispatched_unix_ms"
+            | "frames_seen"
+            | "event_frames_seen"
+            | "events_dropped"
+            | "terminal_frame_seen"
+            | "first_response_unix_ms"
+            | "last_event_unix_ms"
+            | "last_event"
+            | "type"
+            | "external_effect_possible"
+            | "cleanup_completed"
+            | "reconciliation"
+            | "required"
+            | "automatic_retry_safe"
+            | "validation_failed"
+            | "validator_stage"
+            | "stage"
+            | "rule"
+            | "severity"
+            | "expected"
+            | "observed"
+            | "provenance"
+            | "max_bytes"
+            | "max_line_bytes"
+            | "max_stdout_bytes"
+            | "max_result_bytes"
+            | "result_bytes_at_least"
+            | "timeout_seconds"
+            | "valid_up_to"
+    )
+}
+
+fn safe_failure_field(key: &str, value: &Value, depth: usize) -> Value {
+    if depth >= MAX_FAILURE_PROJECTION_DEPTH {
+        return diagnostic_value_summary(value);
+    }
+    if key == "expected" {
+        return project_validation_expected(value);
+    }
+    if key == "observed" {
+        return project_validation_observed(value);
+    }
+    if key == "provenance" {
+        return project_validation_provenance(value);
+    }
+    if key == "reconciliation" {
+        let Value::Object(fields) = value else {
+            return diagnostic_value_summary(value);
+        };
+        let mut projected = serde_json::Map::new();
+        for name in ["required", "automatic_retry_safe"] {
+            if let Some(Value::Bool(flag)) = fields.get(name) {
+                projected.insert(name.to_owned(), Value::Bool(*flag));
+            }
+        }
+        projected.insert("withheld".to_owned(), diagnostic_value_summary(value));
+        return Value::Object(projected);
+    }
+    if matches!(
+        key,
+        "code" | "phase" | "type" | "stage" | "rule" | "severity"
+    ) {
+        return value
+            .as_str()
+            .and_then(safe_validation_token)
+            .map_or_else(|| diagnostic_value_summary(value), Value::String);
+    }
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text)
+            if text.len() <= 512 && !text.chars().any(|character| character.is_control()) =>
+        {
+            Value::String(text.clone())
+        }
+        Value::Array(values) if values.len() <= MAX_FAILURE_PROJECTION_ITEMS => Value::Array(
+            values
+                .iter()
+                .map(|item| match item {
+                    Value::Object(_) => Value::Object(project_failure_object(item, depth)),
+                    _ => safe_failure_field(key, item, depth.saturating_add(1)),
+                })
+                .collect(),
+        ),
+        Value::Object(_) if depth < MAX_FAILURE_PROJECTION_DEPTH => {
+            Value::Object(project_failure_object(value, depth))
+        }
+        _ => diagnostic_value_summary(value),
+    }
+}
+
+fn project_validation_expected(value: &Value) -> Value {
+    let Value::Object(fields) = value else {
+        return diagnostic_value_summary(value);
+    };
+    let mut projected = serde_json::Map::new();
+    for key in ["statement", "guidance"] {
+        if let Some(Value::String(text)) = fields.get(key) {
+            projected.insert(key.to_owned(), Value::String(diagnostic_text_summary(text)));
+        }
+    }
+    if let Some(spec) = fields.get("spec") {
+        projected.insert("spec".to_owned(), project_validation_value(spec, 0));
+    }
+    projected.insert("withheld".to_owned(), diagnostic_value_summary(value));
+    Value::Object(projected)
+}
+
+fn project_validation_observed(value: &Value) -> Value {
+    let Value::Object(fields) = value else {
+        return diagnostic_value_summary(value);
+    };
+    let mut projected = serde_json::Map::new();
+    if let Some(Value::String(message)) = fields.get("message") {
+        projected.insert(
+            "message".to_owned(),
+            Value::String(diagnostic_text_summary(message)),
+        );
+    }
+    if let Some(locus) = fields.get("locus") {
+        projected.insert("locus".to_owned(), project_validation_locus(locus));
+    }
+    if let Some(evidence) = fields.get("evidence") {
+        projected.insert("evidence".to_owned(), project_validation_value(evidence, 0));
+    }
+    projected.insert("withheld".to_owned(), diagnostic_value_summary(value));
+    Value::Object(projected)
+}
+
+fn project_validation_locus(value: &Value) -> Value {
+    let Value::Object(fields) = value else {
+        return diagnostic_value_summary(value);
+    };
+    let mut projected = serde_json::Map::new();
+    for key in ["startLine", "startColumn", "endLine", "endColumn"] {
+        if let Some(Value::Number(number)) = fields.get(key) {
+            projected.insert(key.to_owned(), Value::Number(number.clone()));
+        }
+    }
+    for key in ["artifact", "snippet"] {
+        if let Some(field) = fields.get(key) {
+            projected.insert(key.to_owned(), diagnostic_value_summary(field));
+        }
+    }
+    projected.insert("withheld".to_owned(), diagnostic_value_summary(value));
+    Value::Object(projected)
+}
+
+fn project_validation_provenance(value: &Value) -> Value {
+    let Value::Object(fields) = value else {
+        return diagnostic_value_summary(value);
+    };
+    let mut projected = serde_json::Map::new();
+    if let Some(Value::String(kind)) = fields.get("kind") {
+        projected.insert(
+            "kind".to_owned(),
+            safe_validation_token(kind)
+                .map(Value::String)
+                .unwrap_or_else(|| diagnostic_value_summary(&Value::String(kind.clone()))),
+        );
+    }
+    for key in ["support", "total", "observations"] {
+        if let Some(Value::Number(number)) = fields.get(key) {
+            projected.insert(key.to_owned(), Value::Number(number.clone()));
+        }
+    }
+    for key in ["author", "corpus"] {
+        if let Some(field) = fields.get(key) {
+            projected.insert(key.to_owned(), diagnostic_value_summary(field));
+        }
+    }
+    projected.insert("withheld".to_owned(), diagnostic_value_summary(value));
+    Value::Object(projected)
+}
+
+fn project_validation_value(value: &Value, depth: usize) -> Value {
+    if depth >= 4 {
+        return diagnostic_value_summary(value);
+    }
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text) => safe_validation_token(text)
+            .map(Value::String)
+            .unwrap_or_else(|| diagnostic_value_summary(value)),
+        Value::Array(items) if items.len() <= MAX_FAILURE_PROJECTION_ITEMS => Value::Array(
+            items
+                .iter()
+                .map(|item| project_validation_value(item, depth + 1))
+                .collect(),
+        ),
+        // Open-domain objects can hide arbitrary provider or artefact text
+        // behind innocent-looking keys. Preserve their identity, not content.
+        Value::Object(_) | Value::Array(_) => diagnostic_value_summary(value),
+    }
+}
+
+fn safe_validation_token(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'_' | b'-')))
+    .then(|| value.to_owned())
 }
 
 /// Redact arbitrary plugin evidence before it reaches the durable diagnostic
@@ -470,6 +793,12 @@ pub fn redact_diagnostic_value(value: Value) -> Value {
                 .map(|(key, value)| {
                     let value = if sensitive_key(&key)
                         || (key.eq_ignore_ascii_case("error") && value.is_string())
+                    {
+                        redacted_value(&value)
+                    } else if durable_identifier_key(&key)
+                        && value
+                            .as_str()
+                            .is_some_and(|text| !public_durable_identifier(&key, text))
                     {
                         redacted_value(&value)
                     } else {
@@ -488,6 +817,100 @@ pub fn redact_diagnostic_value(value: Value) -> Value {
         ),
         Value::String(value) => Value::String(truncate_utf8(&value, 4_096)),
         scalar => scalar,
+    }
+}
+
+fn durable_identifier_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().replace('-', "_").as_str(),
+        "code" | "event_type" | "id" | "method" | "type"
+    )
+}
+
+fn public_durable_identifier(key: &str, value: &str) -> bool {
+    match key.to_ascii_lowercase().replace('-', "_").as_str() {
+        "code" => public_diagnostic_code(value),
+        "method" => matches!(
+            value,
+            "invoke"
+                | "smoke"
+                | "observe.begin"
+                | "observe.end"
+                | "snapshot"
+                | "diff"
+                | "commit"
+                | "rollback"
+                | "run"
+        ),
+        "type" => matches!(
+            value,
+            "event"
+                | "result"
+                | "state_transition"
+                | "message"
+                | "plugin_event"
+                | "provider.progress"
+                | "provider.tool.started"
+                | "provider.tool.completed"
+                | "workflow.progress"
+                | "effect.progress"
+                | "effect.warning"
+        ),
+        "event_type" | "id" => false,
+        _ => false,
+    }
+}
+
+fn public_diagnostic_code(value: &str) -> bool {
+    matches!(
+        value,
+        "outcome_unknown"
+            | "plugin.outcome_unknown"
+            | "plugin.deadline_exceeded"
+            | "plugin.transport_failed"
+            | "plugin.protocol_failed"
+            | "plugin.process_exit_failed"
+            | "workflow.validation_failed"
+            | "script_batch_failed"
+            | "script_preparation_failed"
+            | "script_supervisor_start_failed"
+            | "provider_invocation_failed"
+            | "provider_reported_failure"
+            | "observer_cleanup_failed"
+            | "generation_produced_no_script"
+            | "workspace_inspection_failed"
+            | "script_batch.requested"
+            | "script_batch.build_succeeded"
+            | "script.completed"
+            | "script.outcome_unknown"
+            | "script.failed"
+            | "script_batch.completed"
+            | "script_batch.outcome_unknown"
+            | "script_batch.failed"
+            | "workflow.generation_requested"
+            | "workflow.generation_completed"
+            | "workflow.requested"
+            | "workflow.result.error"
+            | "plugin.invocation_requested"
+            | "plugin.dispatch_requested"
+            | "plugin.cancellation_requested"
+            | "plugin.supervision_completed"
+            | "test.requested"
+    ) || value
+        .strip_prefix("invalid_identifier.")
+        .is_some_and(|digest| {
+            digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+fn durable_diagnostic_code(value: &str) -> String {
+    if public_diagnostic_code(value) {
+        value.to_owned()
+    } else {
+        format!(
+            "invalid_identifier.{:.16}",
+            format!("{:x}", Sha256::digest(value.as_bytes()))
+        )
     }
 }
 
@@ -591,6 +1014,12 @@ pub enum JournalError {
     /// JSON serialization failed.
     #[error("cannot encode run journal: {0}")]
     Json(#[source] serde_json::Error),
+    /// A normalized kind contradicted its exit or terminal evidence.
+    #[error("cannot publish an inconsistent run outcome: {0}")]
+    InvalidOutcome(&'static str),
+    /// A journal root was linked, reparsed, or escaped its expected parent.
+    #[error("run journal path is unsafe: {0}")]
+    UnsafePath(&'static str),
     /// A caller attempted to mutate a terminal journal.
     #[error("run journal is already finished")]
     AlreadyFinished,
@@ -607,7 +1036,9 @@ mod tests {
         ProcessOutcome {
             kind: InvocationKind::Succeeded,
             exit_code: Some(0),
-            terminal: None,
+            terminal: Some(crate::protocol::TerminalResult::Success {
+                value: serde_json::json!({"fixture": true}),
+            }),
             frames_seen: 1,
             events_dropped: 0,
             observation_error: None,
@@ -615,6 +1046,7 @@ mod tests {
             stderr_truncated: false,
             error: None,
             elapsed_ms: 1,
+            progress: None,
         }
     }
 
@@ -749,11 +1181,13 @@ mod tests {
     }
 
     #[test]
-    fn durable_failure_summaries_preserve_codes_but_not_external_text() {
+    fn durable_failure_summaries_preserve_only_public_codes_and_not_external_text() {
         let temporary = tempdir().expect("temporary directory");
         let workspace = Workspace::at(temporary.path());
         let mut journal = RunJournal::create(&workspace).expect("journal");
         let mut failure = outcome();
+        failure.kind = InvocationKind::PluginFailed;
+        failure.exit_code = Some(1);
         failure.error = Some("DO_NOT_PERSIST_RUNTIME_ERROR".to_owned());
         failure.observation_error = Some("DO_NOT_PERSIST_OBSERVER_ERROR".to_owned());
         failure.terminal = Some(crate::protocol::TerminalResult::Failure {
@@ -765,8 +1199,13 @@ mod tests {
         });
         journal.finish(failure).expect("finish");
 
-        let durable = fs::read_to_string(journal.summary_path()).expect("summary");
-        assert!(durable.contains("stable.failure.code"));
+        let durable = format!(
+            "{}\n{}",
+            fs::read_to_string(journal.event_path()).expect("events"),
+            fs::read_to_string(journal.summary_path()).expect("summary")
+        );
+        assert!(!durable.contains("stable.failure.code"));
+        assert!(durable.contains("invalid_identifier."));
         for secret in [
             "DO_NOT_PERSIST_RUNTIME_ERROR",
             "DO_NOT_PERSIST_OBSERVER_ERROR",
@@ -776,5 +1215,168 @@ mod tests {
             assert!(!durable.contains(secret), "persisted {secret}");
         }
         assert!(durable.contains("sha256"));
+    }
+
+    #[test]
+    fn arbitrary_identifier_shaped_plugin_values_are_fingerprinted() {
+        let value = redact_diagnostic_value(json!({
+            "code":"DO_NOT_PERSIST_CODE",
+            "event_type":"DO_NOT_PERSIST_EVENT_TYPE",
+            "id":"DO_NOT_PERSIST_ID",
+            "method":"DO_NOT_PERSIST_METHOD",
+            "type":"DO_NOT_PERSIST_TYPE",
+            "nested":{"code":"outcome_unknown", "method":"invoke"}
+        }));
+        let encoded = serde_json::to_string(&value).expect("diagnostic JSON");
+        for secret in [
+            "DO_NOT_PERSIST_CODE",
+            "DO_NOT_PERSIST_EVENT_TYPE",
+            "DO_NOT_PERSIST_ID",
+            "DO_NOT_PERSIST_METHOD",
+            "DO_NOT_PERSIST_TYPE",
+        ] {
+            assert!(!encoded.contains(secret), "persisted {secret}");
+        }
+        assert!(encoded.contains("outcome_unknown"));
+        assert!(encoded.contains("invoke"));
+        assert!(encoded.contains("sha256"));
+    }
+
+    #[test]
+    fn journal_rejects_a_contradictory_terminal_summary() {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let mut journal = RunJournal::create(&workspace).expect("journal");
+        let mut contradictory = outcome();
+        contradictory.exit_code = Some(1);
+        assert!(matches!(
+            journal.finish(contradictory),
+            Err(JournalError::InvalidOutcome(_))
+        ));
+        assert!(!journal.summary_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_create_rejects_a_linked_runs_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let outside = temporary.path().join("outside-runs");
+        fs::create_dir_all(root.join(".tactus")).expect("control");
+        fs::create_dir(&outside).expect("outside runs");
+        symlink(&outside, root.join(".tactus/runs")).expect("runs symlink");
+        let workspace = Workspace::at(&root);
+
+        assert!(matches!(
+            RunJournal::create(&workspace),
+            Err(JournalError::UnsafePath(".tactus/runs"))
+        ));
+        assert_eq!(fs::read_dir(&outside).expect("outside contents").count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn journal_create_rejects_a_runs_junction() {
+        let temporary = tempdir().expect("temporary directory");
+        let root = temporary.path().join("project");
+        let outside = temporary.path().join("outside-runs");
+        fs::create_dir_all(root.join(".tactus")).expect("control");
+        fs::create_dir(&outside).expect("outside runs");
+        let runs = root.join(".tactus/runs");
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:TACTUS_TEST_JUNCTION -Target $env:TACTUS_TEST_TARGET | Out-Null",
+            ])
+            .env("TACTUS_TEST_JUNCTION", &runs)
+            .env("TACTUS_TEST_TARGET", &outside)
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let workspace = Workspace::at(&root);
+
+        assert!(matches!(
+            RunJournal::create(&workspace),
+            Err(JournalError::UnsafePath(".tactus/runs"))
+        ));
+        assert_eq!(fs::read_dir(&outside).expect("outside contents").count(), 0);
+    }
+
+    #[test]
+    fn typed_failure_projection_keeps_only_validated_reconciliation_evidence() {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let mut journal = RunJournal::create(&workspace).expect("journal");
+        let mut failure = outcome();
+        failure.kind = InvocationKind::PluginFailed;
+        failure.exit_code = Some(1);
+        failure.terminal = Some(crate::protocol::TerminalResult::Failure {
+            error: crate::protocol::PluginFailure {
+                code: "outcome_unknown".to_owned(),
+                message: "DO_NOT_PERSIST_PROVIDER_TEXT".to_owned(),
+                details: Some(json!({
+                    "provider":"claude-code",
+                    "phase":"partial_output",
+                    "occurrence_id":"occ:fixture",
+                    "business_key_sha256":"ab".repeat(32),
+                    "external_effect_possible":true,
+                    "reconciliation":["Inspect the external system."],
+                    "validation_failed":[{
+                        "stage":"structure",
+                        "rule":"missing_subquestion",
+                        "severity":"Correctness",
+                        "expected":{"parts":["a","b","c"]},
+                        "observed":{"parts":["b","c"],"message":"DO_NOT_PERSIST_VALIDATOR_MESSAGE"},
+                        "provenance":{"source":"rubric", "path":"DO_NOT_PERSIST_PATH"}
+                    }],
+                    "text":"DO_NOT_PERSIST_RESULT_TEXT"
+                })),
+            },
+        });
+        let details = match failure.terminal.as_ref() {
+            Some(crate::protocol::TerminalResult::Failure { error }) => {
+                error.details.as_ref().expect("details")
+            }
+            _ => unreachable!("fixture is a failure"),
+        };
+        journal
+            .record("runtime.typed_failure", diagnostic_failure_details(details))
+            .expect("typed diagnostic");
+        journal.finish(failure).expect("finish");
+
+        let durable = format!(
+            "{}\n{}",
+            fs::read_to_string(journal.event_path()).expect("events"),
+            fs::read_to_string(journal.summary_path()).expect("summary")
+        );
+        for evidence in [
+            "partial_output",
+            "external_effect_possible",
+            "missing_subquestion",
+            "structure",
+            "Correctness",
+        ] {
+            assert!(durable.contains(evidence), "missing {evidence}");
+        }
+        for secret in [
+            "claude-code",
+            "occ:fixture",
+            "Inspect the external system.",
+            "parts",
+            "DO_NOT_PERSIST_PROVIDER_TEXT",
+            "DO_NOT_PERSIST_RESULT_TEXT",
+            "DO_NOT_PERSIST_VALIDATOR_MESSAGE",
+            "DO_NOT_PERSIST_PATH",
+        ] {
+            assert!(!durable.contains(secret), "persisted {secret}");
+        }
     }
 }

@@ -72,6 +72,12 @@ and supports a caller-bounded generate/judge/repair loop. Serializable checks
 are normally batched through an ordinary `norm-check` plugin; `NativeCheck`
 remains the explicit Haskell escape hatch.
 
+`validationFailures` projects those same Norm violations into structured gate
+records containing validator stage, rule, expected, observed, and provenance.
+`validate`/`validateWith` can gate at `Correctness` or `Blocking`; they raise
+`ValidationFailed` without introducing another checker or changing either wire
+protocol.
+
 The umbrella `Clef` module re-exports this API except the `Occurrence`
 check-spec constructor, whose name is already used by Segno. Import
 `Clef.Norm` qualified when constructing an occurrence check. The full contract
@@ -112,7 +118,18 @@ JSON with this schema:
       "options": {}
     }
   },
-  "instructions": "Instructions prepended to every provider prompt."
+  "instructions": "Instructions prepended to every provider prompt.",
+  "limits": {
+    "max_concurrent_provider_calls": 4,
+    "plugin_timeout_seconds": 3600,
+    "provider_timeout_seconds": 13500,
+    "provider_outer_timeout_seconds": 14400,
+    "max_request_bytes": 1048576,
+    "max_frame_bytes": 33554432,
+    "max_stdout_bytes": 67108864,
+    "max_event_frames": 10000,
+    "max_stderr_bytes": 1048576
+  }
 }
 ```
 
@@ -126,13 +143,22 @@ They run with the configured workspace as their current directory and inherit
 the caller's environment. Provider-specific approval-bypass flags, models,
 effort mapping, and credentials belong to provider adapters, not the EDSL.
 
+`limits` is also optional. Missing fields retain the previous Clef defaults.
 When `loadRuntimeConfigFromEnv` sees a provider command containing the Tactus
-`dispatch` subcommand, it adds `--timeout-seconds 13500` unless either the
-split or `--timeout-seconds=N` form is already present. Explicit values and
-non-provider commands are unchanged. Clef supervises provider processes for
-14,400 seconds, leaving fifteen minutes after the injected inner deadline for
-Tactus to reap its process tree and flush a terminal frame. Ordinary effects
-and plugins retain the finite 3,600-second Clef deadline.
+`dispatch` subcommand, it adds the configured `provider_timeout_seconds`
+(13,500 seconds by default) unless either explicit timeout form is already
+present. The dispatcher gives the native provider CLI 13,440 seconds by
+default, retaining 60 seconds to reap it and deliver its terminal frame. Clef
+uses `provider_outer_timeout_seconds` (14,400 seconds) for the outer provider
+supervisor; the enclosing Tactus workflow script has a separate 15,300-second
+outer deadline. Ordinary effects and plugins use `plugin_timeout_seconds`.
+The remaining fields configure the outer plugin-v1 transport budgets;
+`max_frame_bytes` is capped at 33,554,432 bytes.
+
+One runtime admits at most `max_concurrent_provider_calls` provider processes.
+Permits surround only direct provider boundaries and are released on every
+exit path. `parallelAllBounded` provides an independent bound for arbitrary
+workflow branches while retaining input order and structured cancellation.
 
 ## Plugin boundary
 
@@ -188,7 +214,8 @@ evidence have distinct record types.
 ## Deliberate boundaries
 
 `Workflow a` is an abstract wrapper around `Runtime -> IO a`. It has normal
-sequential `do` semantics; concurrency happens only through `parallel`. There is
+sequential `do` semantics; concurrency happens only through `parallel`,
+`parallelAll`, or `parallelAllBounded`. There is
 no type-level effect row, pre/post typestate, global DAG, scheduler, artifact
 store, authorization layer, or sandbox in the core.
 

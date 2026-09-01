@@ -49,7 +49,7 @@ user / coding agent
                  v
           native agent CLI
 
-tactus run
+tactus run --all
     |
     +-> Cabal/GHC/runghc -> Clef Workflow a
                               |
@@ -196,12 +196,35 @@ process-group containment. Plugins are therefore still trusted local code.
 Local termination also cannot prove whether a remote provider completed an
 operation before a transport failure, and never implies a safe retry.
 
-For generated Clef runtime configuration, provider `dispatch` commands without
-an explicit timeout receive a 13,500-second inner deadline. Clef's provider
-transport boundary is 14,400 seconds, reserving fifteen minutes for dispatch
-cleanup and terminal delivery. Explicit dispatch timeouts are preserved;
-effects and general plugins are not rewritten and retain Clef's 3,600-second
-default transport deadline.
+For generated Clef runtime configuration, the native provider CLI receives a
+13,440-second deadline by default. Tactus retains 60 seconds to reap that
+process and deliver a terminal frame before its
+`limits.provider_timeout_seconds` dispatch deadline (13,500 seconds). Clef's
+provider transport boundary uses `limits.provider_outer_timeout_seconds`
+(14,400 seconds), and the enclosing workflow script owns the final outer
+deadline through `limits.script_timeout_seconds` (15,300 seconds). Explicit
+timeouts are preserved and validated against their supervisor; effects and
+general plugins use `limits.plugin_timeout_seconds` (3,600 seconds). Request,
+frame, stdout, event, and stderr budgets in the same optional object govern
+Clef's outer plugin-v1 supervisor.
+
+Each Clef runtime owns a provider semaphore, with four permits by default and
+an override in `limits.max_concurrent_provider_calls`. A permit surrounds only
+one `provider:` process boundary. It is never held around an enclosing
+`Workflow`, observer lifecycle, or generic plugin/effect call. This bounds
+agent fan-out without making nested workflow composition wait on a permit it
+already owns. `parallelAllBounded` separately bounds arbitrary workflow
+branches while preserving traversal order and structured sibling cancellation.
+
+When no authoritative terminal result is available, Clef augments the
+`PluginOutcomeUnknown` cause with phase, accepted frame/progress counts, the
+last event type, its event-acceptance `last_event_unix_ms`, an explicit
+`external_effect_possible` flag, and safe reconciliation guidance. The
+timestamp is captured when Clef records the event, not synthesized when a
+later timeout is diagnosed. Clef never copies the last event body into that
+summary; prompt and model-output content remain confined to existing raw
+runtime records. Provider-supplied detail objects are likewise withheld from
+the summary and represented only by `reported_details_withheld`.
 
 Transport validity and observation delivery are separate. Invalid or oversized
 protocol data can make the transport outcome unknown. By contrast, the
@@ -394,9 +417,9 @@ Tactus includes translations for three native agent CLIs:
 Each adapter consumes the native stream to derive its live terminal value, but
 does not forward token-level provider JSON or free text as user/journal events.
 It emits one bounded `provider.diagnostic` aggregate containing counts, byte
-sizes, event types, truncation state, and hashes. Offline `smoke` resolves the
-executable/version; live smoke sends a minimal request. Tests use fake
-executables and do not authenticate.
+sizes, event-type fingerprints, truncation state, and hashes. Offline `smoke`
+resolves the executable/version; live smoke sends a minimal request. Tests use
+fake executables and do not authenticate.
 
 OpenCode has a deliberate capability caveat: `--auto` approves ask decisions,
 but an explicit deny or managed policy may still win. Tactus reports

@@ -145,10 +145,11 @@ terminal success values and native stderr are summarized rather than persisted
 verbatim. This redaction does not turn the trace into replay state, and bounded
 errors or path metadata may still be sensitive.
 
-The event count limit is 1–1,000, the page byte limit is 1–8 MiB, each JSONL
-record is limited to 1 MiB, and a summary is limited to 2 MiB. A partial final
-line or exhausted page budget yields `partial`; a complete malformed record,
-sequence gap, mismatched API, run id, or summary count yields `corrupt`.
+The event count limit is 1–1,000; the page and individual JSONL-record limits
+are 36 MiB so a valid escaped 32 MiB plugin frame remains inspectable. A
+summary is limited to 2 MiB. A partial final line or exhausted page budget
+yields `partial`; a complete malformed record, sequence gap, mismatched API,
+run id, or summary count yields `corrupt`.
 
 ## Compatibility rules
 

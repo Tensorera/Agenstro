@@ -37,6 +37,7 @@ import Control.Concurrent.MVar
     withMVar,
   )
 import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.STM
   ( STM,
@@ -56,6 +57,7 @@ import Control.Exception
   ( IOException,
     SomeException,
     bracket,
+    bracket_,
     displayException,
     finally,
     throwIO,
@@ -65,7 +67,7 @@ import Control.Monad (forever, unless, when)
 import Data.Aeson
   ( Object,
     ToJSON (toJSON),
-    Value,
+    Value (..),
     encode,
     object,
     (.=),
@@ -73,6 +75,7 @@ import Data.Aeson
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq, ViewL (..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -80,6 +83,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose, hSetBinaryMode, stderr)
@@ -121,8 +125,10 @@ import Clef.Plugin.Protocol
     pluginOutputEventCount,
   )
 import Clef.Runtime.Config
-  ( RuntimeConfig (runtimeWorkspace),
+  ( RuntimeConfig (runtimeLimits, runtimeWorkspace),
+    RuntimeLimits (..),
     providerDispatchDeadlineSeconds,
+    validateRuntimeLimits,
   )
 
 data Runtime = Runtime
@@ -135,7 +141,13 @@ data Runtime = Runtime
     internalSinkDroppedEvents :: TVar Int,
     internalSinkWorker :: ThreadId,
     internalRuntimeClosed :: TVar Bool,
-    internalCloseLock :: MVar ()
+    internalCloseLock :: MVar (),
+    -- The permit is acquired only around one native provider boundary.  A
+    -- nested Workflow never owns it while evaluating ordinary Haskell code.
+    internalProviderPermits :: QSem,
+    -- Timestamped at event acceptance, never synthesized later while forming
+    -- an outcome-unknown diagnostic.
+    internalLastEventUnixMillis :: TVar (Map.Map (Text, Text) Integer)
   }
 
 data SinkMessage
@@ -280,6 +292,9 @@ withRuntimeWithSink config sink = bracket (newRuntimeWithSink config sink) close
 
 newRuntimeWithSinkPolicy :: RuntimeConfig -> (RuntimeRecord -> Bool) -> EventSink -> IO Runtime
 newRuntimeWithSinkPolicy config shouldProject sink = do
+  case validateRuntimeLimits (runtimeLimits config) of
+    Left message -> throwIO (RuntimeConfigError message)
+    Right _ -> pure ()
   nextRequestId <- newMVar 1
   records <- newMVar []
   queue <- newTVarIO Seq.empty
@@ -288,7 +303,9 @@ newRuntimeWithSinkPolicy config shouldProject sink = do
   worker <- forkIO (projectSinkRecords sink queue failure)
   closed <- newTVarIO False
   closeLock <- newMVar ()
-  pure (Runtime config nextRequestId records shouldProject queue failure droppedEvents worker closed closeLock)
+  providerPermits <- newQSem (limitMaxConcurrentProviderCalls (runtimeLimits config))
+  lastEventUnixMillis <- newTVarIO Map.empty
+  pure (Runtime config nextRequestId records shouldProject queue failure droppedEvents worker closed closeLock providerPermits lastEventUnixMillis)
 
 -- | Boundedly flush and stop the sink worker.  Repeated calls are harmless.
 -- Records retained after closure remain readable but are no longer projected.
@@ -451,14 +468,43 @@ flushRuntimeSink runtime = do
 
 callPlugin :: Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
 callPlugin runtime pluginName =
-  callPluginWithLimits selectedLimits runtime pluginName
-  where
-    selectedLimits
-      | "provider:" `Text.isPrefixOf` pluginName = defaultProviderTransportLimits
-      | otherwise = defaultPluginTransportLimits
+  callPluginWithLimits (configuredTransportLimits runtime pluginName) runtime pluginName
+
+configuredTransportLimits :: Runtime -> Text -> PluginTransportLimits
+configuredTransportLimits runtime pluginName =
+  let limits = runtimeLimits (internalRuntimeConfig runtime)
+      base =
+        PluginTransportLimits
+          { transportDeadlineSeconds = Just (limitPluginTimeoutSeconds limits),
+            transportMaxRequestBytes = limitMaxRequestBytes limits,
+            transportMaxFrameBytes = limitMaxFrameBytes limits,
+            transportMaxStdoutBytes = limitMaxStdoutBytes limits,
+            transportMaxEventFrames = limitMaxEventFrames limits,
+            transportMaxStderrBytes = limitMaxStderrBytes limits
+          }
+   in if isProviderPlugin pluginName
+        then base {transportDeadlineSeconds = Just (limitProviderOuterTimeoutSeconds limits)}
+        else base
+
+isProviderPlugin :: Text -> Bool
+isProviderPlugin = Text.isPrefixOf "provider:"
+
+withProviderPermit :: Runtime -> Text -> IO value -> IO value
+withProviderPermit runtime pluginName action
+  | isProviderPlugin pluginName =
+      bracket_
+        (waitQSem (internalProviderPermits runtime))
+        (signalQSem (internalProviderPermits runtime))
+        action
+  | otherwise = action
 
 callPluginWithLimits :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
-callPluginWithLimits transportLimits runtime pluginName command method params = do
+callPluginWithLimits transportLimits runtime pluginName command method params =
+  withProviderPermit runtime pluginName $
+    callPluginWithoutPermit transportLimits runtime pluginName command method params
+
+callPluginWithoutPermit :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
+callPluginWithoutPermit transportLimits runtime pluginName command method params = do
   case validatePluginTransportLimits transportLimits of
     Left message -> throwWorkflow (PluginProtocolFailed pluginName message)
     Right () -> pure ()
@@ -520,8 +566,9 @@ callPluginWithLimits transportLimits runtime pluginName command method params = 
                 workflowCauseDetails =
                   Just (object ["seconds" .= transportDeadlineSeconds transportLimits])
               }
-      recordPluginOutcomeUnknown runtime pluginName method requestId cause
-      throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+      enrichedCause <-
+        recordPluginOutcomeUnknown runtime pluginName method requestId "awaiting_terminal" False cause
+      throwWorkflow (PluginOutcomeUnknown pluginName method enrichedCause)
     Just (Left exception) -> do
       let cause =
             WorkflowCause
@@ -529,8 +576,9 @@ callPluginWithLimits transportLimits runtime pluginName command method params = 
                 workflowCauseMessage = Text.pack (displayException exception),
                 workflowCauseDetails = Nothing
               }
-      recordPluginOutcomeUnknown runtime pluginName method requestId cause
-      throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+      enrichedCause <-
+        recordPluginOutcomeUnknown runtime pluginName method requestId "transport" False cause
+      throwWorkflow (PluginOutcomeUnknown pluginName method enrichedCause)
     Just (Right result) -> pure result
   let decodedStandardError = decodeUtf8With lenientDecode standardErrorBytes
       standardError =
@@ -557,8 +605,9 @@ callPluginWithLimits transportLimits runtime pluginName command method params = 
                 workflowCauseMessage = message,
                 workflowCauseDetails = Just (workflowErrorDiagnostic protocolError)
               }
-      recordPluginOutcomeUnknown runtime pluginName method requestId cause
-      throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+      enrichedCause <-
+        recordPluginOutcomeUnknown runtime pluginName method requestId "protocol_validation" False cause
+      throwWorkflow (PluginOutcomeUnknown pluginName method enrichedCause)
     Right parsed -> do
       case pluginOutputTerminal parsed of
         -- A well-formed reported failure is the most useful result even when
@@ -576,8 +625,9 @@ callPluginWithLimits transportLimits runtime pluginName command method params = 
           if pluginFailureCode failure == "outcome_unknown"
             then do
               let cause = pluginFailureCause failure
-              recordPluginOutcomeUnknown runtime pluginName method requestId cause
-              throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+              enrichedCause <-
+                recordPluginOutcomeUnknown runtime pluginName method requestId "terminal_reported_unknown" True cause
+              throwWorkflow (PluginOutcomeUnknown pluginName method enrichedCause)
             else do
               let cause = pluginFailureCause failure
               recordPluginTransition
@@ -612,8 +662,9 @@ callPluginWithLimits transportLimits runtime pluginName command method params = 
                       workflowCauseMessage = exitMessage code standardError,
                       workflowCauseDetails = Nothing
                     }
-            recordPluginOutcomeUnknown runtime pluginName method requestId cause
-            throwWorkflow (PluginOutcomeUnknown pluginName method cause)
+            enrichedCause <-
+              recordPluginOutcomeUnknown runtime pluginName method requestId "process_exit_after_terminal" True cause
+            throwWorkflow (PluginOutcomeUnknown pluginName method enrichedCause)
           ExitSuccess -> do
             recordPluginTransition
               runtime
@@ -657,11 +708,86 @@ freshRuntimeId runtime =
     pure (nextId + 1, "clef-" <> Text.pack (show nextId))
 
 emitEvent :: Runtime -> Text -> Text -> Value -> IO ()
-emitEvent runtime pluginName requestId event =
+emitEvent runtime pluginName requestId event = do
+  eventUnixMillis <- floor . (* 1000) <$> getPOSIXTime
+  atomically $
+    modifyTVar'
+      (internalLastEventUnixMillis runtime)
+      (Map.insert (pluginName, requestId) eventUnixMillis)
   recordRuntime runtime (PluginEventRecord pluginName requestId event)
 
-recordPluginOutcomeUnknown :: Runtime -> Text -> Text -> Text -> WorkflowCause -> IO ()
-recordPluginOutcomeUnknown runtime pluginName method requestId cause = do
+-- | Add bounded, non-content-bearing reconciliation evidence to an ambiguous
+-- plugin result.  Raw event payloads remain in runtime records; this summary
+-- retains only the event type so prompts and model output are not copied into
+-- a broadly consumed error diagnostic.
+enrichOutcomeUnknownCause :: Runtime -> Text -> Text -> Text -> Bool -> WorkflowCause -> IO WorkflowCause
+enrichOutcomeUnknownCause runtime pluginName requestId phase terminalFrameSeen cause = do
+  records <- readRuntimeRecords runtime
+  lastEventUnixMillis <-
+    atomically $
+      Map.lookup (pluginName, requestId) <$> readTVar (internalLastEventUnixMillis runtime)
+  let events =
+        [ event
+          | PluginEventRecord selectedPlugin selectedRequest event <- records,
+            selectedPlugin == pluginName,
+            selectedRequest == requestId
+        ]
+      eventFramesSeen = length events
+      framesSeen = eventFramesSeen + if terminalFrameSeen then 1 else 0
+      lastEvent = safeEventSummary <$> lastMaybe events
+      progress =
+        object
+          [ "event_frames_seen" .= eventFramesSeen,
+            "terminal_frame_seen" .= terminalFrameSeen
+          ]
+      reconciliation =
+        object
+          [ "required" .= True,
+            "automatic_retry_safe" .= False,
+            "steps"
+              .= [ "Inspect authoritative external state for this request." :: Text,
+                   "Compare workspace artifacts and provider-side records.",
+                   "Retry only after proving the operation did not complete or is idempotent."
+                 ]
+          ]
+      diagnosticFields =
+        KeyMap.fromList
+          [ "phase" .= phase,
+            "frames_seen" .= framesSeen,
+            "progress" .= progress,
+            "last_event" .= lastEvent,
+            "last_event_unix_ms" .= lastEventUnixMillis,
+            "external_effect_possible" .= True,
+            "reported_details_withheld" .= case workflowCauseDetails cause of
+              Nothing -> False
+              Just _ -> True,
+            "reconciliation" .= reconciliation
+          ]
+      -- Plugin-provided details are deliberately excluded: an adapter may put
+      -- prompt or model-output text there.  The original payload remains at
+      -- the restricted transport boundary; broadly consumed diagnostics get
+      -- only this allowlisted reconciliation summary.
+  pure cause {workflowCauseDetails = Just (Object diagnosticFields)}
+
+safeEventSummary :: Value -> Value
+safeEventSummary (Object fields) =
+  object
+    [ "type" .= case KeyMap.lookup "event" fields of
+        Just (Object eventFields) -> case KeyMap.lookup "type" eventFields of
+          Just (String eventType) -> eventType
+          _ -> ("unknown" :: Text)
+        _ -> case KeyMap.lookup "type" fields of
+          Just (String eventType) -> eventType
+          _ -> "unknown"
+    ]
+safeEventSummary _ = object ["type" .= ("unknown" :: Text)]
+
+lastMaybe :: [value] -> Maybe value
+lastMaybe = foldl (\_ value -> Just value) Nothing
+
+recordPluginOutcomeUnknown :: Runtime -> Text -> Text -> Text -> Text -> Bool -> WorkflowCause -> IO WorkflowCause
+recordPluginOutcomeUnknown runtime pluginName method requestId phase terminalFrameSeen cause = do
+  enrichedCause <- enrichOutcomeUnknownCause runtime pluginName requestId phase terminalFrameSeen cause
   recordPluginTransition
     runtime
     pluginName
@@ -680,7 +806,7 @@ recordPluginOutcomeUnknown runtime pluginName method requestId cause = do
     )
     "No authoritative terminal outcome was available."
     "The external operation may have completed, so automatic retry is unsafe."
-    (Just cause)
+    (Just enrichedCause)
   recordPluginMessage
     runtime
     pluginName
@@ -692,7 +818,8 @@ recordPluginOutcomeUnknown runtime pluginName method requestId cause = do
         <> pluginName
         <> "' automatically; inspect the workspace before retrying."
     )
-    cause
+    enrichedCause
+  pure enrichedCause
 
 recordPluginTransition :: Runtime -> Text -> Text -> Text -> Text -> Text -> TriggerKind -> Text -> Text -> Text -> Text -> Text -> Maybe WorkflowCause -> IO ()
 recordPluginTransition runtime pluginName method requestId stateBefore stateAfter triggerKind triggerCode triggerSource message condition reason maybeCause =

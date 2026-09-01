@@ -132,7 +132,7 @@ impl Default for ProcessLimits {
             max_stdout_bytes: 64 * 1024 * 1024,
             max_frames: 10_000,
             max_stderr_bytes: 1024 * 1024,
-            event_queue_bound: 128,
+            event_queue_bound: 4,
         }
     }
 }
@@ -183,6 +183,37 @@ pub enum InvocationKind {
     Cancelled,
 }
 
+/// Furthest externally meaningful milestone observed for one invocation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationPhase {
+    /// The child process was created; no valid response frame was observed.
+    Dispatched,
+    /// At least one valid response frame was observed.
+    FirstResponse,
+    /// A non-terminal event proved that partial output was produced.
+    PartialOutput,
+    /// A structurally valid terminal frame was received.
+    TerminalReceived,
+}
+
+/// Safe progress metadata retained independently from arbitrary plugin text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InvocationProgress {
+    /// Furthest milestone reached.
+    pub phase: InvocationPhase,
+    /// Wall-clock time immediately after the process was spawned.
+    pub dispatched_unix_ms: u64,
+    /// Time of the first valid frame, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_response_unix_ms: Option<u64>,
+    /// Time of the latest valid frame, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_unix_ms: Option<u64>,
+    /// Whether local process-group cleanup completed successfully.
+    pub cleanup_completed: bool,
+}
+
 /// Complete factual result of supervising one process group.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProcessOutcome {
@@ -212,6 +243,9 @@ pub struct ProcessOutcome {
     pub error: Option<String>,
     /// Elapsed wall-clock milliseconds.
     pub elapsed_ms: u64,
+    /// Safe invocation milestones, when a plugin process was actually spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<InvocationProgress>,
 }
 
 /// Terminal state for a supervised non-plugin command such as GHC or Cabal.
@@ -435,6 +469,13 @@ impl ProcessSupervisor {
         });
 
         let started = Instant::now();
+        let mut progress = InvocationProgress {
+            phase: InvocationPhase::Dispatched,
+            dispatched_unix_ms: unix_millis(),
+            first_response_unix_ms: None,
+            last_event_unix_ms: None,
+            cleanup_completed: false,
+        };
         let mut sequence = FrameSequence::new(request.id.clone());
         let mut status: Option<ExitStatus> = None;
         let mut child_done = false;
@@ -473,6 +514,17 @@ impl ProcessSupervisor {
                         stdout_done = true;
                     } else {
                         let is_terminal = matches!(frame, PluginFrame::Result { .. });
+                        let observed_at = unix_millis();
+                        if progress.first_response_unix_ms.is_none() {
+                            progress.first_response_unix_ms = Some(observed_at);
+                            progress.phase = InvocationPhase::FirstResponse;
+                        }
+                        progress.last_event_unix_ms = Some(observed_at);
+                        progress.phase = if is_terminal {
+                            InvocationPhase::TerminalReceived
+                        } else {
+                            InvocationPhase::PartialOutput
+                        };
                         let event_budget_available = events_delivered < spec.limits.max_frames;
                         // Reserve one slot for the terminal result. A slow log
                         // consumer may lose progress events, but it must never
@@ -575,7 +627,10 @@ impl ProcessSupervisor {
         // behind. This also closes the same-process-group containment gap used
         // by built-in provider hosts on Unix.
         match cleanup_owned_group(&mut child) {
-            Ok(()) => child.disarm(),
+            Ok(()) => {
+                progress.cleanup_completed = true;
+                child.disarm();
+            }
             Err(error) if forced.is_none() => {
                 forced = Some(InvocationKind::RuntimeFailed);
                 failure = Some(format!(
@@ -694,6 +749,7 @@ impl ProcessSupervisor {
             stderr_truncated: captured.truncated,
             error: failure,
             elapsed_ms: elapsed_millis(started.elapsed()),
+            progress: Some(progress),
         })
     }
 }
@@ -1046,6 +1102,14 @@ fn process_is_absent(error: &io::Error) -> bool {
 
 fn elapsed_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[cfg(test)]

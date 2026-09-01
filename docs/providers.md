@@ -125,7 +125,8 @@ object for forward compatibility:
 
 ```toml
 [providers.codex.options]
-timeout_seconds = 1800
+executable = "tools/codex"
+timeout_seconds = 13440
 extra_args = ["--provider-specific-flag"]
 extra_env = { NAME = "value" }
 auth_status = false
@@ -134,11 +135,27 @@ command_prefix = []
 
 | Option | Meaning |
 | --- | --- |
-| `timeout_seconds` | Positive native provider deadline; separate from the outer Tactus command deadline |
+| `executable` | Native CLI path or PATH command; relative paths resolve from the workspace root |
+| `timeout_seconds` | Positive native provider deadline; defaults to 60 seconds below Tactus dispatch (13,440 seconds under the default policy) |
 | `extra_args` | Appended to the native provider argv |
 | `extra_env` | Additional environment variables for the native provider |
 | `auth_status` | Ask `smoke` to run the provider's authentication-status command |
 | `command_prefix` | Wrapper argv placed before the native executable; mainly for controlled testing or launchers |
+| `native_max_line_bytes` | Maximum one-line native event; default 8 MiB, ceiling 32 MiB |
+| `native_max_stdout_bytes` | Cumulative native stdout drain; default 1 GiB, ceiling 4 GiB on 64-bit builds |
+| `native_max_result_bytes` | Retained terminal result text; default 4 MiB, ceiling 5 MiB |
+| `native_max_stderr_bytes` | Retained native stderr; default 1 MiB, ceiling 16 MiB |
+| `native_output_queue_bound` | Lines awaiting parsing; default 8, ceiling 128, additionally bounded to 256 MiB resident capacity |
+
+Bare executable names must resolve to exactly one PATH candidate. If several
+installations match, `doctor`, `smoke`, and `invoke` report the ambiguity; set
+`executable` to one absolute or workspace-relative path to pin the intended
+installation. On Windows, resolution follows `PATHEXT` and ignores
+extensionless npm POSIX shims when selecting the native launcher.
+
+Built-in provider/effect hosts accept the workspace's 1 MiB request default
+and enforce a 16 MiB hard request ceiling. Native stdout and retained result
+budgets are separate from the outer plugin-v1 frame budget.
 
 Avoid putting credentials in `tactus.toml`. Use the native CLI's credential
 store or a minimal session environment. Configuration, prompts, errors, paths,

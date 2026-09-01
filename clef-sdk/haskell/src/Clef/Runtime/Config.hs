@@ -2,6 +2,9 @@
 
 module Clef.Runtime.Config
   ( RuntimeConfig (..),
+    RuntimeLimits (..),
+    defaultRuntimeLimits,
+    validateRuntimeLimits,
     ProviderConfig (..),
     EffectConfig (..),
     PluginConfig (..),
@@ -9,6 +12,7 @@ module Clef.Runtime.Config
     loadRuntimeConfig,
     loadRuntimeConfigFromEnv,
     providerDispatchDeadlineSeconds,
+    providerDispatchDeadlineSecondsFor,
   )
 where
 
@@ -39,9 +43,43 @@ data RuntimeConfig = RuntimeConfig
     runtimeProviders :: Map Text ProviderConfig,
     runtimeEffects :: Map Text EffectConfig,
     runtimePlugins :: Map Text PluginConfig,
-    runtimeInstructions :: Text
+    runtimeInstructions :: Text,
+    runtimeLimits :: RuntimeLimits
   }
   deriving (Eq, Show)
+
+-- | Workspace-owned process and concurrency policy.  The JSON names are
+-- deliberately shared with Tactus' optional @limits@ object.  Missing fields
+-- retain the pre-limits Clef defaults, so older runtime documents remain
+-- valid.
+data RuntimeLimits = RuntimeLimits
+  { limitMaxConcurrentProviderCalls :: Int,
+    limitPluginTimeoutSeconds :: Int,
+    -- | Inner Tactus provider-dispatch deadline.
+    limitProviderTimeoutSeconds :: Int,
+    -- | Outer Clef provider transport deadline, including cleanup headroom.
+    limitProviderOuterTimeoutSeconds :: Int,
+    limitMaxRequestBytes :: Int,
+    limitMaxFrameBytes :: Int,
+    limitMaxStdoutBytes :: Int,
+    limitMaxEventFrames :: Int,
+    limitMaxStderrBytes :: Int
+  }
+  deriving (Eq, Show)
+
+defaultRuntimeLimits :: RuntimeLimits
+defaultRuntimeLimits =
+  RuntimeLimits
+    { limitMaxConcurrentProviderCalls = 4,
+      limitPluginTimeoutSeconds = 60 * 60,
+      limitProviderTimeoutSeconds = providerDispatchDeadlineSeconds,
+      limitProviderOuterTimeoutSeconds = providerDispatchDeadlineSeconds + 15 * 60,
+      limitMaxRequestBytes = 1024 * 1024,
+      limitMaxFrameBytes = 1024 * 1024,
+      limitMaxStdoutBytes = 64 * 1024 * 1024,
+      limitMaxEventFrames = 10000,
+      limitMaxStderrBytes = 1024 * 1024
+    }
 
 data ProviderConfig = ProviderConfig
   { providerCommand :: [Text],
@@ -77,6 +115,7 @@ instance FromJSON RuntimeConfig where
     effects <- objectValue .: "effects"
     plugins <- objectValue .:? "plugins" .!= Map.empty
     instructions <- objectValue .: "instructions"
+    limits <- objectValue .:? "limits" .!= defaultRuntimeLimits
     when (Text.null defaultProvider) $ fail "default_provider must not be empty"
     unless (Map.member defaultProvider providers) $
       fail "default_provider must name an entry in providers"
@@ -88,8 +127,42 @@ instance FromJSON RuntimeConfig where
           runtimeProviders = providers,
           runtimeEffects = effects,
           runtimePlugins = plugins,
-          runtimeInstructions = instructions
+          runtimeInstructions = instructions,
+          runtimeLimits = limits
         }
+
+instance FromJSON RuntimeLimits where
+  parseJSON = withObject "runtime limits" $ \objectValue -> do
+    maxConcurrentProviderCalls <-
+      objectValue .:? "max_concurrent_provider_calls" .!= limitMaxConcurrentProviderCalls defaultRuntimeLimits
+    pluginTimeoutSeconds <-
+      objectValue .:? "plugin_timeout_seconds" .!= limitPluginTimeoutSeconds defaultRuntimeLimits
+    providerTimeoutSeconds <-
+      objectValue .:? "provider_timeout_seconds" .!= limitProviderTimeoutSeconds defaultRuntimeLimits
+    configuredProviderOuterTimeout <- objectValue .:? "provider_outer_timeout_seconds"
+    let providerOuterTimeoutSeconds =
+          maybe
+            (providerTimeoutSeconds + providerCleanupHeadroomSeconds providerTimeoutSeconds)
+            id
+            configuredProviderOuterTimeout
+    maxRequestBytes <- objectValue .:? "max_request_bytes" .!= limitMaxRequestBytes defaultRuntimeLimits
+    maxFrameBytes <- objectValue .:? "max_frame_bytes" .!= limitMaxFrameBytes defaultRuntimeLimits
+    maxStdoutBytes <- objectValue .:? "max_stdout_bytes" .!= limitMaxStdoutBytes defaultRuntimeLimits
+    maxEventFrames <- objectValue .:? "max_event_frames" .!= limitMaxEventFrames defaultRuntimeLimits
+    maxStderrBytes <- objectValue .:? "max_stderr_bytes" .!= limitMaxStderrBytes defaultRuntimeLimits
+    let limits =
+          RuntimeLimits
+            { limitMaxConcurrentProviderCalls = maxConcurrentProviderCalls,
+              limitPluginTimeoutSeconds = pluginTimeoutSeconds,
+              limitProviderTimeoutSeconds = providerTimeoutSeconds,
+              limitProviderOuterTimeoutSeconds = providerOuterTimeoutSeconds,
+              limitMaxRequestBytes = maxRequestBytes,
+              limitMaxFrameBytes = maxFrameBytes,
+              limitMaxStdoutBytes = maxStdoutBytes,
+              limitMaxEventFrames = maxEventFrames,
+              limitMaxStderrBytes = maxStderrBytes
+            }
+    either (fail . Text.unpack) pure (validateRuntimeLimits limits)
 
 instance FromJSON ProviderConfig where
   parseJSON = withObject "provider configuration" $ \objectValue -> do
@@ -150,6 +223,51 @@ loadRuntimeConfigFromEnv = do
 providerDispatchDeadlineSeconds :: Int
 providerDispatchDeadlineSeconds = 3 * 60 * 60 + 45 * 60
 
+-- | Resolve the inner dispatch deadline from one parsed runtime policy.
+providerDispatchDeadlineSecondsFor :: RuntimeLimits -> Int
+providerDispatchDeadlineSecondsFor = limitProviderTimeoutSeconds
+
+providerCleanupHeadroomSeconds :: Int -> Int
+providerCleanupHeadroomSeconds providerSeconds =
+  min (15 * 60) (max 1 (providerSeconds `div` 4))
+
+validateRuntimeLimits :: RuntimeLimits -> Either Text RuntimeLimits
+validateRuntimeLimits limits = do
+  requireRange "max_concurrent_provider_calls" 1 32 (limitMaxConcurrentProviderCalls limits)
+  requireRange "plugin_timeout_seconds" 1 maxTimeoutSeconds (limitPluginTimeoutSeconds limits)
+  requireRange "provider_timeout_seconds" 1 maxTimeoutSeconds (limitProviderTimeoutSeconds limits)
+  requireRange "provider_outer_timeout_seconds" 1 maxTimeoutSeconds (limitProviderOuterTimeoutSeconds limits)
+  unlessEither
+    (limitProviderOuterTimeoutSeconds limits >= limitProviderTimeoutSeconds limits + 60)
+    "limits.provider_outer_timeout_seconds must leave at least 60 seconds after provider_timeout_seconds"
+  requireRange "max_request_bytes" 1 (16 * 1024 * 1024) (limitMaxRequestBytes limits)
+  requireRange "max_frame_bytes" 1 (32 * 1024 * 1024) (limitMaxFrameBytes limits)
+  requireRange "max_stdout_bytes" (limitMaxFrameBytes limits) (512 * 1024 * 1024) (limitMaxStdoutBytes limits)
+  requireRange "max_event_frames" 1 1000000 (limitMaxEventFrames limits)
+  requireRange "max_stderr_bytes" 1 (16 * 1024 * 1024) (limitMaxStderrBytes limits)
+  pure limits
+  where
+    maxTimeoutSeconds = 7 * 24 * 60 * 60
+
+requireRange :: Text -> Int -> Int -> Int -> Either Text ()
+requireRange name minimumValue maximumValue actual
+  | actual < minimumValue || actual > maximumValue =
+      Left
+        ( "limits."
+            <> name
+            <> " must be between "
+            <> Text.pack (show minimumValue)
+            <> " and "
+            <> Text.pack (show maximumValue)
+            <> ", received "
+            <> Text.pack (show actual)
+        )
+  | otherwise = Right ()
+
+unlessEither :: Bool -> Text -> Either Text ()
+unlessEither True _ = Right ()
+unlessEither False message = Left message
+
 ensureProviderDispatchDeadline :: RuntimeConfig -> RuntimeConfig
 ensureProviderDispatchDeadline config =
   config
@@ -162,7 +280,10 @@ ensureProviderDispatchDeadline config =
         }
     addDeadlineArgument command
       | "dispatch" `elem` command && not (any isDeadlineArgument command) =
-          command <> ["--timeout-seconds", Text.pack (show providerDispatchDeadlineSeconds)]
+          command
+            <> [ "--timeout-seconds",
+                 Text.pack (show (providerDispatchDeadlineSecondsFor (runtimeLimits config)))
+               ]
       | otherwise = command
     isDeadlineArgument argument =
       argument == "--timeout-seconds"
