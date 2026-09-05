@@ -52,7 +52,10 @@ describe("Tactus control child lifetime", () => {
           generatedAtUnixMs: "1",
           workspace: { name: "fixture" },
           health: { ok: true, checks: [] },
-          scripts: [],
+          scripts: [
+            { relativePath: ".tactus/scripts/010_main.hs", order: 10, runnable: true },
+            { relativePath: ".tactus/scripts/Support.hs", runnable: false },
+          ],
           registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
           runs: [],
         },
@@ -76,7 +79,9 @@ describe("Tactus control child lifetime", () => {
     const queuedListing = controller.sessions({ workspaceHandle: studio.handle, limit: 50 });
     await Promise.resolve();
     expect(children).toHaveLength(2);
-    expect(() => controller.start({ kind: "run" })).toThrowError(
+    expect(() =>
+      controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] }),
+    ).toThrowError(
       expect.objectContaining({ detail: expect.objectContaining({ code: "control_busy" }) }),
     );
 
@@ -93,7 +98,9 @@ describe("Tactus control child lifetime", () => {
     );
     children[2]?.emit("close", 0);
     await expect(queuedListing).resolves.toMatchObject({ sessions: [] });
-    expect(() => controller.start({ kind: "run" })).not.toThrow();
+    expect(() =>
+      controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] }),
+    ).not.toThrow();
     controller.dispose();
   });
 });

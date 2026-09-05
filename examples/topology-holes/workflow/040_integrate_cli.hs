@@ -48,21 +48,24 @@ integrate = jsonTask "topology-integrate-cli" $ \(algorithm, interface) ->
     <> "areas [9,9], and Euler characteristic -1. Keep deterministic JSON field names and avoid "
     <> "a GUI. Algorithm findings: "
     <> renderFindings (findings algorithm)
+    <> ". Algorithm approved: "
+    <> Text.pack (show (approved algorithm))
     <> ". Interface findings: "
     <> renderFindings (findings interface)
+    <> ". Interface approved: "
+    <> Text.pack (show (approved interface))
     <> ". Return JSON only with keys summary (string), files (string array), and testsRun "
     <> "(string array)."
 
 workflow :: Workflow StageReport
 workflow = do
   reviews <- parallel (invoke algorithmReview ()) (invoke interfaceReview ())
-  approvedReviews <-
-    requireBecause
-      "one or both topology reviews rejected the implementation"
-      (\(algorithm, interface) -> approved algorithm && approved interface)
-      reviews
-  report <- invoke integrate approvedReviews
-  requireBecause "the integration stage did not report a complete verification" valid report
+  -- A rejection supplies repair input to this one integration pass.  It must
+  -- not prevent the task that addresses the reviewers' findings from running.
+  report <- invoke integrate reviews
+  -- These fields describe provider-reported work.  Independently verifying
+  -- the generated program remains the responsibility of the caller's harness.
+  requireBecause "the integration report omitted files or test commands" valid report
   where
     valid value = not (null (files value)) && not (null (testsRun value))
 

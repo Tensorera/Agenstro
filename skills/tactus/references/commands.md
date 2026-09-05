@@ -1,74 +1,46 @@
-# Tactus command patterns
+# Command reference
 
-Use argument arrays or correctly quoted shell arguments. Keep each path as one argument; paths may contain spaces or non-ASCII characters.
+Pass paths and goals as separate quoted arguments. Tactus searches `--root`
+and its parents for `.tactus/tactus.toml`; script paths are relative to the
+resolved workspace root. Initialize a new workspace with `tactus init <path>`.
 
-## Discover and diagnose
-
-```powershell
-$workspace = (Resolve-Path 'D:\work\project').Path
-tactus list --root $workspace --json
-tactus doctor --root $workspace --json
+```sh
+tactus list --root /path/to/project --json
+tactus doctor --root /path/to/project --json
 ```
 
-Tactus searches the supplied path and its ancestors for `.tactus/tactus.toml`. A valid workspace also has `.tactus/scripts`, `.tactus/runs`, and its generated Cabal project. `list --json` returns the resolved workspace and ordered script inventory. `doctor --json` returns `ok` and individual checks; preserve its nonzero exit code when any check fails.
+`check` takes positional sources, including helper modules. `run` takes
+repeatable `--script` arguments and executes numbered entries in discovery
+order. Both require an explicit selection: paths, `--all`, or an inclusive
+`--from` / `--through` range.
 
-## Inspect and answer decision sessions
-
-```powershell
-tactus session list --root $workspace --limit 50
-tactus session show --root $workspace --session session-7f3a91
-tactus session answer --root $workspace `
-  --session session-7f3a91 `
-  --turn 3 `
-  --axis desk.frame `
-  --option fixed `
-  --note 'Prefer repairable joinery'
+```sh
+tactus check --root /path/to/project .tactus/scripts/010_main.hs .tactus/scripts/Support.hs
+tactus run --root /path/to/project --script .tactus/scripts/010_main.hs
+tactus run --root /path/to/project --script .tactus/scripts/010_main.hs -- 'workflow argument'
 ```
 
-Session commands return one `tactus.control/v1` envelope. Treat `turn` as a
-compare-and-set token: on `session_turn_stale` or an already-consumed turn,
-fetch the current session and ask the person again rather than retrying the old
-answer. Tactus currently has no `session advance`; do not invent a planner
-invocation command.
+Both accept `--timeout-seconds N` and repeated `--package NAME`. A timeout of
+`0` disables the outer deadline. `--keep-going` continues after a failed entry;
+it does not retry it or undo previous effects.
 
-## Select scripts
+`tactus generate --root /path/to/project 'authoring goal'` invokes the configured
+generation provider. It can type-check while authoring; generation does not
+execute the resulting business workflow. Edits to helper modules count as
+source changes. Select and run entries separately when the task needs execution.
 
-`check` accepts explicit scripts as positional arguments. Paths are interpreted relative to the resolved workspace root unless absolute:
+For plugin authoring, read the workspace registry and the plugin's `describe`
+response before constructing an invocation. `describe` reports methods and
+capabilities; it does not validate task correctness.
 
-```powershell
-tactus check --root $workspace '.tactus\scripts\020_implement.hs'
-tactus check --root $workspace `
-  '.tactus\scripts\020_implement.hs' `
-  '.tactus\scripts\Support.hs'
+```sh
+tactus plugin-call --root /path/to/project --namespace effect project.tests describe
+tactus plugin-call --root /path/to/project --namespace effect project.tests check --params '{"target":"parser"}'
 ```
 
-Without explicit paths, `--all`, or an inclusive `--from` / `--through` range,
-`check` rejects the command instead of selecting the whole workspace.
-
-`run` uses a repeatable `--script`; it does not accept scripts as bare positionals:
-
-```powershell
-tactus run --root $workspace `
-  --script '.tactus\scripts\020_implement.hs'
-```
-
-Place workflow arguments after `--`:
-
-```powershell
-tactus run --root $workspace `
-  --script '.tactus\scripts\020_implement.hs' `
-  -- '--workflow argument'
-```
-
-Without `--script`, `--all`, or an inclusive `--from` / `--through` range,
-`run` rejects the command instead of executing every numbered entry.
-
-## Timeouts and packages
-
-Both commands accept `--timeout-seconds N`; `check` defaults to 1800 seconds
-and one complete workflow script defaults to an outer 15300-second deadline.
-`0` disables the direct Tactus deadline. Prefer a finite deadline. Repeat
-`--package NAME` only for required extension libraries. Use `--keep-going` only
-when the user needs a complete independent-failure inventory.
-
-Exit zero means the selected local command completed successfully. A nonzero check means compilation failed. A nonzero run or missing terminal response may require evidence reconciliation before any retry.
+For a custom executable plugin, Tactus sends one `agenstro.plugin/v1` JSONL
+request with `id`, `method`, and `params`. Reply with a correlated terminal
+`{"type":"result","id":"<request id>","ok":true,"value":...}` or
+`{"type":"result","id":"<request id>","ok":false,"error":{"code":"...","message":"..."}}`.
+Reserve stdout for protocol frames; use stderr for diagnostics. Check the
+repository's plugin protocol reference for optional events and transport limits.

@@ -28,8 +28,12 @@ describe("Tactus command boundary", () => {
         root,
       ),
     ).toEqual(["generate", "--root", root, "--provider", "codex", "say $(whoami) && keep spaces"]);
-    expect(commandForAction({ kind: "check" }, root)).toEqual(["check", "--root", root]);
-    expect(commandForAction({ kind: "run" }, root)).toEqual(["run", "--root", root]);
+    expect(
+      commandForAction({ kind: "check", scripts: [".tactus/scripts/010_main.hs"] }, root),
+    ).toEqual(["check", "--root", root, ".tactus/scripts/010_main.hs"]);
+    expect(
+      commandForAction({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] }, root),
+    ).toEqual(["run", "--root", root, "--script", ".tactus/scripts/010_main.hs"]);
   });
 
   it("adds live smoke only as a fixed flag", () => {
@@ -43,6 +47,73 @@ describe("Tactus command boundary", () => {
         "C:\\work",
       ),
     ).toEqual(["smoke", "--root", "C:\\work", "--live", "provider:codex"]);
+  });
+
+  it("rejects paths absent from the snapshot and helpers selected for execution", async () => {
+    const fixture = await fakeActionTactus('throw new Error("invalid selection dispatched");');
+    const controller = new TactusController({
+      executable: process.execPath,
+      commandPrefix: [fixture.script],
+      emit: () => undefined,
+    });
+    await controller.open(fixture.root);
+    for (const scripts of [
+      ["/other/010_main.hs"],
+      ["../010_main.hs"],
+      [".tactus/scripts/Support.hs"],
+    ]) {
+      expect(() => controller.start({ kind: "run", scripts })).toThrowError(
+        expect.objectContaining({
+          detail: expect.objectContaining({ code: "script_selection_invalid" }),
+        }),
+      );
+    }
+    controller.dispose();
+  });
+
+  it("binds every task operation to the selected workspace and validates provider availability", async () => {
+    const fixture = await fakeActionTactus('throw new Error("unexpected provider invocation");');
+    const controller = new TactusController({
+      executable: process.execPath,
+      commandPrefix: [fixture.script],
+      emit: () => undefined,
+    });
+    const view = await controller.open(fixture.root);
+    const stale = "bb665bbe-ece0-40e6-8235-2278635aee84";
+    const taskId = "cc665bbe-ece0-40e6-8235-2278635aee84";
+    for (const request of [
+      () => controller.taskList({ workspaceHandle: stale }),
+      () => controller.taskCurrent({ workspaceHandle: stale, taskId }),
+      () =>
+        controller.taskCreate({
+          workspaceHandle: stale,
+          goal: "fix parser",
+          constraints: "",
+          provider: "codex",
+        }),
+      () => controller.taskContinue({ workspaceHandle: stale, taskId, maxCalls: 1 }),
+      () => controller.taskPause({ workspaceHandle: stale, taskId }),
+    ]) {
+      expect(request).toThrowError(
+        expect.objectContaining({
+          detail: expect.objectContaining({ code: "workspace_handle_stale" }),
+        }),
+      );
+    }
+    expect(() =>
+      controller.taskCreate({
+        workspaceHandle: view.handle,
+        goal: "fix parser",
+        constraints: "",
+        provider: "codex",
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        detail: expect.objectContaining({ code: "provider_unavailable" }),
+      }),
+    );
+    expect(await controller.taskList({ workspaceHandle: view.handle })).toEqual([]);
+    controller.dispose();
   });
 
   it("splits projected output on Unicode scalar boundaries and byte limits", () => {
@@ -86,7 +157,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
       generatedAtUnixMs: "1",
       workspace: { name: "fixture", futureWorkspaceField: true },
       health: { ok: true, checks: [{ name: "root", ok: true, detail: root }] },
-      scripts: [],
+      scripts: [{ relativePath: ".tactus/scripts/010_main.hs", order: 10, runnable: true }, { relativePath: ".tactus/scripts/Support.hs", runnable: false }],
       registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
       runs: [],
       futureSnapshotField: true
@@ -156,7 +227,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     expect(page.events[0]?.data).toEqual({ observedPath: "<workspace>" });
     expect(JSON.stringify(page)).not.toContain(fixture.root);
 
-    const state = controller.start({ kind: "run" });
+    const state = controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] });
     const finished = await waitForFinished(events, state.actionId);
     expect(finished.status).toBe("succeeded");
     expect(finished.exitCode).toBe(0);
@@ -167,7 +238,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     expect(floodWarnings).toHaveLength(1);
     expect(floodWarnings[0]?.presentation?.message).toContain("output was omitted");
 
-    const checked = controller.start({ kind: "check" });
+    const checked = controller.start({ kind: "check", scripts: [".tactus/scripts/010_main.hs"] });
     await waitForFinished(events, checked.actionId);
     const checkOutput = events.filter(
       (event): event is Extract<StudioActionEvent, { type: "output" }> =>
@@ -199,7 +270,7 @@ process.stdout.write("[info] Third projected line.\\n");
     });
     await controller.open(fixture.root);
 
-    const state = controller.start({ kind: "run" });
+    const state = controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] });
     const finished = await waitForFinished(events, state.actionId);
     expect(finished.status).toBe("succeeded");
     expect(finished.exitCode).toBe(0);
@@ -288,7 +359,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     generatedAtUnixMs: "1",
     workspace: { name: "fixture" },
     health: { ok: true, checks: [] },
-    scripts: [],
+    scripts: [{ relativePath: ".tactus/scripts/010_main.hs", order: 10, runnable: true }, { relativePath: ".tactus/scripts/Support.hs", runnable: false }],
     registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
     runs: []
   })));
@@ -315,7 +386,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     const pendingList = controller.sessions({ workspaceHandle: view.handle, limit: 25 });
     let controlBusy: unknown;
     try {
-      controller.start({ kind: "run" });
+      controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] });
     } catch (error) {
       controlBusy = error;
     }
@@ -325,7 +396,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
       { sessions: [] },
     ]);
 
-    const action = controller.start({ kind: "run" });
+    const action = controller.start({ kind: "run", scripts: [".tactus/scripts/010_main.hs"] });
     await expect(
       controller.sessions({ workspaceHandle: view.handle, limit: 25 }),
     ).rejects.toMatchObject({ detail: { code: "action_busy", category: "busy" } });
@@ -394,7 +465,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
     generatedAtUnixMs: "1",
     workspace: { name: "fixture" },
     health: { ok: true, checks: [] },
-    scripts: [],
+    scripts: [{ relativePath: ".tactus/scripts/010_main.hs", order: 10, runnable: true }, { relativePath: ".tactus/scripts/Support.hs", runnable: false }],
     registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
     runs: []
   })));
@@ -568,7 +639,7 @@ if (args[0] === "studio" && args[1] === "inspect") {
       generatedAtUnixMs: "1",
       workspace: { name: "fixture" },
       health: { ok: true, checks: [] },
-      scripts: [],
+      scripts: [{ relativePath: ".tactus/scripts/010_main.hs", order: 10, runnable: true }, { relativePath: ".tactus/scripts/Support.hs", runnable: false }],
       registries: { defaultProvider: "codex", providers: [], effects: [], plugins: [] },
       runs: []
     }

@@ -33,7 +33,7 @@ contains spaces.
 | `tactus runtime-json` | Print Clef's normalized runtime config | `--root` |
 | `tactus check [SCRIPT...]` | Compile-check an explicit selection without executing | `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds` |
 | `tactus run` | Execute an explicit selection of ordered entry scripts | repeatable `--script`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `-- ARG...` |
-| `tactus generate GOAL...` | Ask one provider to write numbered Haskell scripts | `--provider NAME`, `--timeout-seconds`, `--json` |
+| `tactus generate GOAL...` | Ask one provider to create or update Haskell sources, including helpers | `--provider NAME`, `--timeout-seconds`, `--json` |
 | `tactus plugin-call NAME METHOD` | Invoke a registry entry directly | `--namespace`, `--params JSON`, `--timeout-seconds`, `--json` |
 | `tactus smoke [NAME...]` | Probe configured plugins | `--live`, `--json` |
 | `tactus runs list` | List completed outcomes plus valid `open` and protected `corrupt` journals, newest first | `--state`, `--since`, `--limit`, `--json` |

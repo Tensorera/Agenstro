@@ -793,12 +793,10 @@ pub fn redact_diagnostic_value(value: Value) -> Value {
                 .map(|(key, value)| {
                     let value = if sensitive_key(&key)
                         || (key.eq_ignore_ascii_case("error") && value.is_string())
-                    {
-                        redacted_value(&value)
-                    } else if durable_identifier_key(&key)
-                        && value
-                            .as_str()
-                            .is_some_and(|text| !public_durable_identifier(&key, text))
+                        || (durable_identifier_key(&key)
+                            && value
+                                .as_str()
+                                .is_some_and(|text| !public_durable_identifier(&key, text)))
                     {
                         redacted_value(&value)
                     } else {

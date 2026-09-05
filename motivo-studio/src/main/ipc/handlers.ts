@@ -33,6 +33,19 @@ import {
 } from "../../shared/ipc";
 import { asStudioError } from "../errors";
 import { TactusController } from "../tactus/controller";
+import {
+  taskWorkspaceInputSchema,
+  taskCurrentInputSchema,
+  taskCreateInputSchema,
+  taskContinueInputSchema,
+  taskListSchema,
+  taskDocumentSchema,
+  type TaskCreateInput,
+  type TaskContinueInput,
+  type TaskCurrentInput,
+  type TaskDocument,
+  type TaskSummary,
+} from "../../shared/task-contracts";
 
 interface HandlerDependencies {
   readonly ipcMain: IpcMain;
@@ -55,6 +68,11 @@ export interface StudioController {
   answer(input: SessionAnswerInput): Promise<SessionView>;
   start(input: ActionRequest): ActionState;
   cancel(actionId: string): void;
+  taskList(input: { workspaceHandle: string }): Promise<TaskSummary[]>;
+  taskCurrent(input: TaskCurrentInput): Promise<TaskDocument>;
+  taskCreate(input: TaskCreateInput): Promise<TaskDocument>;
+  taskContinue(input: TaskContinueInput): Promise<TaskDocument>;
+  taskPause(input: TaskCurrentInput): Promise<TaskDocument>;
   dispose(): void;
 }
 
@@ -126,6 +144,21 @@ export function registerIpcHandlers(dependencies: HandlerDependencies): () => vo
   );
   register(IPC.sessionAnswer, sessionAnswerInputSchema, sessionViewSchema, (input) =>
     controller.answer(input),
+  );
+  register(IPC.taskList, taskWorkspaceInputSchema, taskListSchema, (input) =>
+    controller.taskList(input),
+  );
+  register(IPC.taskCurrent, taskCurrentInputSchema, taskDocumentSchema, (input) =>
+    controller.taskCurrent(input),
+  );
+  register(IPC.taskCreate, taskCreateInputSchema, taskDocumentSchema, (input) =>
+    controller.taskCreate(input),
+  );
+  register(IPC.taskContinue, taskContinueInputSchema, taskDocumentSchema, (input) =>
+    controller.taskContinue(input),
+  );
+  register(IPC.taskPause, taskCurrentInputSchema, taskDocumentSchema, (input) =>
+    controller.taskPause(input),
   );
 
   return () => {

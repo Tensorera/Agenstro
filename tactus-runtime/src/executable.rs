@@ -155,10 +155,11 @@ impl ExecutableResolver {
                 );
             }
         }
-        candidate
-            .is_file()
-            .then(|| normalize_candidates([candidate]))
-            .unwrap_or_default()
+        if candidate.is_file() {
+            normalize_candidates([candidate])
+        } else {
+            Vec::new()
+        }
     }
 
     fn path_candidates(&self, command: &Path) -> Vec<PathBuf> {

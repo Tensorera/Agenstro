@@ -2,7 +2,7 @@
 title: Agenstro public roadmap
 status: alpha
 owners: [release]
-last_verified: 2026-08-20
+last_verified: 2026-09-05
 applies_to: "Agenstro 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -24,8 +24,9 @@ The release candidate path contains:
   control projections;
 - Segno as one Haskell, single-node, at-least-once persistent-task driver with
   pure interval/UTC-cron planning and separate SQLite lifecycle/business state;
-- Motivo Studio as a thin TypeScript/React/Electron client over Tactus with a
-  typed human-decision return channel; and
+- Motivo Studio as a TypeScript task method and React/Electron interface over
+  Tactus, with bounded agent calls, local task reports, optional investigation
+  branches, and the existing session-answer channel; and
 - a language-neutral one-shot `agenstro.plugin/v1` process boundary.
 
 The release gate covers Windows and Ubuntu source builds, local fake providers,
@@ -75,11 +76,23 @@ current SQLite driver.
 
 ## Motivo direction
 
-Motivo should improve visibility and safe named actions while remaining a
-projection. Candidate work includes richer trace filtering, accessibility,
-signed installers, transcript projection, and typed configuration mutation
-through future Tactus commands. Direct TOML/database/session parsing, a general
-terminal, and private runtime ownership remain out of scope.
+Motivo owns task-level method and interaction while Tactus owns execution. The
+current method offers investigate, try, integrate, and conclude as optional
+actions, uses one shared provider-call budget, and keeps handoffs in `.motivo`.
+Project method text is replaceable; report shape remains a stable application
+boundary. [ADR-0007](adr/0007-motivo-task-method.md) supersedes the former
+projection-only charter for this surface.
+
+Useful next work includes task-level evaluation against direct-agent baselines,
+better bounded context selection, and turning demonstrated repeated procedures
+into optional Clef workflows. Improvements must be measured on real task
+outcomes, cost, and time; a report schema or a more elaborate method does not
+establish a capability gain.
+
+Accessibility, richer trace filtering, and signed installers remain useful.
+The existing Tactus Sessions interface still has no `session advance` planner.
+Motivo task persistence does not add a background scheduler, automatic external
+reconciliation, native-session replay, or isolation for parallel writers.
 
 ## Explicit non-goals for 0.3
 

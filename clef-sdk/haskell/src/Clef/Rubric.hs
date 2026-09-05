@@ -339,7 +339,9 @@ noViolationAbove severityCeiling = maybe True (<= severityCeiling) . critiqueWor
 
 -- | Project gated violations into one stable, structured result.  This is a
 -- pure view over the same Norms and Violations used by 'judge'; it does not
--- introduce another checker or wire contract.
+-- introduce another checker or wire contract.  The critique must come from
+-- judging this rubric.  Use 'gateCritique' to validate that correspondence
+-- before enforcing a gate on a manually constructed or retained critique.
 validationFailures :: ValidatorStage -> Severity -> Rubric artifact -> Critique -> [ValidationFailure]
 validationFailures stage minimumSeverity selectedRubric selectedCritique =
   mapMaybe projectFailure (critiqueViolations selectedCritique)
@@ -371,9 +373,27 @@ validationFailures stage minimumSeverity selectedRubric selectedCritique =
 
 -- | Enforce a delivery gate against an already computed Critique.  Choosing
 -- 'Correctness' gates both Correctness and Blocking violations; choosing
--- 'Blocking' gates only Blocking violations.
+-- 'Blocking' gates only Blocking violations.  The critique must classify every
+-- rubric norm exactly once and may only report valid violations of its checked
+-- norms.  Unchecked norms remain unknown rather than becoming violations;
+-- callers that require complete evidence must enforce that policy explicitly.
 gateCritique :: ValidatorStage -> Severity -> Rubric artifact -> Critique -> Workflow Critique
-gateCritique stage minimumSeverity selectedRubric selectedCritique =
+gateCritique stage minimumSeverity selectedRubric selectedCritique = do
+  -- Reuse the checker boundary's identity, classification, severity, and locus
+  -- validation.  This local label does not assert an artifact identity: a
+  -- Critique carries no candidate snapshot or version.
+  let request = NormCheckRequest "critique" "" (normRecord <$> rubricNorms selectedRubric)
+      result =
+        NormCheckResult
+          "critique"
+          (critiqueViolations selectedCritique)
+          (critiqueChecked selectedCritique)
+          (critiqueUnchecked selectedCritique)
+  _ <-
+    either
+      (workflowFailure . ("invalid critique for rubric: " <>))
+      pure
+      (validateNormCheckResult request result)
   case validationFailures stage minimumSeverity selectedRubric selectedCritique of
     [] -> pure selectedCritique
     failures -> liftIO (throwIO (ValidationFailed failures))

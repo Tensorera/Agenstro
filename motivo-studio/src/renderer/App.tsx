@@ -12,9 +12,11 @@ import { OverviewView } from "./components/OverviewView";
 import { PluginsView } from "./components/PluginsView";
 import { RunsView } from "./components/RunsView";
 import { SessionsView } from "./components/SessionsView";
+import { TasksView } from "./components/TasksView";
 import { ErrorToast, LoadingView, StudioHeader, StudioSidebar } from "./components/StudioChrome";
 import { WorkflowView } from "./components/WorkflowView";
 import { appendBounded, errorMessage } from "./format";
+import { useTasks } from "./useTasks";
 import {
   EVENT_PAGE_SIZE,
   isActionBusy,
@@ -25,7 +27,7 @@ import {
 
 export default function App() {
   const bridgeAvailable = "motivo" in window;
-  const [view, setView] = useState<NavigationView>("overview");
+  const [view, setView] = useState<NavigationView>("tasks");
   const [studio, setStudio] = useState<StudioView | null>(null);
   const [loading, setLoading] = useState(bridgeAvailable);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
@@ -188,7 +190,13 @@ export default function App() {
 
   const selectedRun = snapshot?.runs.find((run) => run.runId === selectedRunId) ?? null;
   const actionBusy = isActionBusy(activeAction) || actionStartBusy;
-  const actionControlsBusy = actionBusy || sessionAnswerBusy;
+  const taskController = useTasks(
+    studio?.handle,
+    actionBusy || sessionAnswerBusy || workspaceBusy,
+    setError,
+  );
+  const taskBusy = taskController.operating || taskController.running || taskController.loading;
+  const actionControlsBusy = actionBusy || sessionAnswerBusy || taskBusy;
 
   useEffect(() => {
     if (view !== "runs" || !selectedRunId) return;
@@ -303,6 +311,8 @@ export default function App() {
   async function chooseWorkspace(operation: "open" | "initialize"): Promise<void> {
     if (
       !("motivo" in window) ||
+      taskController.operationRef.current ||
+      taskController.runningRef.current ||
       actionOperationRef.current ||
       sessionAnswerOperationRef.current ||
       sessionListOperationRef.current ||
@@ -319,7 +329,7 @@ export default function App() {
           : await window.motivo.studio.initialize();
       if (selected) {
         acceptStudio(selected);
-        setView("overview");
+        setView("tasks");
         setEvents([]);
         setEventPage(null);
       }
@@ -333,6 +343,8 @@ export default function App() {
   async function refreshWorkspace(): Promise<void> {
     if (
       !studio ||
+      taskController.operationRef.current ||
+      taskController.runningRef.current ||
       actionOperationRef.current ||
       sessionAnswerOperationRef.current ||
       sessionListOperationRef.current ||
@@ -354,6 +366,9 @@ export default function App() {
   async function startAction(request: ActionRequest): Promise<void> {
     if (
       !studio ||
+      taskController.operationRef.current ||
+      taskController.runningRef.current ||
+      taskController.loading ||
       actionBusy ||
       actionOperationRef.current ||
       sessionAnswerOperationRef.current ||
@@ -439,6 +454,8 @@ export default function App() {
   async function answerSession(input: Omit<SessionAnswerInput, "workspaceHandle">): Promise<void> {
     if (
       !studio ||
+      taskController.operationRef.current ||
+      taskController.runningRef.current ||
       actionBusy ||
       actionOperationRef.current ||
       sessionAnswerOperationRef.current ||
@@ -509,12 +526,15 @@ export default function App() {
       <StudioHeader
         studio={studio}
         workspaceBusy={workspaceBusy}
-        actionBusy={actionControlsBusy}
+        actionBusy={
+          actionBusy || sessionAnswerBusy || taskController.operating || taskController.running
+        }
         {...sharedWorkspaceActions}
         onRefresh={() => void refreshWorkspace()}
       />
       <StudioSidebar
         view={view}
+        tasks={taskController.tasks.length}
         scripts={snapshot?.scripts.length}
         plugins={pluginCount}
         runs={snapshot?.runs.length}
@@ -527,7 +547,26 @@ export default function App() {
           <LoadingView />
         ) : (
           <div className={`view-scroll ${activeAction ? "with-action" : ""}`}>
-            {view === "overview" ? (
+            {view === "tasks" ? (
+              <TasksView
+                key={studio?.handle ?? "no-workspace"}
+                studio={studio}
+                tasks={taskController.tasks}
+                task={taskController.task}
+                selectedId={taskController.selectedId}
+                loading={taskController.loading}
+                operating={taskController.operating}
+                blocked={actionBusy || sessionAnswerBusy || workspaceBusy}
+                anyRunning={taskController.running}
+                onSelect={taskController.select}
+                onCreate={(input) => taskController.mutate("create", input)}
+                onContinue={(maxCalls, note) =>
+                  taskController.mutate("continue", { maxCalls, ...(note ? { note } : {}) })
+                }
+                onPause={() => void taskController.mutate("pause", {})}
+                {...sharedWorkspaceActions}
+              />
+            ) : view === "overview" ? (
               <OverviewView
                 studio={studio}
                 running={actionControlsBusy}
@@ -538,6 +577,7 @@ export default function App() {
               />
             ) : view === "workflow" ? (
               <WorkflowView
+                key={studio?.handle ?? "no-workspace"}
                 studio={studio}
                 goal={goal}
                 provider={provider}
@@ -551,8 +591,8 @@ export default function App() {
                     ...(provider ? { provider } : {}),
                   })
                 }
-                onCheck={() => void startAction({ kind: "check" })}
-                onRun={() => void startAction({ kind: "run" })}
+                onCheck={(scripts) => void startAction({ kind: "check", scripts })}
+                onRun={(scripts) => void startAction({ kind: "run", scripts })}
               />
             ) : view === "plugins" ? (
               <PluginsView
@@ -589,7 +629,7 @@ export default function App() {
                 selectedSessionId={selectedSessionId}
                 busy={sessionListBusy || sessionCurrentBusy}
                 answering={sessionAnswerBusy}
-                actionBusy={actionBusy}
+                actionBusy={actionBusy || taskBusy}
                 onSelect={selectSession}
                 onReload={() => {
                   if (studio) void loadSessionList(studio.handle);

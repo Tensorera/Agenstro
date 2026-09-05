@@ -40,6 +40,8 @@ const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 const DEFAULT_CONFIG: &str = r#"api = "clef.runtime/v1"
 default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
+# Optional shared business-task instructions; omitted means no runtime prefix.
+# runtime_instructions = ".tactus/RUNTIME.md"
 
 [limits]
 max_concurrent_provider_calls = 4
@@ -79,20 +81,21 @@ observe_invocations = true
 const DEFAULT_PROMPT: &str = r#"# Tactus workflow scripts
 
 - Write Haskell workflow entry points below `.tactus/scripts/`.
-- Name runnable entries `NNN_slug.hs` or `NNN_slug.lhs`, with increasing
-  three-digit prefixes such as `010_atoms.hs`, `020_compose.hs`.
+- Name runnable entries `NNN_slug.hs` or `NNN_slug.lhs`, using a three-digit
+  ordering prefix such as `010_process.hs`.
 - Helpers may use any valid Haskell filename and nested directory.
 - Each entry is an ordinary command-line Haskell program using `clef-sdk`.
 - Route external work through configured providers, effects, or generic plugins.
-- Keep each provider call atomic: one entry, one deliverable, or one checkpoint.
-  Split independent work across bounded calls instead of one monolithic request.
+- Choose the smallest source change that fulfills the goal. Add entries or
+  split provider calls only when the task needs that structure.
 - Write multi-MiB business artifacts into the workspace and return a relative
   path, digest, and short summary instead of returning the whole artifact in a
   terminal plugin value.
 - Before inspecting or changing existing workflows, follow
   `.tactus/skills/tactus/SKILL.md`.
-- During generation, only create or update DSL sources. Do not invoke Cabal, GHC,
-  tests, or the generated workflows; Tactus owns those later phases.
+- During generation, create or update Haskell sources. Use `tactus check` with
+  explicit source paths for compiler feedback when useful. Do not execute the
+  generated business workflow or its external effects.
 "#;
 
 /// One provider registry entry.
@@ -145,8 +148,11 @@ pub struct RuntimeConfig {
     pub api: String,
     /// Provider selected when a command omits one.
     pub default_provider: String,
-    /// UTF-8 prompt path, relative to the workspace unless absolute.
+    /// UTF-8 generation prompt path, relative to the workspace unless absolute.
     pub instructions: PathBuf,
+    /// Optional business-task prompt path. Omission adds no runtime instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_instructions: Option<PathBuf>,
     /// Validated process, transport, and provider concurrency policy.
     #[serde(default)]
     pub limits: RuntimeLimits,
@@ -274,10 +280,27 @@ impl Workspace {
 
     /// Resolve and read the UTF-8 generation prompt.
     pub fn read_prompt(&self, config: &RuntimeConfig) -> Result<String, WorkspaceError> {
-        let path = if config.instructions.is_absolute() {
-            config.instructions.clone()
+        self.read_instructions_file(&config.instructions)
+    }
+
+    /// Resolve optional shared business-task instructions independently of generation.
+    pub fn read_runtime_instructions(
+        &self,
+        config: &RuntimeConfig,
+    ) -> Result<String, WorkspaceError> {
+        config
+            .runtime_instructions
+            .as_deref()
+            .map(|path| self.read_instructions_file(path))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    fn read_instructions_file(&self, path: &Path) -> Result<String, WorkspaceError> {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
         } else {
-            self.root.join(&config.instructions)
+            self.root.join(path)
         };
         fs::read_to_string(path).map_err(WorkspaceError::Io)
     }
@@ -315,7 +338,7 @@ impl Workspace {
         dispatcher: &Path,
     ) -> Result<JsonValue, WorkspaceError> {
         let config = self.load_config()?;
-        let instructions = self.read_prompt(&config)?;
+        let instructions = self.read_runtime_instructions(&config)?;
         let providers = self.dispatch_registry(dispatcher, "provider", &config.providers)?;
         let effects = self.dispatch_registry(dispatcher, "effect", &config.effects)?;
         let plugins = self.dispatch_registry(dispatcher, "plugin", &config.plugins)?;
@@ -1270,6 +1293,47 @@ mod tests {
         fs::create_dir_all(control.join(RUNS_DIRECTORY)).expect("runs directory");
         fs::write(control.join(CONFIG_NAME), DEFAULT_CONFIG).expect("config");
         fs::write(control.join(PROMPT_NAME), DEFAULT_PROMPT).expect("prompt");
+    }
+
+    #[test]
+    fn runtime_instructions_are_optional_and_resolve_independently_from_generation() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        write_minimal_control_layout(&workspace.control);
+        let mut config = workspace.load_config().expect("legacy config");
+        assert_eq!(config.runtime_instructions, None);
+        config.instructions = PathBuf::from("absent-author-guidance.md");
+        fs::write(
+            &workspace.config_path,
+            toml::to_string(&config).expect("config TOML"),
+        )
+        .expect("config");
+        assert_eq!(
+            workspace
+                .runtime_json()
+                .expect("runtime without author guide")["instructions"],
+            ""
+        );
+        assert!(workspace.read_prompt(&config).is_err());
+
+        let runtime_path = workspace.control.join("RUNTIME.md");
+        fs::write(&runtime_path, "BUSINESS_INSTRUCTIONS").expect("business guide");
+        for path in [PathBuf::from(".tactus/RUNTIME.md"), runtime_path.clone()] {
+            config.runtime_instructions = Some(path);
+            fs::write(
+                &workspace.config_path,
+                toml::to_string(&config).expect("config TOML"),
+            )
+            .expect("config");
+            assert_eq!(
+                workspace
+                    .runtime_json()
+                    .expect("runtime with business guide")["instructions"],
+                "BUSINESS_INSTRUCTIONS"
+            );
+        }
+        fs::remove_file(runtime_path).expect("remove guide");
+        assert!(workspace.runtime_json().is_err());
     }
 
     #[cfg(unix)]

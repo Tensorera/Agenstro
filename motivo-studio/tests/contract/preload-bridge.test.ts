@@ -45,7 +45,7 @@ describe("preload bridge", () => {
     electron.ipcRenderer.invoke.mockResolvedValueOnce({ ok: true, data: null });
     await expect(bridge.studio.openInitialized()).resolves.toBeNull();
     expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(IPC.studioOpenInitialized, {});
-    expect(Object.keys(bridge).sort()).toEqual(["actions", "runs", "sessions", "studio"]);
+    expect(Object.keys(bridge).sort()).toEqual(["actions", "runs", "sessions", "studio", "tasks"]);
     expect(Object.keys(bridge.sessions).sort()).toEqual(["answer", "current", "list"]);
   });
 
@@ -92,6 +92,38 @@ describe("preload bridge", () => {
       } as never),
     ).rejects.toThrow();
     expect(electron.ipcRenderer.invoke).not.toHaveBeenCalled();
+  });
+
+  it("validates task authority before IPC and exposes only task operations", async () => {
+    const bridge = installedBridge();
+    expect(Object.keys(bridge.tasks).sort()).toEqual([
+      "continue",
+      "create",
+      "current",
+      "list",
+      "pause",
+    ]);
+    await expect(
+      bridge.tasks.continue({
+        workspaceHandle: "aa665bbe-ece0-40e6-8235-2278635aee84",
+        taskId: "bb665bbe-ece0-40e6-8235-2278635aee84",
+        maxCalls: 21,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      bridge.tasks.list({
+        workspaceHandle: "aa665bbe-ece0-40e6-8235-2278635aee84",
+        root: "/other",
+      } as never),
+    ).rejects.toThrow();
+    expect(electron.ipcRenderer.invoke).not.toHaveBeenCalled();
+    electron.ipcRenderer.invoke.mockResolvedValueOnce({ ok: true, data: [] });
+    await expect(
+      bridge.tasks.list({ workspaceHandle: "aa665bbe-ece0-40e6-8235-2278635aee84" }),
+    ).resolves.toEqual([]);
+    expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith(IPC.taskList, {
+      workspaceHandle: "aa665bbe-ece0-40e6-8235-2278635aee84",
+    });
   });
 });
 

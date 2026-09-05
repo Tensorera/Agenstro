@@ -2,19 +2,20 @@
 title: Agenstro 0.3 architecture
 status: alpha
 owners: [architecture]
-last_verified: 2026-08-31
-applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, and Segno Haskell 0.3.0.0"
+last_verified: 2026-09-05
+applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, Segno Haskell 0.3.0.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
 
 # Agenstro 0.3 architecture
 
-Agenstro has three authoritative runtime components and one visual projection.
+Agenstro separates task method, typed composition, execution, and scheduling.
 Clef is a compact typed Haskell EDSL. Tactus is the Rust process/runtime kernel
 that prepares a project, executes Clef programs, supervises plugins, routes
 events, and records factual run evidence. Segno is the Haskell driver for typed
-persistent tasks. Motivo Studio is a TypeScript/React desktop client that asks
-Tactus for redacted, versioned projections.
+persistent tasks. Motivo Studio owns the replaceable method for a concrete
+engineering task, its local reports and user notes, and the desktop interface.
+It uses Tactus for provider execution and workspace projections.
 
 The architectural split is:
 
@@ -23,7 +24,7 @@ The architectural split is:
 | Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, typed norms/rubrics, incremental event sink, typed `Trigger state event`/`State state`/`PersistentTask` boundary | Provider catalogue, permission policy, custom language parser, scheduler loop, lifecycle database, artifacts, authentication |
 | Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio/session control DTOs and the durable session store | Haskell workflow/planner semantics, provider credentials, daemon/API service, replay, rollback, GUI |
 | Segno `0.3.0.0` | Single-node driver, trigger cursors, occurrence lifecycle, leases/fences, SQLite state plugin, interval/cron planning, invocation/result handoff to Tactus | Workflow value semantics, distributed consensus, exactly-once effects, rollback, replay, provider execution |
-| Motivo `0.3.0` | Electron window/preload boundary, React projection and decision elicitation, named Zod IPC, one top-level Tactus action | Workflow/planner semantics, session persistence, config/trace parsing, general filesystem/shell access, daemon, scheduler, replay, credentials |
+| Motivo `0.3.0` | Replaceable task method, bounded lead/investigator calls, `.motivo` task records, Electron/preload boundary, React task views and existing session answers | Process-supervision kernel, Tactus config/trace/session ownership, Segno state, arbitrary renderer filesystem/shell access, daemon, scheduler, replay, credentials |
 | Plugins | Provider/effect/domain behavior behind `agenstro.plugin/v1` | Core workflow composition and runtime ownership |
 
 ## Component flow
@@ -74,16 +75,19 @@ Motivo renderer (sandboxed React)
         |
         | named, Zod-validated IPC
         v
-Electron main (workspace root + child handle)
+Electron main (workspace root + task method + .motivo records)
         |
         | argv array, shell=false
         v
-tactus studio inspect/events + session list/show/answer
+tactus dispatch --namespace provider
+       + studio inspect/events + session list/show/answer
                        + generate/check/run/smoke
 ```
 
-Clef and Tactus remain one-shot. The optional Segno driver is the one resident
-local loop: it must wait even when no workflow process exists. Each trigger,
+Clef programs and Tactus invocations remain one-shot. Motivo can request a
+bounded sequence of agent calls while the application is open. The optional
+Segno driver owns persistent scheduling: it must wait even when no workflow
+process exists. Each trigger,
 state, workflow, provider, and effect invocation is still a separately
 correlated process operation; Segno does not expose a network daemon API.
 
@@ -171,6 +175,11 @@ Before running Haskell, Tactus materializes runtime JSON and sets
 current `tactus dispatch` executable, not directly at the configured plugin.
 This gives Clef a language-neutral configuration while retaining Rust process
 supervision for every call.
+
+Generation guidance comes from the TOML `instructions` path. The optional
+`runtime_instructions` path supplies the separate instruction prefix for Clef
+provider calls; omission means no prefix. Authoring instructions are never
+implicitly prepended to a business invocation.
 
 ## One-shot dispatch and process groups
 
@@ -329,13 +338,54 @@ Tactus run evidence:
     triggers/
 ```
 
-## Motivo Studio projection
+## Motivo task method and interface
 
 Motivo preserves Electron's process split. The React renderer has no Node
 integration; a context-isolated preload exposes one named operation per IPC
-channel. Electron main owns the selected root and launches an external
-`tactus` executable without a shell. It never gives the renderer an arbitrary
-command or filesystem primitive.
+channel. Electron main owns the selected root, task method, and task store;
+it launches the external `tactus` executable without a shell. It never gives
+the renderer an arbitrary command or filesystem primitive.
+
+The default method offers `investigate`, `try`, `integrate`, and `conclude`.
+They describe useful actions rather than a fixed order. A small change can be
+completed directly. A task need not become a Haskell script. The method can use
+existing tests and domain plugins, or create a small project plugin and fixtures
+when a missing observation actually blocks progress. Harness behavior and
+success criteria remain project-owned; Tactus still executes registered calls.
+
+Each continuation has a provider-call budget: four by default, at most twenty.
+The lead may request up to three independent investigation branches. Those
+calls count against the same budget, and Motivo reserves one call for lead
+integration before starting branches. Investigators receive separate prompts
+and are instructed not to edit. They share the working environment; this is
+not filesystem isolation or an enforced read-only capability. Dependent edits
+remain with the sequential lead.
+
+Each call runs through `tactus dispatch --namespace provider`. A call launches
+the native coding agent's complete episode, which may itself use many model
+and tool calls. Motivo's budget counts episodes, not tokens or internal tool
+actions. A later call receives a bounded handoff from recent task reports and
+source references; it does not resume a native agent session or replay tools.
+
+Motivo atomically saves `motivo.task/v1` documents under
+`.motivo/tasks/<uuid>.json`. The store includes goal, constraints, provider,
+user notes, call timing, and structured reports. These are distinct from
+Tactus diagnostic journals, legacy decision sessions, and Segno business state.
+`.motivo/METHOD.md` may replace the default method text. The fixed report
+protocol remains required so the application can read outcomes consistently.
+
+Task states are `ready`, `running`, `paused`, `needs_input`, `completed`,
+`failed`, and `outcome_unknown`. A pause waits for the current action and active
+investigations to finish. Budget exhaustion saves a handoff and pauses. A
+process interruption or unusable post-execution report is not automatically
+retried; continuing an unknown outcome requires a user note describing what
+was reconciled. Saving reports does not serialize a live continuation.
+
+`completed` records the agent's delivery claim. Report validation checks the
+document's structure, not whether a test was actually run or a requirement was
+met. This method does not train model weights or establish an improvement in
+model capability; those claims would need separate task-level evaluations.
+See [ADR-0007](adr/0007-motivo-task-method.md).
 
 Rust-owned queries form the read and decision boundary:
 
@@ -351,9 +401,10 @@ Studio queries use a `tactus.control/v1` envelope with `agenstro.studio/v1`
 data; session commands use the same envelope with `agenstro.session/v1` data.
 Commands, plugin options, prompt text, and absolute script paths do not cross
 the bridge.
-All 64-bit counters are decimal strings. Motivo therefore does not parse TOML,
-walk the journal directory, infer workflow state from open event kinds, or own
-a competing scheduler/replay model.
+All 64-bit counters in these Tactus projections are decimal strings. Motivo
+does not parse TOML, walk Tactus journal directories, or infer task completion
+from open event kinds. Its separate task reports may contain business content;
+they are not the redacted Studio projection.
 
 Projected events may carry a Tactus-owned `presentation` containing one of
 `state`, `info`, `warning`, or `error` plus natural-language text. Motivo shows
@@ -369,13 +420,14 @@ exhausted, but it keeps draining the child and discards only later raw frames.
 Projection pressure never kills Tactus or changes the action outcome; raw
 stdout/stderr and legacy events remain collapsed technical details.
 
-Sessions add a narrow inbound value without widening renderer authority. A
+The existing Sessions view adds a narrow inbound value without widening renderer authority. A
 brief teaches with findings and consequences before asking exactly one
 question. Motivo shows both the necessary question floor and conditional
 surface, returns one bounded choice, and refetches rather than retrying a stale
 turn. It never constructs a brief, selects a default, or writes session files.
-Planner execution is deferred until a pure, statically analysable planner has
-an explicit registration and invocation contract.
+The session planner and `session advance` remain deferred under ADR-0006.
+Motivo Tasks use their own method/report boundary and do not mutate or advance
+those legacy session documents.
 
 ## `agenstro.trace/v1` journal
 

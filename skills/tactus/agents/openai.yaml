@@ -1,4 +1,4 @@
 interface:
-  display_name: "Tactus Workspace"
-  short_description: "Safely inspect, edit, check, and run Tactus workflows"
-  default_prompt: "Use $tactus to inspect this workspace and safely update the requested workflow scripts."
+  display_name: "Tactus Authoring"
+  short_description: "Write and check Haskell workflows with Clef"
+  default_prompt: "Use $tactus to write or update the requested workflow and check its selected sources."

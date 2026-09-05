@@ -160,7 +160,7 @@ enum Command {
         #[arg(last = true)]
         arguments: Vec<String>,
     },
-    /// Ask a provider to generate a sequence of Haskell workflow scripts.
+    /// Ask a provider to create or update Haskell workflow sources.
     Generate {
         /// Natural-language workflow goal.
         #[arg(required = true, num_args = 1..)]
@@ -1693,7 +1693,7 @@ fn generate(
     let instructions = workspace.read_prompt(&config)?;
     let skill = workspace.read_tactus_skill()?;
     let generation_prompt = format!(
-        "{instructions}\n\n# Tactus agent skill\n\n{skill}\n\n# Generation goal\n\n{goal}\n\nCreate a multi-step workflow: begin with the smallest atomic scripts, then compose them into a final complete program. Only write DSL files; do not build or run them.\n"
+        "{instructions}\n\n# Tactus agent skill\n\n{skill}\n\n# Generation goal\n\n{goal}\n\nCreate or update the Haskell sources needed for this goal. Prefer the smallest sufficient change; helper-only changes and a single entry are valid. You may use `tactus check` with explicit source paths for compiler feedback. Do not execute the generated business workflow or its external effects.\n"
     );
     let mut params = Map::new();
     params.insert("prompt".to_owned(), Value::String(generation_prompt));
@@ -1886,7 +1886,7 @@ fn generate(
         && workspace_inspection_error.is_none()
         && generated_delta.is_empty())
     .then(|| {
-        "provider completed successfully but created or modified no non-empty numbered Haskell entry"
+        "provider completed successfully but created or modified no non-empty Haskell source"
             .to_owned()
     });
     // Ambiguity has priority over later, known cleanup/no-delta failures.  An
@@ -2047,7 +2047,7 @@ fn generate(
         render_presentation(&Presentation::new(
             PresentationCategory::Info,
             format!(
-                "Tactus found {} Haskell sources; {} numbered entries were created or changed. Run `tactus list` for file details.",
+                "Tactus found {} Haskell sources; {} sources were created or changed. Run `tactus list` for file details.",
                 scripts.len(),
                 generated_delta.len()
             ),
@@ -2063,7 +2063,6 @@ fn script_fingerprints(workspace: &Workspace) -> Result<BTreeMap<String, String>
     let scripts = discover_scripts(workspace)?;
     scripts
         .into_iter()
-        .filter(|script| script.runnable)
         .map(|script| {
             let bytes = fs::read(&script.path)?;
             Ok((script.relative_path, format!("{:x}", Sha256::digest(bytes))))
@@ -2076,7 +2075,7 @@ fn generated_script_delta(
     scripts: &[ScriptInfo],
 ) -> Result<Vec<String>, CliError> {
     let mut delta = Vec::new();
-    for script in scripts.iter().filter(|script| script.runnable) {
+    for script in scripts {
         let bytes = fs::read(&script.path)?;
         if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;

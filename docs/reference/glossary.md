@@ -2,7 +2,7 @@
 title: Agenstro glossary
 status: alpha
 owners: [documentation]
-last_verified: 2026-08-17
+last_verified: 2026-09-05
 applies_to: "Agenstro 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -38,8 +38,9 @@ execution to Tactus. A segno is a navigation mark in a score.
 
 **Motivo Studio**
 
-The TypeScript/React/Electron visual projection over Tactus. It exposes
-recognizable workflow and run patterns without becoming another runtime.
+The TypeScript task method and React/Electron interface over Tactus. It chooses
+task-level actions and owns `.motivo` task reports while Tactus supervises
+execution and Segno retains persistent scheduling.
 
 ## Workflow terms
 
@@ -49,8 +50,10 @@ A Clef `Workflow a`: a typed Haskell computation returning `a` on success.
 
 **Task**
 
-A provider-shaped Clef definition that renders a typed input as a prompt and
-decodes final text into a typed output.
+In Clef, a provider-shaped definition that renders a typed input as a prompt
+and decodes final text into a typed output. A **Motivo task** is a separate
+application record for a goal, constraints, provider, notes, and report history;
+it need not contain a Clef program or a Segno persistent task.
 
 **Operation**
 
@@ -83,6 +86,40 @@ A Haskell source below `.tactus/scripts` that does not match the runnable entry
 naming rule. Tactus checks helpers but does not select them for default run.
 
 ## Runtime terms
+
+**Task method**
+
+Motivo's replaceable guidance for selecting useful actions from current
+evidence. The default offers investigate, try, integrate, and conclude without
+requiring their order or use. `.motivo/METHOD.md` can override the guidance,
+but not the structured-report protocol.
+
+**Task report / handoff**
+
+A structured agent account of focus, findings, uncertainty, decisions,
+artifacts, checks, and the next action, stored in `.motivo/tasks/<uuid>.json`.
+It supports bounded context for later calls. It is neither independent
+verification nor a serialized agent continuation.
+
+**Lead / investigator**
+
+The lead carries the Motivo task and its dependent edits. Optional investigators
+answer independent questions in separate prompts. They share the working
+environment and are instructed to avoid writes; this is not an enforced
+read-only capability or parallel-write isolation.
+
+**Provider-call budget**
+
+The number of native agent episodes Motivo may request in one continuation:
+four by default, at most twenty, including investigation branches. One episode
+may contain multiple internal model/tool steps. A budget is not a token, price,
+or wall-clock guarantee.
+
+**Completed task**
+
+A Motivo task whose lead reports delivery. The application checks report
+structure, not whether the delivered work is correct. This is separate from a
+successful Tactus process result or a project test result.
 
 **Invocation**
 

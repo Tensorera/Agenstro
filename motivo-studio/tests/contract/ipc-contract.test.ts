@@ -9,6 +9,11 @@ import {
 } from "../../src/shared/contracts";
 import { runEventsInputSchema } from "../../src/shared/ipc";
 import {
+  taskContinueInputSchema,
+  taskCreateInputSchema,
+  taskReportSchema,
+} from "../../src/shared/task-contracts";
+import {
   SESSION_LIMITS,
   sessionAnswerInputSchema,
   sessionViewSchema,
@@ -17,6 +22,32 @@ import {
 const workspaceHandle = "aa665bbe-ece0-40e6-8235-2278635aee84";
 
 describe("bounded Motivo IPC contracts", () => {
+  it("requires an explicit nonempty script selection for check and run", () => {
+    for (const kind of ["check", "run"]) {
+      expect(() => actionRequestSchema.parse({ kind })).toThrow();
+      expect(() => actionRequestSchema.parse({ kind, scripts: [] })).toThrow();
+      expect(
+        actionRequestSchema.parse({ kind, scripts: [".tactus/scripts/010_main.hs"] }),
+      ).toMatchObject({ kind });
+    }
+  });
+
+  it("bounds task budgets and rejects extra workspace authority", () => {
+    const input = { workspaceHandle, taskId: "bb665bbe-ece0-40e6-8235-2278635aee84" };
+    expect(taskContinueInputSchema.parse(input).maxCalls).toBe(4);
+    for (const maxCalls of [0, 21, 1.5]) {
+      expect(() => taskContinueInputSchema.parse({ ...input, maxCalls })).toThrow();
+    }
+    expect(() => taskContinueInputSchema.parse({ ...input, root: "/other" })).toThrow();
+    expect(() =>
+      taskCreateInputSchema.parse({ workspaceHandle, goal: " ", provider: "codex" }),
+    ).toThrow();
+    expect(() =>
+      taskCreateInputSchema.parse({ workspaceHandle, goal: "fix it", provider: "../codex" }),
+    ).toThrow();
+    expect(() => taskReportSchema.parse({ status: "completed", summary: "done" })).toThrow();
+  });
+
   it("keeps JavaScript-unsafe counters as canonical decimal text", () => {
     expect(decimalStringSchema.parse("18446744073709551615")).toBe("18446744073709551615");
     for (const invalid of ["", "01", "-1", "1.0", " 1", "18446744073709551616"]) {

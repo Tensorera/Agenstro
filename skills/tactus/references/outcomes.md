@@ -1,26 +1,22 @@
-# Ambiguous outcomes and diagnostics
+# Run outcomes
 
-## Diagnose without replaying
+Inspect recorded evidence without executing a workflow again:
 
-When execution fails, times out, is interrupted, loses its terminal response, or reports `OutcomeUnknown`:
-
-1. Do not rerun automatically.
-2. Record the command, selected script, occurrence or run ID, exit state, and bounded diagnostic.
-3. Inspect read-only evidence: Motivo's run projection or `tactus studio inspect`, the selected run's `tactus studio events`, Segno history, the last durable business-state revision, and the external system keyed by the occurrence's idempotency key.
-4. Distinguish a definite failure from an ambiguous result. A transport failure can occur after the external effect completed.
-5. Ask the user or operator to reconcile the external outcome before choosing a new attempt.
-
-`OutcomeUnknown` is terminal and intentionally not retried automatically. Do not mark it succeeded or failed, edit the private Segno SQLite lifecycle database, or assume at-least-once delivery authorizes duplication. A successful earlier checkpoint remains durable even if a later step is ambiguous.
-
-## Present diagnostics
-
-Prefer canonical runtime presentation fields when available:
-
-```text
-[state] Run started.
-[info] Type-check completed.
-[warning] The terminal outcome could not be proven; no retry was attempted.
-[error] GHC rejected the selected source.
+```sh
+tactus studio inspect --root /path/to/project
+tactus studio events <run-id> --root /path/to/project --after 0 --limit 100
 ```
 
-Keep stable error codes, exit codes, file and line locations, integrity (`ok`, `partial`, or `corrupt`), and bounded raw payloads as technical details. `partial` means incomplete evidence, not failure; `corrupt` means the trace cannot be trusted as complete. Never expose credentials, provider options, prompts, absolute private paths, or unrestricted journal contents in a summary.
+A successful `check` establishes compilation. A successful `run` establishes
+that the selected local entry returned successfully. Neither proves that a
+model's report or an external business outcome is correct.
+
+After a timeout, interruption, lost terminal response, or `OutcomeUnknown`,
+retain the run ID and diagnostics, inspect the relevant artifacts or external
+system, and reconcile the outcome before another attempt. Journals are evidence,
+not deterministic replay or rollback. Do not rewrite runtime journals or Segno
+lifecycle databases to change an outcome.
+
+Report what was checked, what the records show, and what remains unknown.
+Preserve useful error codes and source locations. Tactus's presentation categories
+are `state`, `info`, `warning`, and `error`; stderr alone is not proof of failure.

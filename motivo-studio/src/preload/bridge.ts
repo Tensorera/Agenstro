@@ -11,6 +11,14 @@ import {
 } from "../shared/contracts";
 import { sessionListSchema, sessionViewSchema } from "../shared/session-contracts";
 import {
+  taskWorkspaceInputSchema,
+  taskCurrentInputSchema,
+  taskCreateInputSchema,
+  taskContinueInputSchema,
+  taskListSchema,
+  taskDocumentSchema,
+} from "../shared/task-contracts";
+import {
   actionCancelInputSchema,
   actionStartInputSchema,
   emptyInputSchema,
@@ -90,6 +98,15 @@ export function installBridge(): void {
         invoke(IPC.sessionCurrent, sessionCurrentInputSchema, sessionViewSchema, input),
       answer: (input) =>
         invoke(IPC.sessionAnswer, sessionAnswerInputSchema, sessionViewSchema, input),
+    },
+    tasks: {
+      list: (input) => invoke(IPC.taskList, taskWorkspaceInputSchema, taskListSchema, input),
+      current: (input) =>
+        invoke(IPC.taskCurrent, taskCurrentInputSchema, taskDocumentSchema, input),
+      create: (input) => invoke(IPC.taskCreate, taskCreateInputSchema, taskDocumentSchema, input),
+      continue: (input) =>
+        invoke(IPC.taskContinue, taskContinueInputSchema, taskDocumentSchema, input),
+      pause: (input) => invoke(IPC.taskPause, taskCurrentInputSchema, taskDocumentSchema, input),
     },
   };
   contextBridge.exposeInMainWorld("motivo", bridge);

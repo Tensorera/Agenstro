@@ -160,9 +160,10 @@ fn providers_use_exact_permissive_native_arguments_and_normalize_results() {
         };
         let (code, frames, diagnostics) = call_provider(provider, "invoke", params);
         assert_eq!(code, 0, "{provider}: {diagnostics}");
-        assert_eq!(frames.len(), 2, "{provider}: {frames:?}");
-        assert_eq!(frames[0]["type"], "event");
-        let terminal = &frames[1];
+        assert_eq!(frames.len(), 3, "{provider}: {frames:?}");
+        assert_eq!(frames[0]["event"]["type"], "provider.progress");
+        assert_eq!(frames[1]["event"]["type"], "provider.diagnostic");
+        let terminal = &frames[2];
         assert_eq!(terminal["ok"], true);
         assert_eq!(terminal["value"]["text"], "TACTUS_OK");
         assert_eq!(terminal["value"]["full_bypass"], provider != "opencode");
@@ -442,7 +443,13 @@ fn completed_observation_recovers_both_crash_windows_and_is_forgettable() {
         }),
     );
     assert_eq!(forgotten["forgotten"], true);
-    assert!(!workspace.path().join(".tactus/path-effect").exists());
+    assert!(
+        fs::read_dir(workspace.path().join(".tactus/path-effect"))
+            .expect("shared state directory remains available to writers")
+            .next()
+            .is_none(),
+        "forget removes all observation records"
+    );
 }
 
 #[test]
@@ -502,7 +509,7 @@ fn hosts_bound_their_own_request_input() {
     let mut input =
         br#"{"api":"agenstro.plugin/v1","id":"a","method":"describe","params":{"padding":""#
             .to_vec();
-    input.extend(std::iter::repeat_n(b'x', 1024 * 1024));
+    input.extend(std::iter::repeat_n(b'x', 16 * 1024 * 1024));
     input.extend_from_slice(br#""}}"#);
     let mut output = Vec::new();
     let mut diagnostics = Vec::new();
@@ -610,18 +617,39 @@ fn claude_twenty_thousand_thinking_events_are_aggregated() {
         }),
     );
     assert_eq!(code, 0, "{diagnostics}");
-    assert_eq!(frames.len(), 2, "raw native events leaked: {frames:?}");
-    assert_eq!(frames[0]["type"], "event");
-    assert_eq!(frames[0]["event"]["type"], "provider.diagnostic");
-    assert_eq!(frames[0]["event"]["native_events"], 20_001);
-    assert_eq!(frames[0]["event"]["thinking_events_suppressed"], 20_000);
     assert!(
-        frames
-            .iter()
-            .all(|frame| frame["event"]["type"] != "provider.raw")
+        frames.len() <= 32,
+        "native events were not bounded: {frames:?}"
     );
-    assert_eq!(frames[1]["ok"], true);
-    assert_eq!(frames[1]["value"]["text"], "TACTUS_OK");
+    let (terminal, events) = frames.split_last().expect("terminal");
+    let summaries = events
+        .iter()
+        .filter(|frame| frame["event"]["type"] == "provider.diagnostic")
+        .collect::<Vec<_>>();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["event"]["native_events"], 20_001);
+    assert_eq!(summaries[0]["event"]["thinking_events_suppressed"], 20_000);
+    for event in events {
+        assert_eq!(event["type"], "event");
+        if event["event"]["type"] != "provider.diagnostic" {
+            assert_eq!(event["event"]["type"], "provider.progress");
+            assert!(
+                event["event"]
+                    .as_object()
+                    .expect("progress")
+                    .keys()
+                    .all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "type" | "provider" | "phase" | "native_lines_seen"
+                        )
+                    })
+            );
+        }
+    }
+    assert_eq!(terminal["type"], "result");
+    assert_eq!(terminal["ok"], true);
+    assert_eq!(terminal["value"]["text"], "TACTUS_OK");
 }
 
 #[test]

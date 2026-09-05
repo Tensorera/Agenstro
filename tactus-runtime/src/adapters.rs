@@ -2521,7 +2521,6 @@ fn observe_end(params: &Map<String, Value>) -> Result<(Value, SnapshotWarnings),
         "after_count":after.paths.len()
     });
     let value = commit_observation(&original, &workspace, &invocation, &value)?;
-    remove_empty_state_directory(&workspace);
     Ok((value, capture.warnings))
 }
 
@@ -2802,7 +2801,6 @@ fn cleanup_expired_observation_files_with_retention(
             }
         }
     }
-    remove_empty_state_directory(workspace);
     Ok(())
 }
 
@@ -2837,7 +2835,6 @@ fn forget_state(params: &Map<String, Value>) -> Result<Value, AdapterError> {
             }
         }
         cleanup_completed_observation(&path)?;
-        remove_empty_state_directory(&workspace);
         return Ok(json!({"forgotten":true}));
     }
     let Some(claimed) = claim_state(&path, true, "state_not_found")? else {
@@ -2866,7 +2863,6 @@ fn forget_state(params: &Map<String, Value>) -> Result<Value, AdapterError> {
         restore_claim(&claimed, &path)?;
         operation?;
     }
-    remove_empty_state_directory(&workspace);
     Ok(json!({"forgotten":true}))
 }
 
@@ -3233,6 +3229,9 @@ fn snapshot_path_was_skipped(
 }
 
 fn state_directory(workspace: &Path, create: bool) -> Result<PathBuf, AdapterError> {
+    // Keep this shared directory after deleting its records. Another one-shot
+    // host may have prepared a path here but not yet opened its temporary file;
+    // removing an apparently empty directory would make that write fail.
     let tactus = workspace.join(".tactus");
     let state = tactus.join("path-effect");
     for directory in [&tactus, &state] {
@@ -3516,11 +3515,6 @@ fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn remove_empty_state_directory(workspace: &Path) {
-    let state = workspace.join(".tactus").join("path-effect");
-    let _ = fs::remove_dir(state);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3674,6 +3668,48 @@ mod tests {
                 .to_string()
                 .contains("snapshot budget exceeded")
         );
+    }
+
+    #[test]
+    fn pending_state_write_survives_concurrent_observation_cleanup() {
+        for forget_existing in [false, true] {
+            let temporary = tempfile::tempdir().expect("temporary workspace");
+            let workspace = dunce::canonicalize(temporary.path()).expect("workspace");
+            let mut params = Map::from_iter([
+                ("workspace".to_owned(), json!(workspace)),
+                ("invocation".to_owned(), json!({"step":"earlier"})),
+            ]);
+            let earlier =
+                forget_existing.then(|| observe_begin(&params).expect("earlier observation").0);
+            let token = unique_token();
+            // Pause a writer after it has prepared its directory but before
+            // creating the temporary file. Run the other caller's cleanup in
+            // that exact window rather than depending on thread scheduling.
+            let pending = observation_state_path(&workspace, &token, true).expect("pending path");
+            let record = EffectState {
+                api: PLUGIN_API.to_owned(),
+                effect: PATH_EFFECT_NAME.to_owned(),
+                state_kind: StateKind::Observation,
+                workspace: workspace.to_string_lossy().into_owned(),
+                invocation: Some(json!({"step":"pending"})),
+                snapshot: snapshot_workspace(&workspace).expect("snapshot").snapshot,
+            };
+            if let Some(earlier) = earlier {
+                params.insert("begin".to_owned(), earlier);
+                assert_eq!(
+                    forget_state(&params).expect("forget earlier")["forgotten"],
+                    true
+                );
+            } else {
+                cleanup_expired_observation_files(&workspace).expect("concurrent begin cleanup");
+            }
+            write_state_atomic(&pending, &record)
+                .expect("cleanup must not remove a writer's directory");
+            let persisted = load_state(&pending, "observation_not_found").expect("persisted state");
+            validate_state(&persisted, &workspace, StateKind::Observation).expect("valid state");
+            assert_eq!(persisted.invocation, record.invocation);
+            assert_eq!(persisted.snapshot, record.snapshot);
+        }
     }
 
     #[test]

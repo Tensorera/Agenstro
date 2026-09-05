@@ -90,6 +90,11 @@ describe("main IPC sender boundary", () => {
       sessions: vi.fn(),
       session: vi.fn(),
       answer: vi.fn().mockResolvedValue(answered),
+      taskList: vi.fn().mockResolvedValue([]),
+      taskCurrent: vi.fn(),
+      taskCreate: vi.fn(),
+      taskContinue: vi.fn(),
+      taskPause: vi.fn(),
       start: vi.fn(),
       cancel: vi.fn(),
       dispose: vi.fn(),
@@ -114,6 +119,23 @@ describe("main IPC sender boundary", () => {
       error: { category: "internal" },
     });
     expect(controller.answer).toHaveBeenCalledOnce();
+
+    const tasks = handlers.get(IPC.taskList);
+    if (!tasks) throw new Error("task list handler was not registered");
+    await expect(tasks(sender, { workspaceHandle: input.workspaceHandle })).resolves.toEqual({
+      ok: true,
+      data: [],
+    });
+    expect(controller.taskList).toHaveBeenCalledWith({ workspaceHandle: input.workspaceHandle });
+    await expect(
+      tasks(sender, { workspaceHandle: input.workspaceHandle, root: "/other" }),
+    ).resolves.toMatchObject({ ok: false });
+    await expect(
+      tasks({ sender: webContents, senderFrame: { routingId: 2 } } as never, {
+        workspaceHandle: input.workspaceHandle,
+      }),
+    ).resolves.toMatchObject({ ok: false });
+    expect(controller.taskList).toHaveBeenCalledOnce();
     unregister();
   });
 });

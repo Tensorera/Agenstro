@@ -1,9 +1,9 @@
 # Agenstro 0.3 documentation
 
-Agenstro is a typed, local-first system for coding-agent workflows. Clef
-defines workflows in Haskell, Tactus executes and observes them in Rust, Segno
-adds persistent typed triggers/state, and Motivo Studio projects the runtime in
-TypeScript/React/Electron.
+Agenstro supports concrete coding-agent tasks and reusable typed workflows.
+Motivo Studio owns the task method and local report history; Tactus supervises
+execution in Rust. Clef provides Haskell composition when useful, and Segno
+adds persistent typed triggers/state.
 
 ## Start here
 
@@ -12,7 +12,7 @@ TypeScript/React/Electron.
 | Install or upgrade the commands | [Installation](install.md) |
 | Build one model-free workflow | [First workflow](getting-started.md) |
 | Select a provider, model, or effort | [Provider setup](providers.md) |
-| Open a workspace visually | [Motivo Studio](motivo-studio.md) |
+| Work on a goal with bounded agent calls | [Motivo Studio Tasks](motivo-studio.md) |
 
 ## Develop workflows and capabilities
 
@@ -41,11 +41,11 @@ TypeScript/React/Electron.
 | Clef | Typed Haskell workflow and persistent-task values | Provider catalogue, scheduling loop, sandbox |
 | Tactus | Workspace, process supervision, protocol routing, diagnostic evidence | Workflow semantics, credentials, rollback, replay |
 | Segno | Single-node triggers, occurrences, leases, fences, SQLite state | Exactly-once effects, distributed consensus, provider execution |
-| Motivo Studio | Redacted visual and action projection over Tactus | Config parsing, general shell, second runtime |
+| Motivo Studio | Replaceable task method, `.motivo` task reports, and workspace interface | Tactus config/session/journal ownership, process kernel, scheduler, general shell |
 
 The names follow a musical coordination metaphor: Clef establishes the typed
 frame, Tactus supplies the execution pulse, Segno marks persistent continuation,
-and Motivo makes recurring structure visible. Agenstro names the agent
+and Motivo supplies a reusable pattern of task work. Agenstro names the agent
 orchestration as a whole.
 
 ## Safety in one paragraph
@@ -61,7 +61,9 @@ without a trustworthy terminal result and must be reconciled before retry.
 - [Architecture](architecture.md) explains ownership and data flow.
 - [CLI reference](reference/cli-v0.3.md) lists supported commands.
 - [Segno plugin wire](reference/segno-plugin-wire-v1.md) defines trigger/state backends.
-- [Studio control API](reference/studio-control-v1.md) defines Motivo projections.
+- [Studio control API](reference/studio-control-v1.md) defines Tactus workspace projections.
+- [Motivo task method](adr/0007-motivo-task-method.md) defines task ownership
+  without changing the Tactus control API or Segno persistence.
 - [Public roadmap](roadmap.md) separates current guarantees from later work.
 - [ADR-0003](adr/0003-haskell-dsl-and-local-plugins.md) and
   [ADR-0004](adr/0004-haskell-segno-persistent-tasks.md) retain design rationale.

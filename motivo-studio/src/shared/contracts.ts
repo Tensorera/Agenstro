@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { SessionBridge } from "./session-contracts";
+import type { TaskBridge } from "./task-contracts";
 
 export const LIMITS = {
   actionOutputBytes: 16_384,
@@ -225,8 +226,18 @@ export const actionRequestSchema = z.discriminatedUnion("kind", [
       provider: registryNameSchema.optional(),
     })
     .strict(),
-  z.object({ kind: z.literal("check") }).strict(),
-  z.object({ kind: z.literal("run") }).strict(),
+  z
+    .object({
+      kind: z.literal("check"),
+      scripts: z.array(z.string().min(1).max(1024)).min(1).max(1000),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("run"),
+      scripts: z.array(z.string().min(1).max(1024)).min(1).max(1000),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("smoke"),
@@ -302,4 +313,5 @@ export interface MotivoBridge {
     }): Promise<StudioEventPage>;
   };
   readonly sessions: SessionBridge;
+  readonly tasks: TaskBridge;
 }

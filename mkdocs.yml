@@ -59,6 +59,7 @@ nav:
           - ADR 0004 - Haskell Segno persistent tasks: adr/0004-haskell-segno-persistent-tasks.md
           - ADR 0005 - Typed norms and refinement: adr/0005-norms-rubrics-and-refinement.md
           - ADR 0006 - Durable session boundary: adr/0006-motivo-session-pattern.md
+          - ADR 0007 - Motivo task method: adr/0007-motivo-task-method.md
       - Design bundle implementation status: design-bundle-status.md
       - Migration:
           - 0.2 to Haskell 0.3: migrations/0.2-to-haskell-0.3.md

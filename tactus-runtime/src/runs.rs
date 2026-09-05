@@ -610,10 +610,7 @@ fn scan_events(path: &Path, run_id: &str, closed: bool) -> Result<EventFacts, Ru
     let mut last_event_unix_ms = None;
     let mut outcome_unknown = false;
     let mut complete = true;
-    loop {
-        let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? else {
-            break;
-        };
+    while let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? {
         let read = line.bytes.len();
         total_bytes = total_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         if total_bytes > MAX_EVENT_SCAN_BYTES {
@@ -659,10 +656,7 @@ fn read_event_page(
     let mut retained_bytes = 0_usize;
     let mut events = Vec::new();
     let mut complete = true;
-    loop {
-        let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? else {
-            break;
-        };
+    while let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? {
         let read = line.bytes.len();
         scanned_bytes = scanned_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         if scanned_bytes > MAX_EVENT_SCAN_BYTES {

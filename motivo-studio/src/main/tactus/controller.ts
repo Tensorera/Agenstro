@@ -48,6 +48,15 @@ import {
   type SessionView,
 } from "../../shared/session-contracts";
 import { MainProcessError } from "../errors";
+import { TaskService } from "../tasks/service";
+import { invokeProvider } from "../tasks/transport";
+import {
+  type TaskCreateInput,
+  type TaskContinueInput,
+  type TaskCurrentInput,
+  type TaskDocument,
+  type TaskSummary,
+} from "../../shared/task-contracts";
 
 const CONTROL_STDOUT_BYTES = 9 * 1_024 * 1_024;
 const CONTROL_STDERR_BYTES = 64 * 1_024;
@@ -274,6 +283,7 @@ export class TactusController {
   private pendingControlOperations = 0;
   private readonly controlDrainWaiters = new Set<() => void>();
   private disposed = false;
+  private readonly taskService: TaskService;
 
   constructor(options: TactusControllerOptions) {
     this.executable =
@@ -283,6 +293,13 @@ export class TactusController {
     this.actionOutputLimitFrames = options.actionOutputLimitFrames ?? ACTION_MAX_FRAMES;
     this.actionPendingLimitFrames = options.actionPendingLimitFrames ?? ACTION_MAX_PENDING_FRAMES;
     this.emitEvent = options.emit;
+    this.taskService = new TaskService({
+      invoke: (input) =>
+        invokeProvider(input, {
+          executable: this.executable,
+          commandPrefix: this.commandPrefix,
+        }),
+    });
   }
 
   current(): StudioView | null {
@@ -423,6 +440,19 @@ export class TactusController {
     this.requireIdle();
     this.requireControlIdle();
     const request = actionRequestSchema.parse(rawRequest);
+    if (request.kind === "check" || request.kind === "run") {
+      for (const selected of request.scripts) {
+        const script = this.snapshot?.scripts.find((entry) => entry.relativePath === selected);
+        if (!script || (request.kind === "run" && !script.runnable)) {
+          throw new MainProcessError({
+            code: "script_selection_invalid",
+            category: "validation",
+            retryable: false,
+            message: "Select sources from the current workspace; only numbered entries can run.",
+          });
+        }
+      }
+    }
     const actionId = randomUUID();
     const startedAtUnixMs = Date.now().toString();
     const child = this.spawn(commandForAction(request, root), root);
@@ -474,6 +504,7 @@ export class TactusController {
 
   dispose(): void {
     this.disposed = true;
+    this.taskService.dispose();
     if (this.active && !this.active.finished) {
       this.active.cancelRequested = true;
       this.active.child.kill();
@@ -847,12 +878,12 @@ export class TactusController {
   }
 
   private requireIdle(): void {
-    if (this.active) {
+    if (this.active || this.taskService.busy) {
       throw new MainProcessError({
         code: "action_busy",
         category: "busy",
         retryable: true,
-        message: "Wait for the active Tactus action to finish or cancel it.",
+        message: "Wait for the active task or Tactus action to finish.",
       });
     }
   }
@@ -887,6 +918,46 @@ export class TactusController {
       message: boundedDiagnostic(result.stderr || result.stdout || "Tactus failed.", root),
     });
   }
+
+  taskList(input: { workspaceHandle: string }): Promise<TaskSummary[]> {
+    return this.taskService.list(this.requireWorkspaceHandle(input.workspaceHandle));
+  }
+
+  taskCurrent(input: TaskCurrentInput): Promise<TaskDocument> {
+    return this.taskService.current(
+      this.requireWorkspaceHandle(input.workspaceHandle),
+      input.taskId,
+    );
+  }
+
+  taskCreate(input: TaskCreateInput): Promise<TaskDocument> {
+    this.requireIdle();
+    this.requireControlIdle();
+    const root = this.requireWorkspaceHandle(input.workspaceHandle);
+    if (
+      !this.snapshot?.registries.providers.some(
+        (provider) => provider.name === input.provider && provider.available,
+      )
+    ) {
+      throw new MainProcessError({
+        code: "provider_unavailable",
+        category: "validation",
+        retryable: false,
+        message: "Choose an available provider from this workspace.",
+      });
+    }
+    return this.taskService.create(root, input);
+  }
+
+  taskContinue(input: TaskContinueInput): Promise<TaskDocument> {
+    this.requireIdle();
+    this.requireControlIdle();
+    return this.taskService.continue(this.requireWorkspaceHandle(input.workspaceHandle), input);
+  }
+
+  taskPause(input: TaskCurrentInput): Promise<TaskDocument> {
+    return this.taskService.pause(this.requireWorkspaceHandle(input.workspaceHandle), input.taskId);
+  }
 }
 
 /** Parse only Tactus's canonical human presentation line; all other text remains raw. */
@@ -911,9 +982,9 @@ export function commandForAction(request: ActionRequest, root: string): string[]
         request.goal,
       ];
     case "check":
-      return ["check", "--root", root];
+      return ["check", "--root", root, ...request.scripts];
     case "run":
-      return ["run", "--root", root];
+      return ["run", "--root", root, ...request.scripts.flatMap((script) => ["--script", script])];
     case "smoke":
       return [
         "smoke",

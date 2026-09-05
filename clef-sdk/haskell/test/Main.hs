@@ -117,6 +117,7 @@ runTests = do
           ("norm wire format is explicit and forward compatible", testNormWire),
           ("rubrics batch serialisable checks through an ordinary plugin", testNormRubric workspace executable),
           ("rubric validation gates emit structured failures", testValidationGate workspace executable),
+          ("critique gates reject mismatched evidence without changing unchecked policy", testCritiqueGateIntegrity workspace executable),
           ("refinement is bounded and feeds critiques back", testNormRefinement workspace executable),
           ("runtime config schema", testRuntimeConfig executable workspace),
           ("JSONL terminal protocol", testProtocolRules),
@@ -156,6 +157,7 @@ runQualityStageTests = do
     [ ("parallel uses structured concurrency", testParallel workspace executable),
       ("provider concurrency is bounded by runtime limits", testProviderConcurrency workspace executable),
       ("rubric validation gates emit structured failures", testValidationGate workspace executable),
+      ("critique gates reject mismatched evidence without changing unchecked policy", testCritiqueGateIntegrity workspace executable),
       ("runtime config schema", testRuntimeConfig executable workspace),
       ("direct Clef plugin transport is bounded", testDirectPluginTransportBounds workspace executable)
     ]
@@ -592,6 +594,59 @@ testValidationGate workspace executable =
     styleCritique <- runWorkflow runtime (judge styleRubric "candidate")
     accepted <- runWorkflow runtime (gateCritique ReviewerStage Correctness styleRubric styleCritique)
     assertEqual "Style remains advisory at a Correctness gate" [Style] (violationSeverity <$> critiqueViolations accepted)
+
+testCritiqueGateIntegrity :: FilePath -> FilePath -> IO ()
+testCritiqueGateIntegrity workspace executable =
+  withRuntime (testConfig workspace executable) $ \runtime -> do
+    let identity = NormId "review.required"
+        foreignIdentity = NormId "other.blocking"
+        requiredNorm = norm identity "Review the candidate." Blocking :: Norm Text
+        selectedRubric = rubric [requiredNorm]
+        checked = Critique [] [identity] []
+        malformedCritiques =
+          [ ( "foreign norm identity",
+              Critique [violation foreignIdentity Blocking "foreign failure"] [foreignIdentity] []
+            ),
+            ("missing classification", Critique [] [] []),
+            ("duplicate checked identity", Critique [] [identity, identity] []),
+            ("duplicate unchecked identity", Critique [] [] [identity, identity]),
+            ("overlapping classifications", Critique [] [identity] [identity]),
+            ( "violation of an unchecked norm",
+              Critique [violation identity Blocking "unverified failure"] [] [identity]
+            ),
+            ( "severity downgraded below the gate",
+              checked {critiqueViolations = [violation identity Style "downgraded failure"]}
+            ),
+            ( "invalid violation locus",
+              checked
+                { critiqueViolations =
+                    [ (violation identity Blocking "invalid location")
+                        { violationLocus = Just (Locus "candidate" (Just 0) Nothing Nothing Nothing Nothing)
+                        }
+                    ]
+                }
+            )
+          ]
+    forM_ malformedCritiques $ \(label, selectedCritique) ->
+      assertWorkflowError
+        label
+        isInvalidCritique
+        (runWorkflow runtime (gateCritique ReviewerStage Blocking selectedRubric selectedCritique))
+    assertWorkflowError
+      "gate rejects duplicate rubric identities"
+      isInvalidCritique
+      (runWorkflow runtime (gateCritique ReviewerStage Blocking (rubric [requiredNorm, requiredNorm]) checked))
+
+    -- Completeness is caller policy: an honest unchecked Blocking norm must
+    -- remain unknown, while malformed evidence above must never be accepted.
+    unchecked <- runWorkflow runtime (judge selectedRubric "candidate")
+    assertEqual "guidance-only Blocking norm is unchecked" [identity] (critiqueUnchecked unchecked)
+    accepted <- runWorkflow runtime (gateCritique ReviewerStage Blocking selectedRubric unchecked)
+    assertEqual "severity gate preserves unchecked evidence" unchecked accepted
+    assertEqual "default refinement still allows unchecked norms" True (refineAcceptable defaultRefinePolicy unchecked)
+  where
+    isInvalidCritique (RequirementFailed message) = "invalid critique for rubric:" `Text.isPrefixOf` message
+    isInvalidCritique _ = False
 
 testNormRefinement :: FilePath -> FilePath -> IO ()
 testNormRefinement workspace executable =

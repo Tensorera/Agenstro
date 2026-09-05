@@ -24,6 +24,11 @@ export const IPC = {
   sessionList: "motivo:session:list",
   sessionCurrent: "motivo:session:current",
   sessionAnswer: "motivo:session:answer",
+  taskList: "motivo:task:list",
+  taskCurrent: "motivo:task:current",
+  taskCreate: "motivo:task:create",
+  taskContinue: "motivo:task:continue",
+  taskPause: "motivo:task:pause",
 } as const;
 
 export const emptyInputSchema = z.object({}).strict();

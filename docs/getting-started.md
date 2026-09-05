@@ -162,8 +162,9 @@ tactus generate --provider codex `
 ```
 
 Generation reads `.tactus/PROMPT.md` and the bundled Tactus skill. It may create
-new numbered entries or update existing scripts, but it does not automatically
-run them. Always inspect and check the result:
+new numbered entries or update existing scripts and helpers. It may compile-check
+selected sources for feedback, but it does not automatically run the business
+workflow. Always inspect and check the result:
 
 ```powershell
 tactus list
@@ -174,6 +175,10 @@ tactus check --all
 A later `generate` call sees the current workspace and may add or modify
 scripts. It does not erase earlier workflows by policy, so state the desired
 scope precisely and use version control.
+
+`PROMPT.md` guides the authoring agent only. Business provider calls have no
+shared instruction prefix by default. If they need one, create a separate
+file and set `runtime_instructions = ".tactus/RUNTIME.md"` in `tactus.toml`.
 
 ## 7. Read the next guide
 

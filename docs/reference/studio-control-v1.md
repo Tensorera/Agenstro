@@ -2,8 +2,8 @@
 title: Studio control API v1
 status: alpha
 owners: [tactus, motivo]
-last_verified: 2026-08-31
-applies_to: "tactus.studio/v1 and tactus.control/v1"
+last_verified: 2026-09-05
+applies_to: "agenstro.studio/v1 and tactus.control/v1"
 platforms: [windows, ubuntu]
 ---
 
@@ -17,6 +17,14 @@ page through validated trace events, not to implement plugins.
 Human-decision reads and answers share the `tactus.control/v1` envelope but
 have their own bounded domain contract; see
 [Session document and control API v1](session-control-v1.md).
+
+Motivo Tasks are a separate local application boundary. Named renderer IPC
+calls reach Motivo's main-process task service, which owns
+`.motivo/tasks/<uuid>.json` and the optional `.motivo/METHOD.md` guidance.
+Provider requests use the existing Tactus plugin dispatch protocol. Tasks do
+not add commands or fields to this Studio API, and their report history is not
+derived from trace events. See [Motivo Studio](../motivo-studio.md) and
+[ADR-0007](../adr/0007-motivo-task-method.md).
 
 ## Commands
 
@@ -165,7 +173,9 @@ run id, or summary count yields `corrupt`.
   the supervised command; Studio clients must not read either implementation
   detail directly.
 - Motivo starts Tactus with an argument array and `shell: false`; the renderer
-  receives only validated projections and never owns the workspace root.
+  receives validated Studio projections and never owns the workspace root.
+  Motivo's separate task IPC additionally carries validated business reports;
+  it does not change this API's projection or redaction rules.
 
 The current reference limits and DTOs live in the Rust
 `tactus-runtime::studio` module. Changes that break these rules require a new

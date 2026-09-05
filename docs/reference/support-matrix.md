@@ -2,8 +2,8 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-08-31
-applies_to: "Clef/Segno 0.3.0.0 + Tactus 0.3.0"
+last_verified: 2026-09-05
+applies_to: "Clef/Segno 0.3.0.0, Tactus 0.3.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
 
@@ -31,7 +31,8 @@ successful call to a live provider account.
 | Tactus session control | `tactus.control/v1` + `agenstro.session/v1` | Current gate | Current gate | bounded list/show, static link/reparse refusal, typed document invariants, cross-process turn CAS, right-biased answers, atomic current-state replacement, and append-only answer evidence use Rust tests; hostile concurrent namespace replacement is outside the trusted-workspace model |
 | `tactus smoke` | Offline unless `--live` | Current gate | Current gate | default sends no model prompt; CI uses fakes; live native/account compatibility is opt-in evidence |
 | Topology-holes example | Four Haskell workflow stages + offline Rust oracle | Current gate | Current gate | real Tactus -> runghc -> Clef -> dispatch acceptance runs 010 -> 040 with parallel reviews and observer journals; the oracle verifies holes/Euler independently |
-| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; run projection plus strict session list/show/answer, stale-turn refetch, and decision rendering use fake Tactus with no model credentials; packaged app requires external `tactus` |
+| Motivo Studio | TypeScript/Electron `0.3.0`, Node >=22.12 | Current gate | Current gate | format/lint/typecheck/Vitest/package; task and workspace views plus existing session answers use fake Tactus with no model credentials; packaged app requires external `tactus` |
+| Motivo task method | `motivo.task/v1`, local IPC and `.motivo` records | Current gate | Current gate | fake reports/processes exercise call budgets, optional investigation branches, method override, pause, report validation, atomic history, and interrupted-outcome handling; no independent task-correctness or capability claim |
 | Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
 | Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
 | Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
@@ -41,7 +42,7 @@ successful call to a live provider account.
 
 ## CLI and network behavior
 
-| Command | Offline by default | Can execute arbitrary trusted code | Can contact a provider |
+| Command or UI action | Offline by default | Can execute arbitrary trusted code | Can contact a provider |
 | --- | --- | --- | --- |
 | `init`, `list`, `prompt`, `doctor`, `studio inspect/events`, `runs list/summarize/unfinished/show`, `session list/show` | Yes | Plugin commands may be inspected, not invoked by these queries | No |
 | `runs archive/gc` | Yes | Moves or deletes only validated eligible local journals; dry-run unless `--yes` | No |
@@ -51,6 +52,8 @@ successful call to a live provider account.
 | `smoke` | Yes | Starts selected plugin executable | Only with `--live` for provider adapters |
 | `plugin-call` | Depends on method | Yes | Yes for provider/network plugins |
 | `generate` | No | Provider may edit the workspace | Yes |
+| Motivo Tasks: create/list/show | Yes | Reads/writes Motivo task records | No |
+| Motivo Tasks: continue | No | Native agent may edit, run project checks, or create/invoke project plugins through Tactus | Yes; lead and investigators share the call budget |
 | `segno init/list/status/history` | Yes | Local layout and SQLite inspection | No |
 | `segno install` | No provider call | Runs the trusted task in describe mode through Tactus | Only if the task violates the describe contract with direct `IO` |
 | `segno once/driver` | Depends on installed tasks | Yes; executes each due Clef task through Tactus | Yes if a task invokes a provider/network plugin |
@@ -65,6 +68,8 @@ successful call to a live provider account.
 | `segno driver --poll-seconds` | Positive finite maximum idle wait; default 1 second; it is neither the trigger interval nor a task deadline |
 | Observation delivery | Bounded and non-authoritative; provider/UI layers may aggregate or coalesce progress, while Tactus drops excess low-priority callbacks into `events_dropped`; callback degradation becomes `observation_error`, and neither changes the authoritative invocation terminal |
 | Motivo action-output projection | A byte/frame overrun emits one `[warning]`, discards later raw projection, and continues draining Tactus without changing the child outcome |
+| Motivo task call budget | 1 through 20 native agent episodes per continuation, default 4; includes investigators and reserves lead integration capacity; not a token/cost/time guarantee |
+| Motivo task pause and interruption | Pause waits for current calls; budget exhaustion saves a handoff; interruption or an unusable post-execution report is not retried automatically, and unknown continuation requires a user note |
 | Occurrence delivery | At least once; tasks should deduplicate external effects with the occurrence idempotency key |
 | Ambiguous execution | `OutcomeUnknown` is terminal and not automatically retried; successful checkpoints remain durable and require explicit external reconciliation |
 
@@ -82,6 +87,14 @@ successful call to a live provider account.
 - Segno adds a local long-lived scheduling loop and business-state CAS. It is
   not a network daemon, auth service, artifact store, workspace transaction, or
   external-effect rollback mechanism.
+- Motivo owns task-level method and `.motivo` records, using existing Tactus
+  dispatch for provider calls. It does not add a Tactus domain loop, change
+  `tactus.control/v1`, write Tactus sessions, or change Segno scheduling.
+- Motivo investigator prompts ask for read-only work in a shared environment.
+  They do not enforce filesystem restrictions or isolate concurrent writes.
+  A task's `completed` and check reports are agent claims, not certified results.
+- Motivo task history contains goals, constraints, notes, and reports. It is
+  separate from redacted Tactus journals and is not a workspace backup or replay.
 - `workspace.paths` is final-state evidence only. Direct `IO`, reads, transient
   writes, and concurrent processes can fall outside or blur its evidence.
 - Run journals redact prompt/provider raw fields and summarize terminal values
@@ -112,8 +125,10 @@ MkDocs, and Electron Forge likewise use dedicated subdirectories below
 
 ## Version combination
 
-The supported source combination is Clef `0.3.0.0`, Segno `0.3.0.0`, and
-Tactus `0.3.0`. There is no compatibility claim for mixing it with historical
-workers, daemon state, the old Motivo daemon/runtime ownership, or the removed
+The supported source combination is Clef `0.3.0.0`, Segno `0.3.0.0`,
+Tactus `0.3.0`, and Motivo Studio `0.3.0`. Motivo Tasks add a local application
+contract without changing the existing Tactus Studio/session wires. There is no
+compatibility claim for mixing this with historical workers, daemon state,
+the old Motivo gRPC/PTY ownership, or the removed
 Python/Rust Segno registry and database. See the [migration
 guide](../migrations/0.2-to-haskell-0.3.md) for side-by-side context.

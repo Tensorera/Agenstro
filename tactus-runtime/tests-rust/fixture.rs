@@ -47,6 +47,21 @@ fn main() {
         "stream" => success(&id, Duration::from_millis(400), false),
         "stderr" => success(&id, Duration::ZERO, true),
         "generate" => generate(&request, &id),
+        "generate-helper" | "generate-blank-helper" => {
+            let workspace = request["params"]["workspace"].as_str().expect("workspace");
+            let directory = std::path::Path::new(workspace).join(".tactus/scripts/Helpers");
+            std::fs::create_dir_all(&directory).expect("helper directory");
+            let source = if mode == "generate-blank-helper" {
+                " \n\t"
+            } else {
+                "module Helpers.Value where\nanswer :: Int\nanswer = 42\n"
+            };
+            std::fs::write(directory.join("Value.hs"), source).expect("helper source");
+            write_json(&serde_json::json!({
+                "type":"result", "id":id, "ok":true,
+                "value":{"prompt":request["params"]["prompt"]}
+            }));
+        }
         "topology-stage" => topology_stage(&request, &id),
         "echo-params" => write_json(&serde_json::json!({
             "type":"result",

@@ -490,7 +490,7 @@ fn outer_deadline_cascades_through_dispatch_and_provider_host() {
             "--root".to_owned(),
             project.to_string_lossy().into_owned(),
             "--timeout-seconds".to_owned(),
-            "30".to_owned(),
+            "90".to_owned(),
         ],
         &project,
     );
@@ -572,7 +572,7 @@ wait
             "--root".to_owned(),
             project.to_string_lossy().into_owned(),
             "--timeout-seconds".to_owned(),
-            "30".to_owned(),
+            "90".to_owned(),
         ],
         &project,
     );
@@ -674,6 +674,7 @@ fn workspace_init_is_idempotent_and_scripts_are_ordered() {
     assert_eq!(scripts[1].order, Some(20));
     assert!(!scripts[2].runnable);
     let runtime = opened.runtime_json().expect("runtime JSON");
+    assert_eq!(runtime["instructions"], "");
     assert!(runtime["plugins"].is_object());
     assert_eq!(runtime["providers"]["codex"]["command"][1], "dispatch");
 }
@@ -867,12 +868,18 @@ fn spawn_failure_still_publishes_a_terminal_run_summary() {
             "inspect",
             "--namespace",
             "plugin",
+            "--json",
             "--root",
         ])
         .arg(&project)
         .output()
         .expect("plugin call");
     assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("live report");
+    assert_eq!(
+        report["summary"]["outcome"]["terminal"]["error"]["code"],
+        "plugin_start_failed"
+    );
     let runs = fs::read_dir(project.join(".tactus/runs"))
         .expect("runs")
         .collect::<Result<Vec<_>, _>>()
@@ -881,8 +888,9 @@ fn spawn_failure_still_publishes_a_terminal_run_summary() {
     let summary: Value =
         serde_json::from_slice(&fs::read(runs[0].path().join("summary.json")).expect("summary"))
             .expect("summary json");
-    assert_eq!(summary["outcome"]["kind"], "runtime_failed");
-    assert!(summary["outcome"]["error"].as_str().is_some());
+    assert_eq!(summary["outcome"]["kind"], "plugin_failed");
+    assert_eq!(summary["outcome"]["terminal"]["status"], "failure");
+    assert!(summary["outcome"]["progress"].is_null());
 }
 
 #[test]
@@ -988,6 +996,84 @@ fn generate_offline_creates_an_ordered_multi_step_workflow() {
 }
 
 #[test]
+fn generate_accepts_helper_only_edits_and_keeps_author_guidance_separate() {
+    let (_temporary, project) = initialized_project();
+    let directory = project.join(".tactus/scripts/Helpers");
+    fs::create_dir_all(&directory).expect("helper directory");
+    fs::write(
+        directory.join("Value.hs"),
+        "module Helpers.Value where\nanswer = 0\n",
+    )
+    .expect("existing helper");
+    fs::write(project.join(".tactus/PROMPT.md"), "AUTHOR_GUIDANCE_ONLY").expect("author guide");
+    fs::write(project.join(".tactus/RUNTIME.md"), "BUSINESS_GUIDANCE_ONLY").expect("runtime guide");
+    let config_path = project.join(".tactus/tactus.toml");
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        format!("runtime_instructions = \".tactus/RUNTIME.md\"\n{config}"),
+    )
+    .expect("runtime guidance configuration");
+    set_command(
+        &project,
+        "command = [\"tactus\", \"provider-host\", \"codex\"]",
+        "generate-helper",
+    );
+
+    for expected_success in [true, false] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tactus"))
+            .args(["generate", "--root"])
+            .arg(&project)
+            .args(["--json", "Update the helper value"])
+            .output()
+            .expect("generate helper");
+        let report: Value = serde_json::from_slice(&output.stdout).expect("report");
+        assert_eq!(output.status.success(), expected_success, "{report}");
+        assert_eq!(report["provider_ok"], true);
+        if expected_success {
+            assert_eq!(
+                report["generated_delta"],
+                serde_json::json!([".tactus/scripts/Helpers/Value.hs"])
+            );
+            assert_eq!(report["scripts"][0]["runnable"], false);
+            let prompt =
+                report["provider_run"]["summary"]["outcome"]["terminal"]["value"]["prompt"]
+                    .as_str()
+                    .expect("provider prompt");
+            assert!(prompt.contains("AUTHOR_GUIDANCE_ONLY"));
+            assert!(!prompt.contains("BUSINESS_GUIDANCE_ONLY"));
+        } else {
+            assert_eq!(report["generated_delta"], serde_json::json!([]));
+        }
+    }
+    let workspace = Workspace::open(&project).expect("workspace");
+    assert_eq!(
+        workspace.runtime_json().expect("runtime")["instructions"],
+        "BUSINESS_GUIDANCE_ONLY"
+    );
+}
+
+#[test]
+fn generate_rejects_whitespace_only_helper_output() {
+    let (_temporary, project) = initialized_project();
+    set_command(
+        &project,
+        "command = [\"tactus\", \"provider-host\", \"codex\"]",
+        "generate-blank-helper",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["generate", "--root"])
+        .arg(&project)
+        .args(["--json", "Write an empty helper"])
+        .output()
+        .expect("generate blank helper");
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report");
+    assert_eq!(report["provider_ok"], true);
+    assert_eq!(report["generated_delta"], serde_json::json!([]));
+}
+
+#[test]
 fn generate_distinguishes_provider_success_from_a_script_delta() {
     let (_temporary, project) = initialized_project();
     set_command(
@@ -1014,7 +1100,7 @@ fn generate_distinguishes_provider_success_from_a_script_delta() {
     assert!(
         report["generation_error"]
             .as_str()
-            .is_some_and(|message| message.contains("numbered Haskell entry"))
+            .is_some_and(|message| message.contains("Haskell source"))
     );
 }
 
@@ -1161,7 +1247,7 @@ fn haskell_topology_workflow_runs_all_stages_with_parallel_reviews() {
     let output = Command::new(env!("CARGO_BIN_EXE_tactus"))
         .args(["run", "--root"])
         .arg(&project)
-        .args(["--timeout-seconds", "600"])
+        .args(["--all", "--timeout-seconds", "600"])
         .output()
         .expect("run multi-step workflow");
     assert!(

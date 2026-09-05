@@ -1,40 +1,68 @@
 ---
 name: tactus
-description: Safely inspect, diagnose, edit, type-check, and run selected Tactus Haskell workflow scripts. Use when a request mentions Tactus, a `.tactus` workspace, files below `.tactus/scripts`, `tactus list/doctor/check/run`, Motivo run evidence, or a Segno `OutcomeUnknown` result.
+description: Write, edit, type-check, and run Tactus Haskell workflows using Clef. Use for .tactus/scripts, Tactus workspace configuration, typed provider calls, or effect plugin integration. This skill documents authoring and execution rules; task-solving methods belong to Motivo or the caller.
 ---
 
-# Tactus
+# Tactus authoring
 
-Work through the installed `tactus` CLI and the workspace's ordinary files. Let Tactus own discovery, ordering, configuration validation, execution, and run evidence; independently constrain every agent-edited script path to `.tactus/scripts`.
+Use the workspace's installed `tactus` CLI and Clef SDK. Start with
+`tactus list --root <workspace> --json`; inspect the selected source and needed
+imports. Use `tactus doctor --root <workspace> --json` to diagnose setup errors.
 
-## Workflow
+## Source rules
 
-1. Resolve the requested start path to an absolute path. Search it and its parents for `.tactus/tactus.toml`; do not initialize a workspace unless the user explicitly asks.
-2. Run `tactus list --root <path> --json` to confirm the workspace and inventory scripts. Run `tactus doctor --root <path> --json` when environment, SDK, configuration, or plugin health matters.
-3. Canonicalize every requested script and require it to remain below that workspace's `.tactus/scripts` directory. Stop if a symlink, junction, `..`, or absolute path escapes it.
-4. Read the specified scripts plus only the directly needed local helper modules. Preserve unrelated files and existing user changes.
-5. Make the narrow requested edit. Review the diff before invoking Tactus.
-6. Type-check only the selected sources when practical. Run only explicitly selected numbered entry points and only when execution is requested or is a clearly required verification step.
-7. Report the selected files, exact validation performed, exit status, and concise diagnostics. Keep raw structured details available but do not make raw JSON the default presentation.
+- Store Haskell sources below `.tactus/scripts`. Files named
+  `NNN_name.hs` or `NNN_name.lhs` are runnable entries; helpers are ordinary Haskell modules.
+  Keep selected paths within this directory, including resolved symlinks.
+- Entries declare `module Main (main) where`, import `Clef`, and expose
+  `main :: IO ()`. Run a `Workflow a` with `runTactus`; use ordinary Haskell
+  functions and values for local computation.
+- `Task input output` describes a provider call. `textTask` accepts text;
+  `jsonTask` needs a `FromJSON output` instance. `invoke` uses the configured
+  default provider; `invokeWith (providerRef "name")` selects one explicitly.
+  Decoding checks output structure, not the truth of its claims.
+- `operation "effect-name" "method" params` describes a registered effect;
+  `perform` executes it. Inputs need `ToJSON`, outputs need `FromJSON`.
+  Register project-specific plugins in `.tactus/tactus.toml` when needed.
+  Follow the existing `agenstro.plugin/v1` protocol; keep logs off stdout.
+- `parallel`, `parallelAll`, and `parallelAllBounded` isolate calls, not their
+  filesystem effects. Concurrent branches share the workspace unless the
+  caller supplies separate locations. They do not provide transactional rollback.
+- `.tactus/PROMPT.md` (`instructions` in `.tactus/tactus.toml`) guides script generation only.
+  Shared business-call instructions use the separate optional
+  `runtime_instructions` file setting. Existing workspaces may need to move
+  business instructions to that file. `tactus init` preserves existing files.
 
-Read [references/commands.md](references/commands.md) for exact selection syntax and [references/outcomes.md](references/outcomes.md) whenever a run is ambiguous, timed out, interrupted, or reports `OutcomeUnknown`.
+A complete entry, without extra stage or report types:
 
-## Authority and safety
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+module Main (main) where
 
-- Treat `.tactus/tactus.toml`, `.tactus/runs`, temporary Clef runtime configuration, and Segno lifecycle databases as runtime-owned. Do not edit them unless the user explicitly requests the specific file and understands the boundary.
-- Never run every entry merely to validate one edited script. `check` compiles; `run` executes trusted Haskell `IO` and may invoke providers, plugins, processes, or filesystem effects.
-- Inspect a selected entry and its imports before running it. Use live providers, credentials, or broad effects only when the requested task actually calls for them; do not infer such execution from a read-only diagnosis.
-- Do not use `--keep-going` by default. Preserve the first failure and diagnose it before widening scope.
-- Do not treat trace evidence as deterministic replay state or proof that an external effect did not occur.
-- Never blindly retry `OutcomeUnknown`, a timeout after dispatch, a lost terminal response, or another ambiguous external result.
+import Clef
+import qualified Data.Text.IO as Text
 
-## User-facing diagnostics
+main :: IO ()
+main = do
+  result <- runTactus $ invoke
+    (textTask "explain" (\topic -> "Explain briefly: " <> topic))
+    "the difference between parsing and validation"
+  Text.putStrLn result
+```
 
-Summarize output with only these labels:
+Compile the selected source to catch Haskell errors:
 
-- `[state]` lifecycle transitions and terminal outcomes
-- `[info]` normal progress and factual observations
-- `[warning]` partial, ambiguous, degraded, or retry-sensitive conditions
-- `[error]` definite failures
+```sh
+tactus check --root /path/to/project .tactus/scripts/010_explain.hs
+```
 
-Prefer the runtime's canonical presentation category and message when present. Put command lines, stable codes, file/line locations, exit codes, and bounded raw JSON under a clearly marked technical-details section. Do not infer a successful external outcome from an exit code alone.
+Execution is a separate command and can call models or modify project files:
+
+```sh
+tactus run --root /path/to/project --script .tactus/scripts/010_explain.hs
+```
+
+Read [references/commands.md](references/commands.md) for selection and plugin
+syntax. Never blindly retry `OutcomeUnknown`, a timeout after dispatch, or a
+missing terminal response: inspect the recorded and external outcome first.
+See [references/outcomes.md](references/outcomes.md) for diagnostic commands.

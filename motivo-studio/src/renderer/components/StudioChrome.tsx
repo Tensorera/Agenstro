@@ -79,6 +79,7 @@ export function StudioHeader({
 
 interface StudioSidebarProps {
   readonly view: NavigationView;
+  readonly tasks?: number | undefined;
   readonly scripts?: number | undefined;
   readonly plugins: number;
   readonly runs?: number | undefined;
@@ -88,6 +89,7 @@ interface StudioSidebarProps {
 
 export function StudioSidebar({
   view,
+  tasks,
   scripts,
   plugins,
   runs,
@@ -96,8 +98,16 @@ export function StudioSidebar({
 }: StudioSidebarProps) {
   return (
     <aside className="sidebar">
-      <span className="nav-label">Workspace</span>
+      <span className="nav-label">Work</span>
       <nav className="navigation" aria-label="Studio views">
+        <NavButton
+          active={view === "tasks"}
+          icon="spark"
+          label="Tasks"
+          count={tasks}
+          onClick={() => onNavigate("tasks")}
+        />
+        <span className="nav-label advanced-nav-label">Workspace tools</span>
         <NavButton
           active={view === "overview"}
           icon="overview"
@@ -134,10 +144,10 @@ export function StudioSidebar({
         />
       </nav>
       <div className="sidebar-foot">
-        <strong>LOCAL CONTROL SURFACE</strong>
-        TypeScript + React
+        <strong>WORK THAT CARRIES FORWARD</strong>
+        Goals, findings, and decisions
         <br />
-        Tactus runtime
+        stay with your workspace.
       </div>
     </aside>
   );

@@ -2,7 +2,7 @@
 
 Agenstro `0.3` has four current implementation surfaces: Clef is the Haskell
 EDSL, Tactus is the Rust execution kernel, Segno is the Haskell persistent-task
-driver, and Motivo Studio is the TypeScript/React visual projection. Do not
+driver, and Motivo Studio owns the TypeScript task method and React interface. Do not
 revive the removed Python/Rust Segno stack or a legacy daemon path.
 
 All contributions are accepted under the repository's GNU AGPL v3.0-only
@@ -32,7 +32,7 @@ network-fetched tool or package dependencies.
 | `tactus-runtime/tests-rust/` | Current Tactus and adapter tests |
 | `examples/topology-holes/` | Current four-stage integration example |
 | `docs/` | Current documentation plus clearly marked migration history |
-| `motivo-studio/` | Current Electron main/preload/React projection over Tactus control DTOs |
+| `motivo-studio/` | Task method and `.motivo` records in Electron main, named preload IPC, React task/workspace views, and Tactus transport |
 | `segno-flow/haskell/src/` | Current Segno driver, lifecycle, plugin hosts, and SQLite backend |
 | `segno-flow/haskell/test/` | Offline virtual-clock, persistence, and protocol tests |
 | `segno-flow/examples/` | Explicit opt-in persistent-task examples; default gates use fakes |
@@ -69,9 +69,19 @@ current compatibility targets. Git history is the migration record.
 9. Keep persistent scheduling in Segno. Its versioned business-state CAS and
    explicit checkpoints must remain separate from Tactus journals and from
    Segno-owned lifecycle records.
-10. Keep Motivo a projection. Renderer code cannot import Node/Electron, and
-    Electron main must call versioned Tactus control commands instead of
-    parsing `tactus.toml`, `runtime.json`, or trace directories.
+10. Keep the task method in Motivo and execution in Tactus. Motivo may choose
+    useful next actions and atomically persist its own `.motivo` task records;
+    it must invoke configured providers and plugins through Tactus. Renderer
+    code cannot import Node/Electron or gain arbitrary filesystem/shell IPC.
+    Keep Tactus config, journals, sessions, and Segno state with their owners.
+11. Treat investigate, try, integrate, and conclude as optional method actions,
+    not a mandatory pipeline. Project tests and plugins provide observations;
+    Motivo validates the report shape, not universal task correctness. Method
+    customization must not silently change the report protocol.
+12. Count investigation branches against the same provider-call budget and
+    reserve a lead call to integrate them. Investigators are instructed to be
+    read-only; this is not a sandbox or permission to write concurrently.
+    Interrupted or ambiguous calls must not be repeated automatically.
 
 ## Documentation ownership
 
@@ -84,6 +94,7 @@ Each public fact has one canonical page:
 - provider configuration: `docs/providers.md`;
 - plugin implementation: `docs/plugin-authoring.md`;
 - logs and state transitions: `docs/observability.md`;
+- task method and desktop interaction: `docs/motivo-studio.md`;
 - backup/retention/recovery: `docs/operations.md`; and
 - exact commands/wire shapes: `docs/reference/`.
 
@@ -199,8 +210,12 @@ npm --prefix motivo-studio run package
 `npm ci` belongs to the explicit Bootstrap or clean Release path rather than
 every warm-cache iteration.
 
-These tests use a fake Tactus process. Never put provider credentials into the
-desktop test or packaging environment.
+These tests use fake Tactus processes and provider reports. Cover task budget
+accounting, report validation, optional investigation branches, pause and
+interruption, method overrides, and atomic task history alongside IPC and
+workspace projections. Never put provider credentials into the desktop test or
+packaging environment. [ADR-0007](docs/adr/0007-motivo-task-method.md) records
+the task ownership boundary.
 
 The reference norm checker is a standalone Python plugin. Its fixture runner
 checks both domain results and the JSONL terminal/correlation rules:
@@ -255,6 +270,8 @@ norm plugin; it is not a Tactus runtime requirement.
 Never commit:
 
 - `.tactus/` state copied from a target project, especially run journals;
+- `.motivo/tasks/` records copied from a target project, including goals,
+  user notes, and agent reports;
 - provider credentials, `.env` files, private keys, or machine-local registry
   configuration;
 - `secretdoc/` private design notes;

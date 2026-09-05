@@ -1,18 +1,19 @@
 # Motivo Studio 0.3
 
-Motivo Studio is the small desktop control plane for a Tactus workspace. It is a
-TypeScript, React, Vite, and Electron application; Tactus remains the only owner
-of workflow discovery, plugin configuration, health checks, execution, and run
-history.
+Motivo Studio owns the task method and desktop interface for a Tactus workspace.
+It is a TypeScript, React, Vite, and Electron application. Tasks use bounded
+agent calls and local report history; Tactus owns workflow discovery, plugin
+configuration, health checks, process supervision, and diagnostic run history.
 
 The canonical user guide is [Motivo Studio](../docs/motivo-studio.md), with
 installation prerequisites maintained in [Install Agenstro](../docs/install.md).
 This component README stays focused on application development and packaging.
 
-The first 0.3 release intentionally has no editor, terminal, daemon, scheduler,
-recovery manager, gRPC client, protobuf-generated client, or direct journal
-reader. It visualizes the versioned `tactus.control/v1` API and launches normal
-Tactus CLI actions.
+The task method offers investigate, try, integrate, and conclude as optional
+actions. It does not require a Haskell workflow for ordinary work. Every agent
+call still passes through Tactus. Existing views consume the versioned
+`tactus.control/v1` API and launch normal Tactus CLI actions. There is no source
+editor, general terminal, background scheduler, or direct Tactus journal reader.
 
 Motivo Studio is licensed with the rest of Agenstro under
 [GNU AGPL v3.0 only](../LICENSE).
@@ -89,20 +90,23 @@ the workspace Tactus opened.
 
 ## Views
 
+- **Tasks**, the default, accepts a goal, constraints, and provider, then runs
+  a chosen provider-call budget. It shows report history, call timing,
+  findings, uncertainty, decisions, artifacts, reported checks, and user notes.
 - **Overview** shows workspace health, script and plugin totals, and recent run
   outcomes.
 - **Workflow** shows Tactus-ordered Haskell scripts and starts Generate, Check,
-  or Run. Generate accepts an optional registered provider.
+  or Run with explicit script selection. Generate accepts an optional registered provider.
 - **Plugins** shows provider, effect, and generic-plugin projections and starts
   offline or live smoke probes.
 - **Runs** pages through the typed event projection for one opaque run ID. Open
   future event kinds remain available under collapsed technical details.
-- **Sessions** lists durable Tactus decision sessions, explains findings and
+- **Sessions** retains compatibility with durable Tactus decision sessions, explains findings and
   stakes, compares options on shared coordinates, and returns one turn-scoped
   answer with an optional note. A stale or already-consumed turn is refetched
   instead of retried.
 
-One Generate, Check, Run, or Smoke action may be active at a time. The visible
+Workflow actions and task execution are serialized. The existing action drawer's visible
 log contains only `[state]`, `[info]`, `[warning]`, and `[error]` plus bounded
 natural-language messages. Raw stdout/stderr, exit information, event kinds,
 and structured payloads are bounded and available under collapsed technical
@@ -132,25 +136,55 @@ React renderer
 Electron preload (context isolation + sandbox)
     |
     v
-Electron main -- owns the selected absolute root and child process
+Electron main -- owns selected root, task method, task records, and child handles
     | argv array, shell: false, bounded stdout/stderr
     v
-tactus studio inspect / studio events / session list|show|answer / init / generate / check / run / smoke
+tactus dispatch --namespace provider
+       + studio inspect / studio events / session list|show|answer
+       + init / generate / check / run / smoke
 ```
 
 The renderer receives a random workspace handle and a redacted
-`agenstro.studio/v1` snapshot. It never supplies or receives the absolute root.
-The main process never reads `tactus.toml`, `runtime.json`, scripts, journal, or
-session files. Control JSON is size-limited and validated before it crosses IPC. Action
-output and open event payload strings are scrubbed for the selected root as a
-second line of defense.
+`agenstro.studio/v1` snapshot. Workspace control calls use that handle rather
+than passing the authoritative absolute root.
+The main process does not read Tactus config, scripts, journals, or session
+files directly. It reads `.motivo/METHOD.md` and owns atomic
+`.motivo/tasks/<uuid>.json` records. Control JSON and task reports are bounded
+and validated before they cross IPC. Task reports contain business content;
+the redaction contract of the Studio snapshot does not apply to them. Existing
+action output and open trace payload strings are scrubbed for the selected root.
 
-Session control is intentionally narrower than planning. Motivo does not
+The compatibility session interface is intentionally narrower than Tasks. It does not
 create briefs, invoke a planner, apply defaults on a timer, or expose a dead
 `advance` action; Tactus must publish a later brief through a future, explicit
 planner contract. Every session IPC call is bound to the opaque workspace
 handle that produced its view, so a delayed answer cannot be redirected into a
 newly opened workspace.
+
+## Task method implementation
+
+`src/main/tasks/method.ts` holds the default method and report instructions.
+An optional project `.motivo/METHOD.md` replaces method text only; the
+`motivo.task/v1` record and structured-report contract stay fixed. The service
+and store are separate from Tactus sessions and Segno persistence.
+
+The default continuation budget is four provider calls, with a maximum of
+twenty. Calls include the lead and up to three concurrent investigation
+branches; a lead integration call is reserved before branches start.
+Investigators are asked not to edit, but share the working environment.
+Parallel writing and read-only sandbox enforcement are not supplied.
+
+Pause takes effect after current calls finish. Budget exhaustion saves a
+handoff. An interrupted process or invalid post-execution report stops without
+automatic retry; continuing an unknown outcome requires a reconciliation note.
+Recent reports provide bounded context for a new call rather than resuming a
+native agent session. `completed` is an agent's delivery claim, and report
+validation does not verify project correctness.
+
+The lead may use project tests and configured plugins, or create a focused
+plugin and fixtures when the task needs a missing observation. No domain
+validator or mandatory workflow topology is built into Motivo. See
+[ADR-0007](../docs/adr/0007-motivo-task-method.md) for the ownership decision.
 
 Trace-v1 events may include Tactus's additive `presentation` field with one
 closed category and a bounded natural-language message. Studio displays that
@@ -172,6 +206,7 @@ npm test
 npm run format:check
 ```
 
-The unit suite uses fake IPC and pure argv-contract tests; it does not call a
-real model provider. Electron packaging is available through `npm run package`
+The unit suite uses fake IPC, Tactus processes, and task reports. It covers
+budget accounting, method overrides, report handling, task persistence, and
+interruption without calling a real model provider. Electron packaging is available through `npm run package`
 or `npm run make`.

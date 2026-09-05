@@ -313,6 +313,29 @@ from the Violation, and the Norm's `provenance`. This reuses
 `Norm`/`Rubric`/`Critique`; it does not add another checker or upgrade either
 `agenstro.norm/v1` or `agenstro.plugin/v1`.
 
+`gateCritique` first validates that the critique classifies every norm in the
+supplied rubric exactly once. It rejects foreign norm identities, inconsistent
+classifications, and violations with an incorrect severity or invalid locus as
+`RequirementFailed`. The pure `validationFailures` projection assumes a critique
+from judging that same rubric; use `gateCritique` when enforcing a gate. A
+`Critique` does not identify an artifact version, so keep it paired with the
+candidate it actually checked and judge again after changing that candidate.
+
+An unchecked norm does not count as a violation, including at `Blocking`.
+Both the default refinement policy and these severity gates permit unchecked
+norms. When a workflow requires every norm to have been checked, express that
+additional evidence requirement explicitly:
+
+```haskell
+critique <- judge articleRubric article
+complete <- requireBecause "required checks are incomplete"
+  (null . critiqueUnchecked) critique
+validated <- gateCritique DomainStage Correctness articleRubric complete
+```
+
+This completeness requirement is a workflow policy. It does not establish that
+the checker is correct or that the artifact meets requirements outside the rubric.
+
 See the [norm v1 reference](reference/norm-v1.md) and
 [ADR-0005](adr/0005-norms-rubrics-and-refinement.md).
 

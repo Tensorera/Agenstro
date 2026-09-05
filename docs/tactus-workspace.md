@@ -97,6 +97,8 @@ The root document is strict TOML:
 api = "clef.runtime/v1"
 default_provider = "codex"
 instructions = ".tactus/PROMPT.md"
+# Optional; create this file before enabling it.
+# runtime_instructions = ".tactus/RUNTIME.md"
 
 [limits]
 max_concurrent_provider_calls = 4
@@ -148,10 +150,24 @@ must cross the JSON runtime boundary without changing meaning.
 | `api` | string | yes | Must equal `clef.runtime/v1` |
 | `default_provider` | string | yes | Registry name used by `invoke` and generation when no override is supplied |
 | `instructions` | path string | yes | UTF-8 generation prompt; relative paths resolve from the workspace root |
+| `runtime_instructions` | path string | no | UTF-8 instructions shared by business-task provider invocations; omitted means an empty prefix; relative paths resolve from the workspace root |
 | `limits` | table | no | Workspace-owned deadlines, transport budgets, and provider concurrency; omitted fields use validated defaults |
 | `providers` | table | yes in practice | Provider convenience registry; must contain `default_provider` |
 | `effects` | table | no | Effect operations and optional invocation observers |
 | `plugins` | table | no | Open generic plugin registry |
+
+`instructions` belongs to the authoring agent used by `tactus generate`.
+It is not prepended to provider calls made by the generated workflow. To share
+business instructions across those calls, create a separate file and set
+`runtime_instructions` to its path. The runtime JSON keeps its existing
+`instructions` string field, populated from that optional file or `""`.
+
+Existing configurations remain valid. Earlier runtimes also copied the
+generation prompt into business calls; that unintended behavior is removed.
+If an existing project relied on business guidance in `PROMPT.md`, move that
+guidance into the explicitly configured runtime file. Initialization preserves
+existing project-owned prompt files; update old generation guidance if it
+still requires multiple stages or forbids compile checking.
 
 ### Provider definition
 
@@ -255,10 +271,13 @@ tactus run `
 - `.tactus/skills/tactus/SKILL.md` and its two references; and
 - the selected provider configuration.
 
-The provider is instructed to write Haskell sources but not to run Cabal, GHC,
-tests, or workflows during generation. Tactus discovers the resulting files
-and reports the delta. It never treats generation as proof that scripts compile
-or are safe.
+The provider is instructed to make the smallest sufficient source change.
+It may use `tactus check` with explicit source paths for compiler feedback,
+but must not execute the generated business workflow or its external effects.
+Changes to helper modules count as generation output; a new numbered entry is
+not required. Empty or unchanged sources do not count. Tactus discovers the
+resulting files and reports the delta. A successful generation report alone
+does not prove that sources compile or that the workflow meets its goal.
 
 ## Workspace path observer
 
@@ -283,6 +302,6 @@ tactus smoke
 tactus list
 ```
 
-`runtime-json` contains resolved internal instructions and command paths. Use it
+`runtime-json` contains resolved business-task instructions and command paths. Use it
 for local diagnosis; do not commit or paste it without reviewing sensitive
 content. Motivo uses `tactus studio inspect` instead of reading this document.

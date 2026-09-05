@@ -7,6 +7,14 @@ do not imply a package-registry release or compatibility guarantee.
 
 ### Added
 
+- Motivo Tasks as the default desktop entry: goal/constraints/provider input,
+  bounded agent calls through Tactus, report history and timing, user notes,
+  and atomic `.motivo/tasks/<uuid>.json` records.
+- A replaceable Motivo method with optional investigate, try, integrate, and
+  conclude actions; `.motivo/METHOD.md` overrides method text while preserving
+  the report protocol. Optional investigator calls share the lead's budget.
+- Explicit task pause/continuation and conservative interruption handling;
+  unknown outcomes require a reconciliation note before further calls.
 - Typed Clef norms, composable rubrics, honest checked/unchecked critiques,
   bounded guidance/refinement, and the open `agenstro.norm/v1` checker wire.
 - A Python LaTeX norm checker with strict protocol and domain fixtures.
@@ -22,6 +30,11 @@ do not imply a package-registry release or compatibility guarantee.
 
 ### Changed
 
+- Motivo now owns task-level method and its own task history, rather than being
+  restricted to workspace projection. Tactus retains process/plugin execution
+  and existing session storage; Segno scheduling is unchanged.
+- Workflow authoring remains an explicit option. Motivo task work does not
+  require generating Haskell scripts or following a fixed sequence of stages.
 - Clef now gives ordinary plugins a finite one-hour transport deadline and
   nests a 13,440-second native provider deadline below Tactus dispatch at
   13,500 seconds, Clef's outer provider supervisor at 14,400 seconds, and the
@@ -37,6 +50,20 @@ do not imply a package-registry release or compatibility guarantee.
 
 ### Fixed
 
+- Clef delivery gates reject critiques with mismatched norms or inconsistent
+  checked/unchecked classifications instead of silently discarding invalid evidence.
+- Motivo Check and Run pass explicitly selected sources to Tactus; helper
+  modules can be checked but cannot be selected as runnable entries.
+- Concurrent workspace observations keep their shared state directory stable;
+  cleanup no longer removes it between another writer's preparation and save.
+- Tactus generation guidance no longer leaks into Clef business invocations.
+  Optional `runtime_instructions` supplies a separate runtime prefix, empty by
+  default, without changing the Clef runtime JSON shape.
+- Generation accepts helper-only Haskell changes and permits explicit compile
+  checking. It no longer mandates multiple stages; generated business workflows
+  still require explicit execution.
+- Offline Rust acceptance tests match current progress events, request limits,
+  supervisor headroom, known pre-dispatch failures, and explicit `--all` selection.
 - Provider adapters retain at most 4 MiB of terminal result text by default
   while streaming and draining up to a configurable 1 GiB of native output;
   resident queues, individual frames, stderr, and generic plugin stdout remain
@@ -53,6 +80,13 @@ do not imply a package-registry release or compatibility guarantee.
 
 ### Compatibility and limitations
 
+- Existing Tactus TOML remains valid. Projects that previously kept shared
+  business guidance in `PROMPT.md` should explicitly move that guidance to the
+  configured runtime-instructions file. Project-owned prompt files are preserved.
+- Motivo `completed` and check reports are agent claims, not automatic
+  verification or demonstrated model capability gains. Investigators are asked
+  to be read-only; the shared environment does not enforce that instruction or
+  isolate parallel writes. Task records are not replay or exactly-once effects.
 - Existing workspaces without `.tactus/sessions` remain valid and list no
   sessions; a later `tactus init` creates the additive directory.
 - Planner registration, `session advance`, unattended defaults, transcript

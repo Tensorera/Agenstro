@@ -124,7 +124,12 @@ export function OverviewView({
                   type="button"
                   className="quick-card"
                   disabled={running || snapshot.scripts.length === 0}
-                  onClick={() => onAction({ kind: "check" })}
+                  onClick={() =>
+                    onAction({
+                      kind: "check",
+                      scripts: snapshot.scripts.map((script) => script.relativePath),
+                    })
+                  }
                 >
                   <Icon name="check" />
                   <strong>Type-check all</strong>
@@ -134,11 +139,11 @@ export function OverviewView({
                   type="button"
                   className="quick-card"
                   disabled={running || runnableScripts === 0}
-                  onClick={() => onAction({ kind: "run" })}
+                  onClick={() => onNavigate("workflow")}
                 >
                   <Icon name="play" />
-                  <strong>Run entries</strong>
-                  <small>Execute the numbered workflow in deterministic order.</small>
+                  <strong>Select entries to run</strong>
+                  <small>Choose the numbered entries you want to execute.</small>
                 </button>
               </div>
             </article>
