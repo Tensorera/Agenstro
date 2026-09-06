@@ -141,7 +141,7 @@ $publishedText = ($documents.Values -join "`n")
 foreach ($name in @("clef-sdk", "tactus-runtime", "motivo-studio", "segno-flow")) {
     Assert-Contract ($publishedText.Contains($name)) "Missing current component name: $name"
 }
-foreach ($contract in @("agenstro.plugin/v1", "OutcomeUnknown", "at least once", "TypeScript")) {
+foreach ($contract in @("agenstro.plugin/v1", "OutcomeUnknown", "at least once", "motivo.test")) {
     Assert-Contract ($publishedText.Contains($contract)) "Missing current contract: $contract"
 }
 foreach ($removedClaim in @("segno-flow service start", "segno-flow-ui", "~/.segno-flow")) {

@@ -2,7 +2,7 @@
 title: Agenstro CLI reference
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-01
+last_verified: 2026-09-05
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -10,7 +10,8 @@ platforms: [windows, ubuntu]
 # Agenstro CLI reference
 
 This is the supported human-facing command surface for the 0.3 source alpha.
-It was checked against the compiled `--help` output on 2026-08-20. Internal
+The Tactus script-selection options were checked against compiled `--help`
+output on 2026-09-05. Internal
 `dispatch`, `provider-host`, and `effect-host` commands implement plugin
 plumbing and are not a user API.
 
@@ -27,12 +28,12 @@ contains spaces.
 | Command | Purpose | Important options |
 | --- | --- | --- |
 | `tactus init [ROOT]` | Idempotently create `.tactus` | `--sdk PATH`, `--json` |
-| `tactus list` | List ordered entries and helpers | `--root`, `--json` |
+| `tactus list` | List ordered entries and helpers | `--root`, `--scripts-dir PATH`, `--json` |
 | `tactus prompt` | Print resolved generation instructions | `--root` |
 | `tactus doctor` | Validate config, GHC/Cabal, SDK, and plugin commands | `--root`, `--json` |
 | `tactus runtime-json` | Print Clef's normalized runtime config | `--root` |
-| `tactus check [SCRIPT...]` | Compile-check an explicit selection without executing | `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds` |
-| `tactus run` | Execute an explicit selection of ordered entry scripts | repeatable `--script`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `-- ARG...` |
+| `tactus check [SCRIPT...]` | Compile-check an explicit selection without executing | `--scripts-dir PATH`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds` |
+| `tactus run` | Execute an explicit selection of ordered entry scripts | `--scripts-dir PATH`, repeatable `--script`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds`, `-- ARG...` |
 | `tactus generate GOAL...` | Ask one provider to create or update Haskell sources, including helpers | `--provider NAME`, `--timeout-seconds`, `--json` |
 | `tactus plugin-call NAME METHOD` | Invoke a registry entry directly | `--namespace`, `--params JSON`, `--timeout-seconds`, `--json` |
 | `tactus smoke [NAME...]` | Probe configured plugins | `--live`, `--json` |
@@ -54,6 +55,18 @@ natural-language text. Native stderr, provider JSON/free text, event payloads,
 stable codes, and counters are technical diagnostics and are never promoted
 directly into that layer. `check`/`run` may attach compiler or workflow process
 output separately. Machine-mode JSON remains structured by design.
+
+`list`, `check` and `run` default to `.tactus/scripts`. Their generic
+`--scripts-dir PATH` selects one source directory below `.tactus`, relative to
+the workspace root (or supplied as a contained absolute path). Discovery,
+explicit source validation and helper imports use that selected root. The
+parameter changes source selection, not runtime filesystem permissions.
+Default business `--all` never includes `.tactus/motivoscript`.
+
+`check`/`run --timeout-seconds` applies separately to each Cabal/GHC/runghc
+process; zero disables this existing per-process timeout. It is not the total
+budget of a multi-command experiment. Motivo's separate `motivo.test` plugin
+enforces its own positive deadline of at most 600 seconds.
 
 Clef is always exposed to `check` and `run`. Repeat `--package` for extensions,
 for example Segno:
@@ -123,31 +136,50 @@ a bounded diagnostic projection: prompt/provider raw text, terminal success
 values, and native stderr are redacted or summarized, but errors, hashes, and
 path metadata can still be sensitive.
 
-## Motivo Studio on Windows x64
+## Motivo methods and offline Studio reports
 
-The installed desktop launcher has one optional workspace argument:
+The entrypoint is the user's coding agent. Initialize the project, open Claude
+Code, Codex or another CLI there, then ask it to use the installed Motivo skill.
+There is no current Electron launcher, provider picker or desktop task service.
 
-```text
-motivo-studio [WORKSPACE]
-```
-
-With no argument it opens or focuses the Studio window. A positional path opens
-that initialized Tactus workspace; relative paths are resolved from the calling
-terminal's current directory. Quote paths that contain spaces:
+Motivo provides eight independent templates: clarify, investigate, analyze,
+research, probe, organize, retrospect and handoff. Their numbering does not
+require execution as a pipeline. By default a method records Markdown prepared
+by the main agent without calling another model:
 
 ```powershell
-motivo-studio 'D:\work\Project with spaces'
+tactus run --root D:\work\project --scripts-dir .tactus/motivoscript `
+  --script .tactus/motivoscript/020_investigate.hs `
+  -- --input .tactus/motivo/drafts/question.md --agent "Codex"
 ```
 
-`motivo-studio --workspace PATH` is the equivalent explicit form. Use `--`
-before a path whose first character is `-`. Pass exactly one workspace and do
-not combine the positional and `--workspace` forms.
+Non-probe templates also accept an explicit `--provider NAME` and optional
+`--model MODEL` for one independent context. This uses `invokeWith` and never
+falls back to an implicit default provider. Requested model identity is distinct
+from actual identity reported by a provider. These are method arguments after
+`--`, not new Tactus runtime flags.
 
-Motivo is single-instance. Running the command again without a workspace focuses
-the existing window. With a workspace, Tactus validates and switches that window
-before Motivo focuses it; a failed validation keeps the current workspace. See
-[Motivo Studio](../motivo-studio.md) for the Windows installation and
-development commands.
+`050_probe.hs` accepts `--run-id`, `--sample-id`, and
+`--timeout-seconds 1..600`, then a second `--` followed by experiment argv. It
+calls only the registered `motivo.test` effect and rejects `--provider`. Prepare
+fixtures in `.tactus/motivotest/<run>/<sample>`; supported Linux isolation
+exposes those fixtures at writable `/work` and the project at read-only
+`/project`. Other methods are available when an enforcing experiment backend is
+unavailable; experiments must not fall back to unrestricted execution.
+
+Each run writes `.tactus/motivo/runs/<run-id>/report.html` and updates
+`.tactus/motivo/index.html`. Open either file in a browser. For example, after
+recording a method on Windows:
+
+```powershell
+Start-Process 'D:\work\project\.tactus\motivo\index.html'
+```
+
+The HTML is generated by Haskell and contains the snapshot's data. It needs no
+server or port, and cannot invoke providers, answer sessions or execute scripts.
+Refresh the page to read a newer generated snapshot. See
+[Motivo Studio](../motivo-studio.md), the installed Motivo skill, and
+[ADR-0008](../adr/0008-agent-led-motivo.md).
 
 ## Exit and outcome semantics
 

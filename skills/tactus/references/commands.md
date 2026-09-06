@@ -10,14 +10,26 @@ tactus doctor --root /path/to/project --json
 ```
 
 `check` takes positional sources, including helper modules. `run` takes
-repeatable `--script` arguments and executes numbered entries in discovery
-order. Both require an explicit selection: paths, `--all`, or an inclusive
+repeatable `--script` arguments and preserves their order; `--all` and ranges
+use discovery order. Both require an explicit selection: paths, `--all`, or an inclusive
 `--from` / `--through` range.
 
 ```sh
 tactus check --root /path/to/project .tactus/scripts/010_main.hs .tactus/scripts/Support.hs
 tactus run --root /path/to/project --script .tactus/scripts/010_main.hs
 tactus run --root /path/to/project --script .tactus/scripts/010_main.hs -- 'workflow argument'
+```
+
+`list`, `check`, and `run` accept `--scripts-dir .tactus/<directory>` to select
+one alternative source tree. Source arguments remain relative to the workspace
+root, and Haskell module lookup follows the selected tree. Directories must
+exist below `.tactus`; parent traversal and symlink paths are rejected. Without
+this option, `--all` only selects `.tactus/scripts`, never Motivo methods.
+
+```sh
+tactus list --root /path/to/project --scripts-dir .tactus/motivoscript --json
+tactus check --root /path/to/project --scripts-dir .tactus/motivoscript .tactus/motivoscript/020_investigate.hs
+tactus run --root /path/to/project --scripts-dir .tactus/motivoscript --script .tactus/motivoscript/020_investigate.hs -- --input findings.md
 ```
 
 Both accept `--timeout-seconds N` and repeated `--package NAME`. A timeout of

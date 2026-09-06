@@ -1,9 +1,10 @@
 # Contributing to Agenstro
 
-Agenstro `0.3` has four current implementation surfaces: Clef is the Haskell
-EDSL, Tactus is the Rust execution kernel, Segno is the Haskell persistent-task
-driver, and Motivo Studio owns the TypeScript task method and React interface. Do not
-revive the removed Python/Rust Segno stack or a legacy daemon path.
+Agenstro `0.3` keeps the user's existing coding agent as its first interface.
+Clef is the Haskell EDSL, Tactus is the Rust execution kernel, Segno is the
+Haskell persistent-task driver, and Motivo supplies a project skill, eight
+Haskell method templates, and offline HTML observation. Do not revive the
+removed desktop task loop, Python/Rust Segno stack, or legacy daemon path.
 
 All contributions are accepted under the repository's GNU AGPL v3.0-only
 license. Do not copy code whose license is incompatible with `AGPL-3.0-only`;
@@ -32,7 +33,11 @@ network-fetched tool or package dependencies.
 | `tactus-runtime/tests-rust/` | Current Tactus and adapter tests |
 | `examples/topology-holes/` | Current four-stage integration example |
 | `docs/` | Current documentation plus clearly marked migration history |
-| `motivo-studio/` | Task method and `.motivo` records in Electron main, named preload IPC, React task/workspace views, and Tactus transport |
+| `skills/motivo/` | Method choice and evidence guidance for the existing coding agent |
+| `motivo/templates/` | Eight ordinary Haskell methods and shared record/report helpers |
+| `motivo/tests/` | Offline method and installed-asset acceptance tests |
+| `motivo-studio/` | Self-contained HTML template, reading controls, and static build/tests |
+| `plugins/motivo-test/` | Rust experiment effect with Linux isolation and a bounded shared deadline |
 | `segno-flow/haskell/src/` | Current Segno driver, lifecycle, plugin hosts, and SQLite backend |
 | `segno-flow/haskell/test/` | Offline virtual-clock, persistence, and protocol tests |
 | `segno-flow/examples/` | Explicit opt-in persistent-task examples; default gates use fakes |
@@ -59,9 +64,10 @@ current compatibility targets. Git history is the migration record.
    diagnostics.
 5. Route complete event frames incrementally. Events and diagnostics are
    evidence, not values silently inserted into a workflow's typed result.
-6. Treat every configured plugin and Haskell program as trusted local code.
-   Argument arrays and process groups improve correctness; they are not an
-   authentication or sandbox boundary.
+6. Treat configured plugins and Haskell programs as trusted local code.
+   Argument arrays and process groups are not an authentication or universal
+   sandbox boundary. The separate `motivo.test` plugin enforces a specific
+   experiment boundary; do not extend that claim to arbitrary workflow IO.
 7. Keep `agenstro.trace/v1` factual and append-only. Do not describe a run
    journal as replay, exactly-once execution, an artifact store, or rollback.
 8. Keep `workspace.paths` observational. It may report a final path delta, but
@@ -69,19 +75,20 @@ current compatibility targets. Git history is the migration record.
 9. Keep persistent scheduling in Segno. Its versioned business-state CAS and
    explicit checkpoints must remain separate from Tactus journals and from
    Segno-owned lifecycle records.
-10. Keep the task method in Motivo and execution in Tactus. Motivo may choose
-    useful next actions and atomically persist its own `.motivo` task records;
-    it must invoke configured providers and plugins through Tactus. Renderer
-    code cannot import Node/Electron or gain arbitrary filesystem/shell IPC.
-    Keep Tactus config, journals, sessions, and Segno state with their owners.
-11. Treat investigate, try, integrate, and conclude as optional method actions,
-    not a mandatory pipeline. Project tests and plugins provide observations;
-    Motivo validates the report shape, not universal task correctness. Method
-    customization must not silently change the report protocol.
-12. Count investigation branches against the same provider-call budget and
-    reserve a lead call to integrate them. Investigators are instructed to be
-    read-only; this is not a sandbox or permission to write concurrently.
-    Interrupted or ambiguous calls must not be repeated automatically.
+10. Keep the main conversation and method selection in the existing coding
+    agent. Motivo skill guidance and Haskell templates assist it; Tactus owns
+    execution. Method sources belong in `.tactus/motivoscript`, business
+    sources in `.tactus/scripts`, and method evidence in `.tactus/motivo`.
+11. Make methods independently selectable. Prefer existing notes and an
+    existing template; an independent provider call must select the configured
+    provider explicitly. Report publication and agent claims do not prove task
+    correctness. HTML is a read-only snapshot, with no task controller,
+    provider selection, execution button, runtime Node/Electron, or port.
+12. Run Motivo experiments through `motivo.test`. Its supported Linux backend
+    confines persistent writes to `.tactus/motivotest` and shares one deadline
+    of at most 600 seconds across preparation and execution. Unsupported or
+    unavailable isolation must refuse execution, not fall back to the host.
+    Do not automatically repeat interrupted or ambiguous actions.
 
 ## Documentation ownership
 
@@ -94,7 +101,7 @@ Each public fact has one canonical page:
 - provider configuration: `docs/providers.md`;
 - plugin implementation: `docs/plugin-authoring.md`;
 - logs and state transitions: `docs/observability.md`;
-- task method and desktop interaction: `docs/motivo-studio.md`;
+- agent-led methods and offline reports: `docs/motivo-studio.md`;
 - backup/retention/recovery: `docs/operations.md`; and
 - exact commands/wire shapes: `docs/reference/`.
 
@@ -155,6 +162,18 @@ Add regression coverage for:
 Real provider calls are opt-in manual tests and must never run in the default
 gate.
 
+The repository gate must include the separate Rust experiment plugin, not only
+the Tactus package:
+
+```powershell
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+`motivo-test` isolation acceptance uses real Bubblewrap on Linux and requires
+usable user/PID/mount namespaces. Other platforms must retain the structured
+unsupported result; never replace isolation with a permissive test fallback.
+
 ## Haskell Segno changes
 
 Keep the public model smaller than the scheduler implementation:
@@ -184,7 +203,7 @@ external effects.
 ### Keep generated output centralized
 
 The checked-in Cargo configuration writes to `Build/cargo`; Cabal, MkDocs, and
-Electron Forge use sibling directories under the same ignored `Build/` root.
+Motivo's static build use sibling directories under the same ignored `Build/` root.
 Keep the Cargo cache during normal iteration; clean it explicitly or after it
 crosses a chosen local threshold:
 
@@ -196,26 +215,39 @@ crosses a chosen local threshold:
 Use package-scoped checks while iterating. Run broader workspace checks only
 when the change actually crosses package boundaries.
 
-For Motivo Studio changes, exercise every TypeScript boundary and the packaged
-Electron asset graph:
+For Motivo Studio changes, exercise the standalone HTML reader and static build:
 
 ```powershell
 npm --prefix motivo-studio run format:check
 npm --prefix motivo-studio run lint
-npm --prefix motivo-studio run typecheck
 npm --prefix motivo-studio test
-npm --prefix motivo-studio run package
+npm --prefix motivo-studio run build
 ```
 
 `npm ci` belongs to the explicit Bootstrap or clean Release path rather than
 every warm-cache iteration.
 
-These tests use fake Tactus processes and provider reports. Cover task budget
-accounting, report validation, optional investigation branches, pause and
-interruption, method overrides, and atomic task history alongside IPC and
-workspace projections. Never put provider credentials into the desktop test or
-packaging environment. [ADR-0007](docs/adr/0007-motivo-task-method.md) records
-the task ownership boundary.
+Reader tests cover offline reading, escaped content, and reading controls
+without a task API or adjacent-file fetch. Keep provider credentials out of
+all fixtures. Core content must remain readable without JavaScript; timestamps
+describe a saved snapshot, not a live connection.
+
+Rebuild Tactus after changing embedded skills, Haskell templates, or the HTML
+asset. The installed-only method test exercises exactly what initialization
+ships, rather than silently copying newer repository files into the workspace:
+
+```sh
+cargo build --workspace --locked
+python3 motivo/tests/run.py --tactus Build/cargo/debug/tactus --installed-only
+```
+
+On Windows use the available Python command and `Build/cargo/debug/tactus.exe`.
+For template-only iteration, omitting `--installed-only` lets the test runner
+copy current source assets into its isolated test workspace. Validate input
+preservation, method-specific artifacts, source/run references, interrupted
+experiments, identity provenance, and actual Haskell execution. The default
+tests do not contact a real model. [ADR-0008](docs/adr/0008-agent-led-motivo.md)
+records the method and observation boundary.
 
 The reference norm checker is a standalone Python plugin. Its fixture runner
 checks both domain results and the JSONL terminal/correlation rules:
@@ -262,20 +294,22 @@ renders the strict MkDocs navigation:
 ./scripts/quality.ps1 -Profile Full
 ```
 
-Python in these repository checks belongs to MkDocs and the optional reference
-norm plugin; it is not a Tactus runtime requirement.
+Python in these repository checks belongs to MkDocs, offline Motivo acceptance,
+and the optional reference norm plugin; it is not a Tactus or Motivo runtime
+requirement.
 
 ## Sensitive data and generated output
 
 Never commit:
 
 - `.tactus/` state copied from a target project, especially run journals;
-- `.motivo/tasks/` records copied from a target project, including goals,
-  user notes, and agent reports;
+- `.tactus/motivo/` reports or `.tactus/motivotest/` experiments copied from a
+  target project, including embedded business evidence; old `.motivo/tasks/`
+  histories remain sensitive too;
 - provider credentials, `.env` files, private keys, or machine-local registry
   configuration;
 - `secretdoc/` private design notes;
-- `Build/`, package-local `node_modules/`/`.vite/`, Python caches, generated
+- `Build/`, package-local `node_modules/`, Python caches, generated
   output, or model transcripts; or
 - target-project artifacts that are not deliberate test fixtures.
 

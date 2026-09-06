@@ -1,6 +1,6 @@
 ---
 title: Norm and session design-bundle implementation status
-status: working decision record
+status: historical
 owners: [architecture]
 last_verified: 2026-08-20
 applies_to: feature/norms-rubrics-motivo-sessions
@@ -8,6 +8,13 @@ platforms: [windows, ubuntu]
 ---
 
 # Norm and session design-bundle implementation status
+
+> Historical record of the 2026-08-20 implementation. The tables and deferred
+> decisions below describe that stage. Motivo's later Electron, IPC and session
+> UI were replaced by a skill, eight independent Haskell methods and offline
+> HTML reports under [ADR-0008](adr/0008-agent-led-motivo.md). Tactus session and
+> Studio inspection APIs remain available; this page does not describe a current
+> Motivo desktop client.
 
 This page records how the 2026-08-20 `agenstro-design-bundle` was applied. It
 is deliberately more explicit than a roadmap: implemented items are separated

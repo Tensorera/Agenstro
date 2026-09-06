@@ -46,6 +46,145 @@ fn initialized_project() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn initialization_preserves_existing_agent_instructions_and_source_customizations() {
+    let (temporary, project) = initialized_project();
+    let personalized = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".tactus/tactus.toml",
+        ".tactus/skills/tactus/SKILL.md",
+        ".tactus/motivoscript/020_investigate.hs",
+        ".agents/skills/motivo/SKILL.md",
+        ".claude/skills/tactus/SKILL.md",
+    ];
+    for path in personalized {
+        fs::write(project.join(path), "project-owned content\n").expect("customization");
+    }
+    let report = initialize_workspace(&project, Some(&temporary.path().join("sdk")))
+        .expect("repeat initialization");
+    assert!(report.skipped.is_empty());
+    for path in personalized {
+        assert_eq!(
+            fs::read_to_string(project.join(path)).expect("preserved file"),
+            "project-owned content\n",
+            "{path}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn initialization_skips_linked_agent_discovery_paths_without_writing_through_them() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempdir().expect("temporary directory");
+    let project = temporary.path().join("project");
+    let outside = temporary.path().join("outside");
+    let sdk = temporary.path().join("sdk");
+    for path in [&project, &outside, &sdk] {
+        fs::create_dir(path).expect("directory");
+    }
+    fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk manifest");
+    symlink(&outside, project.join(".claude")).expect("external agent directory");
+    let report = initialize_workspace(&project, Some(&sdk)).expect("core initialization");
+    assert_eq!(report.skipped.len(), 2);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .all(|path| path.starts_with(".claude/skills/"))
+    );
+    assert!(
+        fs::read_dir(&outside)
+            .expect("outside directory")
+            .next()
+            .is_none()
+    );
+    assert!(project.join(".agents/skills/motivo/SKILL.md").is_file());
+    assert!(project.join(".tactus/scripts").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn script_directory_selection_reaches_list_check_and_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (temporary, project) = initialized_project();
+    let methods = project.join(".tactus/methods");
+    fs::create_dir(&methods).expect("method directory");
+    fs::write(methods.join("010_method.hs"), "main = pure ()").expect("method entry");
+    fs::write(
+        project.join(".tactus/scripts/010_business.hs"),
+        "main = pure ()",
+    )
+    .expect("business entry");
+    let tool_directory = temporary.path().join("tools");
+    fs::create_dir(&tool_directory).expect("tools directory");
+    let cabal = tool_directory.join("cabal");
+    fs::write(
+        &cabal,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$TACTUS_TEST_ARGUMENTS\"\n",
+    )
+    .expect("argument recorder");
+    fs::set_permissions(&cabal, fs::Permissions::from_mode(0o755)).expect("executable recorder");
+    let mut paths = vec![tool_directory];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).expect("tool path");
+    let log = temporary.path().join("arguments.log");
+    let invoke = |subcommand: &str, alternative: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tactus"));
+        command.args([subcommand, "--root"]).arg(&project);
+        if alternative {
+            command.args(["--scripts-dir", ".tactus/methods"]);
+        }
+        if subcommand == "list" {
+            command.arg("--json");
+        } else {
+            command.arg("--all");
+        }
+        command
+            .env("PATH", &path)
+            .env("TACTUS_TEST_ARGUMENTS", &log);
+        let output = command.output().expect("Tactus command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let output = invoke("list", true);
+    let listed: Value = serde_json::from_slice(&output.stdout).expect("list JSON");
+    assert_eq!(
+        listed["scripts"][0]["relative_path"],
+        ".tactus/methods/010_method.hs"
+    );
+    for subcommand in ["check", "run"] {
+        fs::write(&log, "").expect("reset recorder");
+        invoke(subcommand, true);
+        let arguments = fs::read_to_string(&log).expect("recorded command");
+        let expected = if subcommand == "check" {
+            format!("-i{}", methods.display())
+        } else {
+            format!("--ghc-arg=-i{}", methods.display())
+        };
+        assert!(
+            arguments.lines().any(|line| line == expected),
+            "{arguments}"
+        );
+        assert!(arguments.contains("010_method.hs"));
+        assert!(!arguments.contains("010_business.hs"));
+    }
+    fs::write(&log, "").expect("reset recorder");
+    invoke("run", false);
+    let arguments = fs::read_to_string(&log).expect("business command");
+    assert!(arguments.contains("010_business.hs"));
+    assert!(!arguments.contains("010_method.hs"));
+}
+
+#[test]
 fn session_control_api_lists_shows_and_answers_with_typed_envelopes() {
     let (_temporary, project) = initialized_project();
     let sessions = project.join(".tactus/sessions");
@@ -1145,6 +1284,7 @@ fn smoke_without_selectors_checks_every_registry() {
         "command = [\"tactus\", \"provider-host\", \"codex\"]",
         "command = [\"tactus\", \"provider-host\", \"claude-code\"]",
         "command = [\"tactus\", \"provider-host\", \"opencode\"]",
+        "command = [\"motivo-test\"]",
     ] {
         set_command(&project, needle, "success");
     }
@@ -1168,7 +1308,7 @@ fn smoke_without_selectors_checks_every_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let reports: serde_json::Value = serde_json::from_slice(&output.stdout).expect("reports");
-    assert_eq!(reports.as_array().expect("report array").len(), 5);
+    assert_eq!(reports.as_array().expect("report array").len(), 6);
 }
 
 #[test]

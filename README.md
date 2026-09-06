@@ -1,255 +1,180 @@
 # Agenstro
 
-Agenstro is a local system for doing engineering work with coding agents and
-turning useful repeated work into typed workflows. Motivo Studio supplies a
-replaceable task method and keeps the working history. Tactus supervises agent
-and plugin execution. Clef provides ordinary Haskell composition when a task
-benefits from a reusable program; Segno adds persistent scheduling.
+Agenstro helps people work through complex tasks in their existing coding agent.
+Initialize a project, open Claude, Codex or another agent there, and ask it to use
+the Motivo skill. The agent chooses a focused method, inspects its evidence and
+organizes the next action. Haskell scripts express the atomic work units, Clef
+composes their calls, and Tactus supervises execution.
+
+Motivo Studio is a self-contained, read-only HTML report. It does not select
+models, own a task loop or replace the coding-agent conversation.
 
 The current release line is `0.3`.
 
-## Why these names?
+## The parts
 
-The names use a musical metaphor because Agenstro coordinates independent
-parts without pretending they are one monolithic agent:
+| Component | Responsibility |
+| --- | --- |
+| [Clef](clef-sdk/) | Small Haskell workflow, task, effect and plugin abstractions |
+| [Tactus](tactus-runtime/) | Script discovery, execution, provider/plugin supervision and diagnostics |
+| [Motivo](skills/motivo/SKILL.md) | Methods for clarification, investigation, analysis, research, experiments, organization, retrospection and handoff |
+| [Motivo Studio](motivo-studio/) | Offline HTML that makes recorded evidence and decisions readable |
+| [Segno](segno-flow/) | Experimental persistent scheduling and business-state checkpoints |
+| [motivo.test](plugins/motivo-test/) | One bounded, isolated Linux experiment, limited to its sample directory and at most 600 seconds |
 
-| Name | Naming idea | Function |
-| --- | --- | --- |
-| **Agenstro** | “agent” + “orchestration” | The whole system: typed composition, execution, persistence, plugins, and visualization |
-| **Clef** | A clef gives notes a typed frame of reference | The Haskell EDSL that defines `Workflow`, typed tasks, effects, generic plugins, typed norms/rubrics, and persistent-task values |
-| **Tactus** | The measured pulse that turns a score into an execution | The Rust CLI/runtime that owns `.tactus`, selects scripts, supervises processes, stores sessions, routes events, and records diagnostics |
-| **Segno** | A score mark that says where execution should continue or return | The Haskell persistent-task driver that owns trigger time, cursors, attempts, leases, and business-state checkpoints |
-| **Motivo Studio** | A motif is a reusable pattern of work | The TypeScript/React/Electron task method, local task history, and workspace interface |
-
-The metaphor describes responsibility, not hidden coupling. Clef and Segno are
-Haskell packages, Tactus is one Rust executable, Motivo owns task-level method
-and interaction, and plugins may be implemented in any language that obeys
+The musical names describe distinct responsibilities. A clef provides a frame,
+tactus provides the pulse of execution, motivo is a reusable method, and segno
+marks persistent continuation. Plugins remain language-neutral through
 `agenstro.plugin/v1`.
 
-## Architecture at a glance
+## User entry point
 
 ```text
-Motivo task method -----> Tactus ----> coding agent / project plugins
-        |
-        +----> .motivo task reports, decisions, and user notes
-
-Haskell workflow (Clef) -> Tactus ----> provider/effect/plugin processes
-                            |
-                            +----> diagnostic run journal
-                            +----> existing decision-session store
-
-Segno Haskell driver ----> Tactus ----> one Clef persistent-task occurrence
+User <--> existing coding agent <--- Motivo skill / Tactus skill
+                    |
+                    +--> .tactus/motivoscript: selected method templates
+                    +--> .tactus/scripts: atomic business scripts
+                                   |
+                              Clef + Tactus
+                                   |
+                           providers / plugins
+                                   |
+                         evidence and artifacts
+                             |             |
+                       main agent     offline HTML --> user
 ```
 
-| Component | Version | Status | Owns |
-| --- | --- | --- | --- |
-| [`clef-sdk`](clef-sdk/) | Haskell `0.3.0.0` | Current | Typed workflow composition, norms/rubrics, and open plugin calls |
-| [`tactus-runtime`](tactus-runtime/) | Rust `0.3.0` | Current | Workspace, CLI, process supervision, sessions, event routing, and journals |
-| [`segno-flow`](segno-flow/) | Haskell `0.3.0.0` | **Experimental** | Single-node persistent scheduling and versioned state |
-| [`motivo-studio`](motivo-studio/) | TypeScript/Electron `0.3.0` | **Experimental** | Adaptive task method, local task records, workspace views, and existing session answers |
-| Local plugins | `agenstro.plugin/v1` | Open protocol | Replaceable provider, effect, trigger, or state capabilities |
+Methods are independent choices. They do not force a task through eight stages,
+and do not launch another model merely to record something the main agent
+already knows. A separate provider call is explicit and uses existing Tactus
+configuration; it does not inherit a native interactive session.
 
-## Quick installation
+## Install from this checkout
 
-The shortest supported source installation needs:
+Requirements are Rust/Cargo, GHC/Cabal with `base >=4.20 && <4.23`, and the chosen
+coding-agent CLI for live work. Linux experiments additionally need usable
+Bubblewrap user namespaces. Reading reports does not need Node.js or a server.
 
-- stable Rust and Cargo;
-- GHC/Cabal from GHCup (`base >=4.20 && <4.23`); and
-- this repository checkout.
-
-On Windows PowerShell, replace `D:\src\Agenstro` with the checkout path:
-
-```powershell
-$repoRoot = (Resolve-Path D:\src\Agenstro).Path
-$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
-$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
-Set-Location $repoRoot
-
+```sh
 cargo install --path tactus-runtime --bin tactus --locked --force
-tactus --version
-tactus check --help | Select-String -Pattern '--package'
+cargo install --path plugins/motivo-test --locked --force
 ```
 
-Create or open a project and initialize it:
+Then follow the three-step path:
 
-```powershell
-$projectRoot = "D:\work\my-project"
-New-Item -ItemType Directory -Force $projectRoot | Out-Null
-Set-Location $projectRoot
+1. In your project, run `tactus init --sdk /path/to/Agenstro/clef-sdk`.
+2. Start your chosen coding-agent CLI in that folder.
+3. Ask the agent to use Motivo to investigate, organize or review the task.
 
-tactus init --sdk (Join-Path $repoRoot "clef-sdk")
-tactus doctor
-tactus list
-tactus smoke
+Initialization installs the canonical skills and supported project-local host
+pointers. Existing user files are preserved. If your host does not expose skills,
+ask it to read `.tactus/skills/motivo/SKILL.md` directly.
+
+Open `.tactus/motivo/index.html` in a browser when you want to inspect progress.
+Refresh loads the latest generated snapshot. Keep instructions, model choices
+and feedback in the original agent conversation.
+
+See [Installation](docs/install.md) for platform details and existing-workspace
+upgrades. The strict `motivo.test` backend is currently Linux only; unsupported
+isolation refuses execution rather than falling back to an ordinary shell.
+
+## Workspaces and atomic scripts
+
+```text
+.tactus/scripts/       business scripts
+.tactus/motivoscript/  method templates and Haskell helpers
+.tactus/motivotest/    experiment inputs/outputs by run and sample
+.tactus/motivo/        method records, artifacts and HTML reports
+.tactus/runs/          Tactus execution diagnostics
 ```
 
-`tactus init` is idempotent. It creates `.tactus`; typing `.tactus` by itself
-does not run initialization. Plain `smoke` is offline and does not send a model
-request.
+Tactus defaults to business scripts. An explicit source directory selects Motivo:
 
-When you need a reusable Haskell workflow, ask a configured provider for the
-smallest useful source change, then inspect, check, and explicitly run it:
-
-```powershell
-tactus generate --provider codex "Create a workflow for the repeated task described in this project. Keep it as small as needed."
-tactus list
-tactus check --all
-tactus run --all
+```sh
+tactus list --scripts-dir .tactus/motivoscript --json
+tactus check --scripts-dir .tactus/motivoscript \
+  .tactus/motivoscript/020_investigate.hs
 ```
 
-`generate` can contact or bill the selected provider. `check` compiles without
-executing workflow code. `run` executes trusted Haskell and any effects it
-calls with the current user's operating-system authority. Both commands require
-an explicit script selection: paths, `--all`, or an inclusive `--from` /
-`--through` entry range.
+The main agent fills a method's Markdown input and invokes its stable template.
+For actual business changes it writes and runs the appropriate `.tactus/scripts`
+entry using the [Tactus skill](skills/tactus/SKILL.md). Default `tactus run --all`
+does not include Motivo methods.
 
-Inspect recent evidence without opening journal files by hand:
+Atomic means a coherent, independently inspectable work unit. It does not mean
+transactional rollback. Reports distinguish observations from interpretations;
+recording a method or receiving exit code zero does not prove task correctness.
 
-```powershell
-tactus runs summarize --since 24h
-tactus runs list --state outcome_unknown
-tactus runs unfinished
-```
+## Evidence and experiments
 
-For the complete Windows and Ubuntu source-install procedure, upgrades,
-optional Segno installation, and Motivo deployment, use the
-[installation guide](docs/install.md). For the first controlled workflow, use
-the [first-workflow tutorial](docs/getting-started.md).
+Method records preserve the question, samples, source locations, judgments and
+next useful action. Retrospectives compare expectations with observations and
+explain changes in direction. Unknown model identity stays unknown; caller
+labels and requested provider models are not presented as verified facts.
 
-## Recommended ways to work
+The probe method calls the `motivo.test` effect. One experiment writes only to
+`.tactus/motivotest/<run>/<sample>`, reads the project at `/project`, runs in
+`/work`, and shares one deadline across preparation and its command tree. The
+600-second maximum cannot be disabled with zero. Timeouts and uncertain results
+are retained for inspection, not automatically retried.
 
-For a concrete engineering task, open the initialized project in Motivo Studio:
+These restrictions belong to the experiment plugin. Ordinary trusted Haskell,
+project plugins and native agent sessions retain their own authority. Clef and
+Tactus do not acquire a universal domain validator or sandbox policy.
 
-```powershell
-motivo-studio 'D:\work\my-project'
-```
+## Optional persistent tasks
 
-The **Tasks** view accepts a goal, constraints, and a configured provider.
-Start with a small provider-call budget, inspect the resulting reports and
-changes, and continue with a note when useful. The default method can
-investigate, try a change, integrate findings, or conclude; these are choices,
-not required stages. Simple work does not require generating a workflow.
+Segno is unchanged and remains experimental, single-node and at least once.
+Install it only when work needs persistent triggers and business-state checkpoints:
 
-For explicit workflow authoring from another coding agent:
-
-1. Open a terminal in the project directory that contains `.tactus`.
-2. Start your coding agent from that directory so the project is its working
-   directory.
-3. Ask the agent to use the Tactus skill at
-   `.tactus/skills/tactus/SKILL.md`. The skill explains how to inspect,
-   generate, edit, check, and run the numbered workflow scripts without
-   guessing Tactus commands or workspace boundaries.
-
-Motivo Studio is **experimental**. Its task method uses Tactus for every provider
-invocation. A completed task is an agent's delivery report; project tests and
-other observations remain evidence to inspect, not an automatic proof of
-correctness. See the [Motivo guide](docs/motivo-studio.md) for budgets,
-method customization, and interrupted work.
-
-## Optional persistent tasks — Experimental
-
-Install Segno when a typed task must survive between processes and react to
-time or another trigger:
-
-```powershell
-Set-Location $repoRoot
-cabal update
+```sh
 cabal build --builddir=Build/cabal all --enable-tests
-cabal install segno-flow:exe:segno `
-  --builddir=Build/cabal `
-  --installdir $toolBin `
+cabal install segno-flow:exe:segno \
+  --builddir=Build/cabal \
+  --installdir "$HOME/.local/bin" \
   --overwrite-policy=always
-
-segno --version
 ```
 
-Segno Flow is **experimental**. It is currently single-node and at-least-once.
-It distinguishes scheduler lifecycle state from user business state and never
-claims exactly-once external effects. Continue with the
-[Segno guide](docs/segno.md).
+See the [Segno guide](docs/segno.md). Persistence does not provide exactly-once
+external effects or automatically restore a workspace.
 
-## Desktop task interface — Experimental
+## Documentation and verification
 
-Motivo Studio currently has a Windows x64 per-user installer. It requires
-Node.js 22.12 or newer to build from the checkout and an installed `tactus`:
+- [Motivo methods and reports](docs/motivo-studio.md)
+- [First business workflow](docs/getting-started.md)
+- [Provider setup](docs/providers.md)
+- [Clef guide](docs/clef.md)
+- [Workspace and configuration](docs/tactus-workspace.md)
+- [Plugin authoring](docs/plugin-authoring.md)
+- [Observability](docs/observability.md)
+- [Operations and recovery](docs/operations.md)
+- [Architecture](docs/architecture.md)
+- [Support matrix](docs/reference/support-matrix.md)
 
-```powershell
-Set-Location $repoRoot
-npm --prefix motivo-studio ci
-npm --prefix motivo-studio run install:windows
-motivo-studio 'D:\work\my-project'
-```
-
-Motivo keeps task records in `.motivo/tasks` and accepts a project-owned method
-override at `.motivo/METHOD.md`. It retains Tactus workspace views and existing
-session answers alongside Tasks. It does not replace Tactus process supervision
-or Segno scheduling. See the [Motivo Studio guide](docs/motivo-studio.md).
-
-## Documentation
-
-Choose the path that matches the work:
-
-### New users
-
-- [Install Agenstro](docs/install.md)
-- [Build and run the first workflow](docs/getting-started.md)
-- [Configure coding-agent providers](docs/providers.md)
-- [Use Motivo Studio](docs/motivo-studio.md)
-
-### Workflow and plugin developers
-
-- [Program with Clef](docs/clef.md)
-- [Understand the Tactus workspace and configuration](docs/tactus-workspace.md)
-- [Author a local plugin](docs/plugin-authoring.md)
-- [Build persistent tasks with Segno](docs/segno.md)
-- [Read the plugin protocol reference](docs/reference/plugin-protocol-v1.md)
-
-### Operators and maintainers
-
-- [Understand logs, transitions, and run evidence](docs/observability.md)
-- [Operate, back up, and upgrade a workspace](docs/operations.md)
-- [Troubleshoot failures](docs/troubleshooting.md)
-- [Check supported platforms and boundaries](docs/reference/support-matrix.md)
-- [Read the architecture](docs/architecture.md)
-
-The documentation site is built with:
-
-```powershell
-mkdocs build --strict
-```
-
-## Safety boundary
-
-Workflow programs, configured plugins, and native coding-agent CLIs run with
-the authority of the user who starts Tactus. Agenstro validates types,
-configuration, protocol frames, and selected process behavior; it is not a
-sandbox, credential broker, authorization service, backup system, or rollback
-engine. `OutcomeUnknown` deliberately means an external action may have
-happened without a trustworthy terminal result.
-
-Read [SECURITY.md](SECURITY.md) before running untrusted workflows or plugins.
-
-## Contributing and verification
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for source gates and ownership. The
-repository keeps generated Rust, Cabal, MkDocs, and Electron output below
-`Build/` or ignored tool directories so it can be rebuilt rather than
-committed. Release-level changes are recorded in [CHANGELOG.md](CHANGELOG.md).
-
-The canonical model-free local gates are:
+The canonical model-free repository checks are:
 
 ```powershell
 ./scripts/quality.ps1 -Profile Fast
 ./scripts/quality.ps1 -Profile Full
 ```
 
-Use `./scripts/quality.ps1 -Profile Clean` when the shared Cargo target becomes
-too large, or pass `-CleanIfOverGiB 5` to clean only after a threshold.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for component checks. Build products stay
+under `Build/` or ignored tool directories. The former Electron client and its
+installers have been removed; existing `.motivo/tasks` files are historical and
+are not silently deleted or resumed.
+
+## Execution boundary
+
+Trusted workflows and configured plugins can perform external work with the
+caller's authority. `OutcomeUnknown` means work may have happened without a
+trustworthy terminal result. Inspect the actual outcome before deciding to retry.
+The dedicated experiment plugin has a narrower, tested Linux boundary; that does
+not confer the same restriction on arbitrary code or on the main agent.
+
+Read [SECURITY.md](SECURITY.md) for the project boundary.
 
 ## License
 
-Agenstro is licensed under the
-[GNU Affero General Public License v3.0 only](LICENSE), identified by the SPDX
-expression `AGPL-3.0-only`. If you modify the program and provide its
-functionality to users over a network, AGPL section 13 requires offering those
-users the corresponding source as described by the license.
+Agenstro is licensed under [GNU Affero General Public License v3.0 only](LICENSE),
+SPDX `AGPL-3.0-only`. Modified network offerings must meet the corresponding-source
+requirements described by that license. Release changes are in [CHANGELOG.md](CHANGELOG.md).

@@ -1,6 +1,6 @@
 ---
 title: Motivo task method and execution ownership
-status: working decision record
+status: historical
 owners: [architecture, motivo]
 last_verified: 2026-09-05
 applies_to: "Motivo Studio 0.3.0 and Tactus Rust 0.3.0"
@@ -9,7 +9,7 @@ platforms: [windows, ubuntu]
 
 # ADR-0007: Motivo owns task method; Tactus owns execution
 
-- Status: Accepted
+- Status: Superseded by [ADR-0008](0008-agent-led-motivo.md)
 - Date: 2026-09-05
 - Scope: Motivo task work and its boundary with Clef/Tactus
 - Updates: ADR-0006's projection-only Motivo charter; its existing session

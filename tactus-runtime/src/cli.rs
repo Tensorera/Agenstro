@@ -77,6 +77,9 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Source tree below `.tactus`, relative to the workspace root.
+        #[arg(long)]
+        scripts_dir: Option<PathBuf>,
         /// Emit one JSON document.
         #[arg(long)]
         json: bool,
@@ -121,6 +124,9 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Source tree below `.tactus`; defaults to `.tactus/scripts`.
+        #[arg(long)]
+        scripts_dir: Option<PathBuf>,
         /// Override the workspace deadline for each Cabal/GHC process; zero disables it.
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -149,6 +155,9 @@ enum Command {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Source tree below `.tactus`; defaults to `.tactus/scripts`.
+        #[arg(long)]
+        scripts_dir: Option<PathBuf>,
         /// Override the workspace deadline for each Cabal/runghc process; zero disables it.
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -473,7 +482,11 @@ pub fn run() -> Result<i32, CliError> {
 pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
     match arguments.command {
         Command::Init { root, sdk, json } => initialize(&root, sdk.as_deref(), json),
-        Command::List { root, json } => list(&root, json),
+        Command::List {
+            root,
+            scripts_dir,
+            json,
+        } => list(&root, scripts_dir.as_deref(), json),
         Command::Prompt { root } => prompt(&root),
         Command::Doctor { root, json } => diagnose(&root, json),
         Command::RuntimeJson { root } => runtime_json(&root),
@@ -484,10 +497,12 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             through,
             keep_going,
             root,
+            scripts_dir,
             timeout_seconds,
             packages,
         } => check(
             &root,
+            scripts_dir.as_deref(),
             ScriptSelection::new(&scripts, all, from, through),
             &packages,
             keep_going,
@@ -500,11 +515,13 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             through,
             keep_going,
             root,
+            scripts_dir,
             timeout_seconds,
             packages,
             arguments,
         } => run_scripts_command(
             &root,
+            scripts_dir.as_deref(),
             ScriptSelection::new(&scripts, all, from, through),
             &packages,
             &arguments,
@@ -585,6 +602,7 @@ fn initialize(root: &Path, sdk: Option<&Path>, json: bool) -> Result<i32, CliErr
             "clef_sdk": report.clef_sdk,
             "created": report.created,
             "preserved": report.preserved,
+            "skipped": report.skipped,
         }))?;
     } else {
         render_presentation(&Presentation::new(
@@ -606,12 +624,20 @@ fn initialize(root: &Path, sdk: Option<&Path>, json: bool) -> Result<i32, CliErr
                 format!("Preserved {path}."),
             ));
         }
+        for path in report.skipped {
+            render_presentation(&Presentation::new(
+                PresentationCategory::Warning,
+                format!(
+                    "Skipped skill discovery entry {path}; its parent is linked or not a directory. Read .tactus/skills directly."
+                ),
+            ));
+        }
     }
     Ok(0)
 }
 
-fn list(start: &Path, json: bool) -> Result<i32, CliError> {
-    let workspace = Workspace::discover(start)?;
+fn list(start: &Path, scripts_dir: Option<&Path>, json: bool) -> Result<i32, CliError> {
+    let workspace = Workspace::discover(start)?.with_scripts_directory(scripts_dir)?;
     let scripts = discover_scripts(&workspace)?;
     if json {
         print_json(&serde_json::json!({
@@ -1005,12 +1031,13 @@ impl<'a> ScriptSelection<'a> {
 
 fn check(
     start: &Path,
+    scripts_dir: Option<&Path>,
     selection: ScriptSelection<'_>,
     additional_packages: &[String],
     keep_going: bool,
     timeout_seconds: Option<u64>,
 ) -> Result<i32, CliError> {
-    let workspace = Workspace::discover(start)?;
+    let workspace = Workspace::discover(start)?.with_scripts_directory(scripts_dir)?;
     let timeout_seconds =
         timeout_seconds.unwrap_or(workspace.load_config()?.limits.check_timeout_seconds);
     let cancellation = install_cancellation()?;
@@ -1081,13 +1108,14 @@ fn check(
 
 fn run_scripts_command(
     start: &Path,
+    scripts_dir: Option<&Path>,
     selection: ScriptSelection<'_>,
     additional_packages: &[String],
     arguments: &[String],
     keep_going: bool,
     timeout_seconds: Option<u64>,
 ) -> Result<i32, CliError> {
-    let workspace = Workspace::discover(start)?;
+    let workspace = Workspace::discover(start)?.with_scripts_directory(scripts_dir)?;
     let timeout_seconds =
         timeout_seconds.unwrap_or(workspace.load_config()?.limits.script_timeout_seconds);
     let cancellation = install_cancellation()?;
@@ -2376,22 +2404,11 @@ fn select_scripts(
     if !explicit.is_empty() {
         let mut selected = Vec::with_capacity(explicit.len());
         for value in explicit {
-            let candidate = if value.is_absolute() {
-                value.clone()
-            } else {
-                workspace.root.join(value)
-            };
-            let named_metadata = fs::symlink_metadata(&candidate)?;
-            if named_metadata.file_type().is_symlink() {
-                return Err(CliError::InvalidArguments(format!(
-                    "script path must not be a symbolic link: {}",
-                    value.display()
-                )));
-            }
-            let resolved = dunce::canonicalize(candidate)?;
+            let resolved = workspace.resolve_script_path(value)?;
             let Some(script) = discovered.iter().find(|script| script.path == resolved) else {
                 return Err(CliError::InvalidArguments(format!(
-                    "script must be a discovered Haskell source below .tactus/scripts: {}",
+                    "script must be a discovered Haskell source below {}: {}",
+                    workspace.scripts_path.display(),
                     value.display()
                 )));
             };
@@ -4930,6 +4947,99 @@ mod tests {
         let run = select_scripts(&workspace, all, true).expect("explicit run all");
         assert_eq!(checked.len(), 3);
         assert_eq!(run.len(), 2);
+    }
+
+    #[test]
+    fn source_trees_are_selected_independently() {
+        let (_temporary, workspace) = selection_fixture();
+        let alternative = workspace.control.join("motivoscript");
+        fs::create_dir(&alternative).expect("alternative source tree");
+        fs::write(alternative.join("010_investigate.hs"), "main = pure ()").expect("method entry");
+        fs::write(alternative.join("Support.hs"), "module Support where").expect("method helper");
+        let methods = workspace
+            .clone()
+            .with_scripts_directory(Some(Path::new(".tactus/motivoscript")))
+            .expect("select alternative source tree");
+        let all = ScriptSelection::new(&[], true, None, None);
+        assert_eq!(
+            select_scripts(&workspace, all, true)
+                .expect("business entries")
+                .len(),
+            2
+        );
+        let selected = select_scripts(&methods, all, true).expect("method entry");
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].ends_with("motivoscript/010_investigate.hs"));
+        assert_eq!(
+            select_scripts(&methods, all, false)
+                .expect("method sources")
+                .len(),
+            2
+        );
+        let wrong_tree = [PathBuf::from(".tactus/scripts/010_first.hs")];
+        assert!(
+            select_scripts(
+                &methods,
+                ScriptSelection::new(&wrong_tree, false, None, None),
+                true
+            )
+            .is_err()
+        );
+        for value in [".tactus", "outside", ".tactus/../outside"] {
+            assert!(
+                workspace
+                    .clone()
+                    .with_scripts_directory(Some(Path::new(value)))
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_tree_selection_rejects_links_in_roots_and_explicit_sources() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, workspace) = selection_fixture();
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::write(outside.join("030_outside.hs"), "main = pure ()").expect("outside entry");
+        symlink(&outside, workspace.control.join("linked")).expect("linked root");
+        assert!(
+            workspace
+                .clone()
+                .with_scripts_directory(Some(Path::new(".tactus/linked")))
+                .is_err()
+        );
+
+        symlink(&outside, workspace.scripts_path.join("linked")).expect("linked child");
+        let source = Path::new(".tactus/scripts/linked/030_outside.hs");
+        assert!(workspace.resolve_script_path(source).is_err());
+        let internal = workspace.scripts_path.join("nested");
+        fs::create_dir(&internal).expect("nested directory");
+        fs::write(internal.join("040_nested.hs"), "main = pure ()").expect("nested entry");
+        symlink(&internal, workspace.scripts_path.join("alias")).expect("internal alias");
+        assert!(
+            workspace
+                .resolve_script_path(Path::new(".tactus/scripts/alias/040_nested.hs"))
+                .is_err()
+        );
+        symlink(
+            workspace.scripts_path.join("010_first.hs"),
+            workspace.scripts_path.join("050_alias.hs"),
+        )
+        .expect("file alias");
+        assert!(
+            workspace
+                .resolve_script_path(Path::new(".tactus/scripts/050_alias.hs"))
+                .is_err()
+        );
+        assert_eq!(
+            discover_scripts(&workspace)
+                .expect("contained sources only")
+                .len(),
+            4
+        );
     }
 
     #[test]

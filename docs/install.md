@@ -2,192 +2,128 @@
 title: Install Agenstro 0.3
 status: alpha
 owners: [release]
-last_verified: 2026-08-17
-applies_to: "Clef/Segno Haskell 0.3.0.0, Tactus Rust 0.3.0, Motivo Studio 0.3.0"
+last_verified: 2026-09-05
+applies_to: "Clef/Segno 0.3.0.0, Tactus/Motivo 0.3.0"
 platforms: [windows, ubuntu]
 ---
 
 # Install Agenstro 0.3
 
-This page is the canonical source-install and upgrade procedure. Install
-Tactus for ordinary workflows; add Segno only for persistent tasks and Motivo
-Studio only when a desktop projection is useful.
-
-## Supported source paths
-
-| Surface | Windows | Ubuntu | Notes |
-| --- | --- | --- | --- |
-| Tactus | Supported | Supported | Built with stable Rust |
-| Clef workflows | Supported | Supported | GHC/Cabal, `base >=4.20 && <4.23` |
-| Segno | Supported | Supported | Single-node Haskell driver |
-| Motivo Studio development/package gate | Supported | Supported | Node.js >=22.12 |
-| Motivo per-user launcher | Windows x64 | Not supplied | Installs below `%LOCALAPPDATA%` |
-| Real active-window capture | Supported | Not supplied | Other platforms can use a replacement plugin |
-
-The current distribution is built from a checkout. It does not yet provide a
-signed system package, MSI, Homebrew formula, or Linux desktop installer.
+Agenstro is built from a checkout. The user works in an existing coding-agent
+CLI; Motivo supplies a skill, Haskell templates, and offline HTML reports.
+There is no desktop client or background server to install.
 
 ## Prerequisites
 
-Install these tools before building:
+- Git, stable Rust and Cargo.
+- GHC and Cabal with `base >=4.20 && <4.23`.
+- A coding-agent CLI of your choice, configured in its own interface for live work.
+- Linux Bubblewrap 0.8 or newer with usable user namespaces for strictly bounded Motivo experiments.
+- Node.js >=22.12 only for report-template development/tests; Python/MkDocs only for repository checks/docs.
 
-- Git;
-- stable Rust and Cargo;
-- GHC and Cabal through GHCup, with a GHC whose bundled `base` is in the
-  declared range;
-- Node.js 22.12 or newer only for Motivo Studio; and
-- Python plus MkDocs only when building this documentation site.
+Clef is a library. Tactus workspaces reference its source package through
+`.tactus/cabal.project`; it has no separate global executable.
 
-A coding-agent CLI is not required for compilation or offline tests. Install
-and authenticate `codex`, `claude`, or `opencode` only for the provider that
-will receive live requests.
+## Install commands from the checkout
 
-## Windows PowerShell
+On Ubuntu or another supported Linux environment:
 
-Clone or open the repository, then install Tactus into Cargo's per-user binary
-directory. Adjust the checkout path once and reuse the variable:
-
-```powershell
-$repoRoot = (Resolve-Path D:\src\Agenstro).Path
-$toolBin = Join-Path $env:USERPROFILE ".cargo\bin"
-$env:PATH = "C:\ghcup\bin;$toolBin;$env:PATH"
-Set-Location $repoRoot
-
+```sh
 cargo install --path tactus-runtime --bin tactus --locked --force
+cargo install --path plugins/motivo-test --locked --force
 
-Get-Command tactus -All
 tactus --version
-tactus check --help | Select-String -Pattern '--package'
+tactus run --help
 ```
 
-The `--package` check distinguishes the current binary from an earlier
-`0.3.0` build that used the same version number before package extension was
-added. Open a new terminal if the old executable still resolves first.
+Put Cargo's binary directory and the chosen GHC/Cabal tools on `PATH`. When
+using a toolchain manager, preserve its selected executable order. The Motivo
+experiment backend also requires `bwrap`; the plugin checks whether isolation
+actually works and refuses execution if it does not.
 
-Install Segno when persistent tasks are needed:
+The same Cargo commands can be used from Windows PowerShell. Install GHC/Cabal
+through a supported toolchain manager. The `motivo-test` executable can report
+its capabilities on Windows, but the strict experiment backend is currently
+Linux only. Methods that record, analyze, research, or present evidence do not
+require this experiment backend.
 
-```powershell
-Set-Location $repoRoot
-cabal update
-cabal build --builddir=Build/cabal all --enable-tests
-cabal install segno-flow:exe:segno `
-  --builddir=Build/cabal `
-  --installdir $toolBin `
-  --overwrite-policy=always
+## Initialize and start your coding agent
 
-Get-Command segno -All
-segno --version
+Choose the desired project and initialize it using an explicit Clef source path:
+
+```sh
+cd /path/to/project
+tactus init --sdk /path/to/Agenstro/clef-sdk
+tactus doctor
+tactus list
 ```
 
-Clef is a library, not a second global command. Each Tactus workspace links
-to the `clef-sdk` source package through `.tactus/cabal.project`.
+Start your chosen coding agent from this folder and ask it to use Motivo. The
+canonical skills are in `.tactus/skills/{motivo,tactus}`. Initialization installs
+project-local discovery pointers for supported hosts and preserves existing
+files. If your host does not expose skills, ask it to read the canonical skill
+path directly.
 
-Install Motivo Studio for the current Windows user:
+Open `.tactus/motivo/index.html` in a browser to observe recorded work. All task
+instructions and feedback stay in the original coding-agent conversation.
 
-```powershell
-Set-Location $repoRoot
-npm --prefix motivo-studio ci
-npm --prefix motivo-studio run install:windows
+`tactus smoke` is offline by default. Live probes are explicit and may contact
+a provider. Unsupported Motivo experiment isolation must not be mistaken for a
+broken Haskell or provider installation.
 
-Get-Command motivo-studio -All
-motivo-studio --version
+## Upgrade an existing project
+
+Update the checkout and rerun the two Cargo installation commands. Clef changes
+are picked up from the SDK path recorded in the project's Cabal configuration;
+update that reference if it points at an older copied SDK.
+
+`tactus init --sdk ...` creates missing assets and preserves existing files,
+including user-edited templates, skills and `tactus.toml`. Inspect its created,
+preserved and skipped entries. It does not silently upgrade existing method
+code or overwrite a user's provider settings.
+
+If an existing configuration lacks the new experiment effect, add only this
+entry while preserving other settings:
+
+```toml
+[effects."motivo.test"]
+command = ["motivo-test"]
 ```
 
-The installer packages the application into
-`%LOCALAPPDATA%\Programs\MotivoStudio` and adds that exact directory to the
-user `PATH`. Start a new terminal before testing the command if necessary.
+The old Electron installation is no longer used. Existing `.motivo/tasks`
+records remain historical files; initialization neither deletes nor resumes
+them. Use the new report files through your browser.
 
-## Ubuntu shell
+## Optional Segno installation
 
-Put Cargo and the selected Cabal install directory on `PATH`, then run from the
-repository root:
+Segno remains an independent, experimental persistent scheduler:
 
-```bash
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
-
-cargo install --path tactus-runtime --bin tactus --locked --force
+```sh
 cabal update
 cabal build --builddir=Build/cabal all --enable-tests
 cabal install segno-flow:exe:segno \
   --builddir=Build/cabal \
   --installdir "$HOME/.local/bin" \
   --overwrite-policy=always
-
-tactus --version
-segno --version
-tactus check --help | grep -- '--package'
 ```
 
-Motivo can be developed and packaged on Ubuntu, but this release does not
-install a global Linux desktop launcher. Use `npm --prefix motivo-studio start`
-for development only.
+On Windows, use your selected executable directory and PowerShell line
+continuations. See the [Segno guide](segno.md) for its separate initialization.
 
-## Initialize the first workspace
+## Verify the checkout
 
-From any project directory, pass the Clef SDK explicitly on first setup:
-
-```powershell
-$projectRoot = "D:\work\my-project"
-New-Item -ItemType Directory -Force $projectRoot | Out-Null
-Set-Location $projectRoot
-
-tactus init --sdk (Join-Path $repoRoot "clef-sdk")
-tactus doctor
-tactus list
-tactus smoke
-```
-
-`init` creates missing files and preserves existing ones. Tactus commands
-search upward from `--root` or the current directory for
-`.tactus/tactus.toml`.
-
-Continue with [First workflow](getting-started.md). Configure live model calls
-with [Provider setup](providers.md).
-
-## Upgrade
-
-Pull the desired commit, then rerun the same install commands:
-
-```powershell
-Set-Location $repoRoot
-git pull --ff-only origin main
-cargo install --path tactus-runtime --bin tactus --locked --force
-cabal install segno-flow:exe:segno `
-  --builddir=Build/cabal `
-  --installdir $toolBin `
-  --overwrite-policy=always
-npm --prefix motivo-studio run install:windows
-```
-
-Close Motivo before replacing it. Existing `.tactus` content is not rewritten
-implicitly; run `tactus doctor` after an upgrade and `segno init` again when a
-moved checkout changes the Segno package path.
-
-## Uninstall
-
-Remove the source-installed commands without deleting project workspaces:
-
-```powershell
-cargo uninstall tactus-runtime
-Remove-Item (Join-Path $toolBin "segno.exe") -ErrorAction SilentlyContinue
-npm --prefix motivo-studio run uninstall:windows
-```
-
-Deleting `.tactus` is a separate destructive action: it removes workflow
-scripts, run diagnostics, configuration, skills, and any Segno state below
-that project. Use the [operations guide](operations.md) before doing so.
-
-## Verify the checkout before release use
-
-The complete source gate is described in the repository's
-[CONTRIBUTING.md](https://github.com/Tensorera/Agenstro/blob/main/CONTRIBUTING.md).
-The minimal local verification is:
-
-```powershell
-cargo test -p tactus-runtime --locked
+```sh
+cargo test --workspace --locked
 cabal test --builddir=Build/cabal all --test-show-details=direct
+npm --prefix motivo-studio ci
 npm --prefix motivo-studio test
+npm --prefix motivo-studio run build
 python -m mkdocs build --strict
 ```
 
-These tests use local fakes and do not authenticate with a model provider.
+The canonical complete checks are in [CONTRIBUTING.md](https://github.com/Tensorera/Agenstro/blob/main/CONTRIBUTING.md).
+Offline checks do not invoke a real model. The strict experiment tests launch
+local sandboxed programs to verify their actual write and deadline boundaries.
+
+Continue with [Motivo methods](motivo-studio.md), [First workflow](getting-started.md),
+and [Provider setup](providers.md).

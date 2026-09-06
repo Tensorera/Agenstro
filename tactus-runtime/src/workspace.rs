@@ -35,7 +35,58 @@ pub const TACTUS_SKILL_DIRECTORY: &str = "tactus";
 const TACTUS_SKILL: &str = include_str!("../../skills/tactus/SKILL.md");
 const TACTUS_SKILL_COMMANDS: &str = include_str!("../../skills/tactus/references/commands.md");
 const TACTUS_SKILL_OUTCOMES: &str = include_str!("../../skills/tactus/references/outcomes.md");
+const MOTIVO_SKILL: &str = include_str!("../../skills/motivo/SKILL.md");
+const MOTIVO_METHODS: &str = include_str!("../../skills/motivo/references/methods.md");
+const MOTIVO_RUNS: &str = include_str!("../../skills/motivo/references/runs.md");
+const MOTIVO_REPORT_TEMPLATE: &str = include_str!("../../motivo-studio/report-template.html");
+const MOTIVO_EMPTY_REPORT: &str = r#"<header class="motivo-header"><p class="eyebrow">Motivo</p><h1>从你的 coding agent 开始</h1><p class="lede">在当前对话中让 agent 使用 Motivo 调查、分析或复盘。运行产生的样本和报告会保存在这里。</p></header><main><section><h2>还没有方法记录</h2><p>本页面只用于观察，任务始终在原来的 coding agent 中推进。</p></section></main>"#;
 const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
+const MOTIVO_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "010_clarify.hs",
+        include_str!("../../motivo/templates/010_clarify.hs"),
+    ),
+    (
+        "020_investigate.hs",
+        include_str!("../../motivo/templates/020_investigate.hs"),
+    ),
+    (
+        "030_analyze.hs",
+        include_str!("../../motivo/templates/030_analyze.hs"),
+    ),
+    (
+        "040_research.hs",
+        include_str!("../../motivo/templates/040_research.hs"),
+    ),
+    (
+        "050_probe.hs",
+        include_str!("../../motivo/templates/050_probe.hs"),
+    ),
+    (
+        "060_organize.hs",
+        include_str!("../../motivo/templates/060_organize.hs"),
+    ),
+    (
+        "070_retrospect.hs",
+        include_str!("../../motivo/templates/070_retrospect.hs"),
+    ),
+    (
+        "080_handoff.hs",
+        include_str!("../../motivo/templates/080_handoff.hs"),
+    ),
+    (
+        "Motivo/Method.hs",
+        include_str!("../../motivo/templates/Motivo/Method.hs"),
+    ),
+    (
+        "Motivo/Run.hs",
+        include_str!("../../motivo/templates/Motivo/Run.hs"),
+    ),
+    (
+        "Motivo/Html.hs",
+        include_str!("../../motivo/templates/Motivo/Html.hs"),
+    ),
+];
 
 const DEFAULT_CONFIG: &str = r#"api = "clef.runtime/v1"
 default_provider = "codex"
@@ -74,6 +125,9 @@ command = ["tactus", "provider-host", "opencode"]
 [effects."workspace.paths"]
 command = ["tactus", "effect-host", "workspace-paths"]
 observe_invocations = true
+
+[effects."motivo.test"]
+command = ["motivo-test"]
 
 [plugins]
 "#;
@@ -214,7 +268,7 @@ pub struct Workspace {
     pub config_path: PathBuf,
     /// Generation instructions.
     pub prompt_path: PathBuf,
-    /// Haskell scripts directory.
+    /// Selected Haskell scripts directory; defaults to `.tactus/scripts`.
     pub scripts_path: PathBuf,
     /// Run journal directory.
     pub runs_path: PathBuf,
@@ -266,6 +320,62 @@ impl Workspace {
                 return Err(WorkspaceError::NotInitialized(start.as_ref().to_path_buf()));
             }
         }
+    }
+
+    /// Select one source tree below `.tactus`, relative to the workspace root.
+    ///
+    /// This controls discovery and Haskell module lookup, not filesystem effects.
+    pub fn with_scripts_directory(
+        mut self,
+        directory: Option<&Path>,
+    ) -> Result<Self, WorkspaceError> {
+        let selected = directory.unwrap_or(&self.scripts_path);
+        let candidate = workspace_path(&self.root, selected)?;
+        if candidate == self.control || !candidate.starts_with(&self.control) {
+            return Err(WorkspaceError::InvalidConfig(
+                "scripts directory must be a directory below .tactus".to_owned(),
+            ));
+        }
+        reject_linked_directories(&self.root, &candidate)?;
+        require_contained_directory(&self.root, &self.control, &candidate)?;
+        if !candidate.is_dir() {
+            return Err(WorkspaceError::MissingPath(candidate));
+        }
+        self.scripts_path = dunce::canonicalize(candidate).map_err(WorkspaceError::Io)?;
+        Ok(self)
+    }
+
+    /// Resolve an explicit source without following links or leaving the selected tree.
+    pub fn resolve_script_path(&self, source: &Path) -> Result<PathBuf, WorkspaceError> {
+        let candidate = workspace_path(&self.root, source)?;
+        if !candidate.starts_with(&self.scripts_path) {
+            return Err(WorkspaceError::InvalidConfig(format!(
+                "script must be below the selected scripts directory {}: {}",
+                self.scripts_path.display(),
+                source.display()
+            )));
+        }
+        let parent = candidate.parent().ok_or_else(|| {
+            WorkspaceError::InvalidConfig("script path has no parent directory".to_owned())
+        })?;
+        reject_linked_directories(&self.root, parent)?;
+        let metadata = fs::symlink_metadata(&candidate).map_err(WorkspaceError::Io)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || directory_is_reparse_point(&metadata)
+        {
+            return Err(WorkspaceError::InvalidConfig(format!(
+                "script must be a regular file, without links: {}",
+                source.display()
+            )));
+        }
+        let resolved = dunce::canonicalize(candidate).map_err(WorkspaceError::Io)?;
+        if !resolved.starts_with(&self.scripts_path) {
+            return Err(WorkspaceError::InvalidConfig(
+                "script resolved outside the selected scripts directory".to_owned(),
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Load and validate the typed TOML configuration.
@@ -469,6 +579,23 @@ impl Workspace {
     }
 }
 
+fn workspace_path(root: &Path, path: &Path) -> Result<PathBuf, WorkspaceError> {
+    if path
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(WorkspaceError::InvalidConfig(
+            "workspace source paths must not contain parent traversal (..)".to_owned(),
+        ));
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    Ok(candidate.components().collect())
+}
+
 fn validate_json_domain(value: &toml::Value, path: &str) -> Result<(), WorkspaceError> {
     match value {
         toml::Value::Float(number) if !number.is_finite() => Err(WorkspaceError::InvalidConfig(
@@ -558,6 +685,8 @@ pub struct InitReport {
     pub created: Vec<String>,
     /// Relative files preserved without modification.
     pub preserved: Vec<String>,
+    /// Optional discovery entries not installed because their parent path is unsafe.
+    pub skipped: Vec<String>,
 }
 
 /// Initialize `.tactus` without overwriting project-owned files.
@@ -574,15 +703,6 @@ pub fn initialize_workspace(
         .join(SKILLS_DIRECTORY)
         .join(TACTUS_SKILL_DIRECTORY);
     let skill_references = skill_root.join("references");
-    reject_linked_skill_directories(&root, &skill_references)?;
-    fs::create_dir_all(&skill_references).map_err(WorkspaceError::Io)?;
-    require_contained_directory(&root, &workspace.control, &skill_references)?;
-    fs::create_dir_all(&workspace.scripts_path).map_err(WorkspaceError::Io)?;
-    fs::create_dir_all(&workspace.runs_path).map_err(WorkspaceError::Io)?;
-    reject_linked_skill_directories(&root, &workspace.sessions_path)?;
-    fs::create_dir_all(&workspace.sessions_path).map_err(WorkspaceError::Io)?;
-    require_contained_directory(&root, &workspace.control, &workspace.sessions_path)?;
-
     let mut files = vec![
         (workspace.config_path.clone(), DEFAULT_CONFIG.to_owned()),
         (workspace.prompt_path.clone(), DEFAULT_PROMPT.to_owned()),
@@ -595,15 +715,90 @@ pub fn initialize_workspace(
             skill_references.join("outcomes.md"),
             TACTUS_SKILL_OUTCOMES.to_owned(),
         ),
+        (
+            workspace.control.join("skills/motivo/SKILL.md"),
+            MOTIVO_SKILL.to_owned(),
+        ),
+        (
+            workspace
+                .control
+                .join("skills/motivo/references/methods.md"),
+            MOTIVO_METHODS.to_owned(),
+        ),
+        (
+            workspace.control.join("skills/motivo/references/runs.md"),
+            MOTIVO_RUNS.to_owned(),
+        ),
+        (
+            workspace
+                .control
+                .join("skills/motivo/assets/report-template.html"),
+            MOTIVO_REPORT_TEMPLATE.to_owned(),
+        ),
+        (
+            workspace.control.join("motivo/index.html"),
+            MOTIVO_REPORT_TEMPLATE.replace("<!-- MOTIVO_CONTENT -->", MOTIVO_EMPTY_REPORT),
+        ),
     ];
     let portable = sdk.to_string_lossy().replace('\\', "/");
+    files.extend(MOTIVO_TEMPLATES.iter().map(|(path, content)| {
+        (
+            workspace.control.join("motivoscript").join(path),
+            (*content).to_owned(),
+        )
+    }));
     let quoted = serde_json::to_string(&portable).expect("a path string is valid JSON");
     files.push((
         workspace.cabal_project_path.clone(),
         format!("packages:\n  {quoted}\n"),
     ));
+    let mut directories = vec![
+        workspace.scripts_path.clone(),
+        workspace.runs_path.clone(),
+        workspace.sessions_path.clone(),
+        workspace.control.join("motivoscript"),
+        workspace.control.join("motivotest"),
+        workspace.control.join("motivo/runs"),
+    ];
+    directories.extend(
+        files
+            .iter()
+            .filter_map(|(path, _)| path.parent().map(Path::to_path_buf)),
+    );
+    directories.sort();
+    directories.dedup();
+    // Check every existing parent before creating files in any scaffold tree.
+    for directory in &directories {
+        reject_linked_directories(&root, directory)?;
+    }
+    for directory in &directories {
+        fs::create_dir_all(directory).map_err(WorkspaceError::Io)?;
+        require_contained_directory(&root, &workspace.control, directory)?;
+    }
     let mut created = Vec::new();
     let mut preserved = Vec::new();
+    let mut skipped = Vec::new();
+    for host in [".agents", ".claude", ".opencode"] {
+        for (name, description) in [
+            (
+                "tactus",
+                "Write, check, and execute project Haskell workflows with Clef and Tactus.",
+            ),
+            (
+                "motivo",
+                "Use Motivo to investigate, analyze, research, organize, experiment, review, and hand off a complex task from this coding agent.",
+            ),
+        ] {
+            let directory = root.join(host).join("skills").join(name);
+            let path = directory.join("SKILL.md");
+            if reject_linked_directories(&root, &directory).is_err() {
+                skipped.push(relative_display(&root, &path));
+                continue;
+            }
+            fs::create_dir_all(&directory).map_err(WorkspaceError::Io)?;
+            files.push((path, skill_discovery_entry(name, description)));
+        }
+    }
     for (path, content) in files {
         let relative = relative_display(&root, &path);
         match fs::OpenOptions::new()
@@ -629,13 +824,20 @@ pub fn initialize_workspace(
         clef_sdk: sdk,
         created,
         preserved,
+        skipped,
     })
 }
 
-fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceError> {
+fn skill_discovery_entry(name: &str, description: &str) -> String {
+    format!(
+        "---\nname: {name}\ndescription: {description}\n---\n\nRead the project-local canonical instructions in\n[.tactus/skills/{name}/SKILL.md](../../../.tactus/skills/{name}/SKILL.md)\nbefore using this skill. Resolve references from that canonical skill directory.\nThe project root is three directories above this skill directory.\nContinue the user's work in the current coding-agent conversation.\n"
+    )
+}
+
+fn reject_linked_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceError> {
     let resolved_root = dunce::canonicalize(root).map_err(WorkspaceError::Io)?;
     let relative = leaf.strip_prefix(root).map_err(|_| {
-        WorkspaceError::InvalidConfig("Tactus skill path escaped the workspace".to_owned())
+        WorkspaceError::InvalidConfig("workspace path escaped the workspace".to_owned())
     })?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -645,13 +847,13 @@ fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), Works
                 if metadata.file_type().is_symlink() || directory_is_reparse_point(&metadata) =>
             {
                 return Err(WorkspaceError::InvalidConfig(format!(
-                    "Tactus skill directory must not be a link: {}",
+                    "workspace directory must not be a link: {}",
                     current.display()
                 )));
             }
             Ok(metadata) if !metadata.is_dir() => {
                 return Err(WorkspaceError::InvalidConfig(format!(
-                    "Tactus skill directory is not a directory: {}",
+                    "workspace directory is not a directory: {}",
                     current.display()
                 )));
             }
@@ -659,7 +861,7 @@ fn reject_linked_skill_directories(root: &Path, leaf: &Path) -> Result<(), Works
                 let resolved_current = dunce::canonicalize(&current).map_err(WorkspaceError::Io)?;
                 if !resolved_current.starts_with(&resolved_root) {
                     return Err(WorkspaceError::InvalidConfig(format!(
-                        "Tactus skill directory resolved outside the workspace: {}",
+                        "workspace directory resolved outside the workspace: {}",
                         current.display()
                     )));
                 }
@@ -696,7 +898,7 @@ fn require_contained_directory(
         || !resolved_directory.starts_with(&resolved_control)
     {
         return Err(WorkspaceError::InvalidConfig(
-            "Tactus skill directory resolved outside the workspace".to_owned(),
+            "workspace directory resolved outside the workspace".to_owned(),
         ));
     }
     Ok(())
@@ -787,7 +989,8 @@ pub struct ScriptInfo {
 /// Recursively discover `.hs` and `.lhs` files without following symlink dirs.
 pub fn discover_scripts(workspace: &Workspace) -> Result<Vec<ScriptInfo>, WorkspaceError> {
     let mut paths = Vec::new();
-    collect_haskell(&workspace.scripts_path, &mut paths)?;
+    let validated = workspace.clone().with_scripts_directory(None)?;
+    collect_haskell(&validated.scripts_path, &validated.scripts_path, &mut paths)?;
     let mut scripts = paths
         .into_iter()
         .map(|path| {
@@ -814,12 +1017,27 @@ pub fn discover_scripts(workspace: &Workspace) -> Result<Vec<ScriptInfo>, Worksp
     Ok(scripts)
 }
 
-fn collect_haskell(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), WorkspaceError> {
+fn collect_haskell(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), WorkspaceError> {
     for entry in fs::read_dir(directory).map_err(WorkspaceError::Io)? {
         let entry = entry.map_err(WorkspaceError::Io)?;
         let file_type = entry.file_type().map_err(WorkspaceError::Io)?;
+        if file_type.is_symlink()
+            || directory_is_reparse_point(&entry.metadata().map_err(WorkspaceError::Io)?)
+        {
+            continue;
+        }
         if file_type.is_dir() {
-            collect_haskell(&entry.path(), output)?;
+            let resolved = dunce::canonicalize(entry.path()).map_err(WorkspaceError::Io)?;
+            if !resolved.starts_with(root) {
+                return Err(WorkspaceError::InvalidConfig(
+                    "source directory resolved outside the selected scripts directory".to_owned(),
+                ));
+            }
+            collect_haskell(root, &entry.path(), output)?;
         } else if file_type.is_file()
             && entry
                 .path()
@@ -829,7 +1047,13 @@ fn collect_haskell(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), Wo
                     suffix.eq_ignore_ascii_case("hs") || suffix.eq_ignore_ascii_case("lhs")
                 })
         {
-            output.push(dunce::canonicalize(entry.path()).map_err(WorkspaceError::Io)?);
+            let resolved = dunce::canonicalize(entry.path()).map_err(WorkspaceError::Io)?;
+            if !resolved.starts_with(root) {
+                return Err(WorkspaceError::InvalidConfig(
+                    "source resolved outside the selected scripts directory".to_owned(),
+                ));
+            }
+            output.push(resolved);
         }
     }
     Ok(())
@@ -882,8 +1106,11 @@ pub struct DoctorCheck {
 
 /// Diagnose workspace structure, config, SDK linkage, and required tools.
 pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
+    doctor_with_resolver(workspace, &ExecutableResolver::environment(&workspace.root))
+}
+
+fn doctor_with_resolver(workspace: &Workspace, resolver: &ExecutableResolver) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let resolver = ExecutableResolver::environment(&workspace.root);
     match workspace.load_config() {
         Ok(config) => {
             checks.push(DoctorCheck {
@@ -897,15 +1124,15 @@ pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
                     "provider",
                     &name,
                     &definition.command,
-                    &resolver,
+                    resolver,
                 );
-                push_native_provider_check(&mut checks, &name, &definition, &resolver);
+                push_native_provider_check(&mut checks, &name, &definition, resolver);
             }
             for (name, definition) in config.effects {
-                push_plugin_check(&mut checks, "effect", &name, &definition.command, &resolver);
+                push_plugin_check(&mut checks, "effect", &name, &definition.command, resolver);
             }
             for (name, definition) in config.plugins {
-                push_plugin_check(&mut checks, "plugin", &name, &definition.command, &resolver);
+                push_plugin_check(&mut checks, "plugin", &name, &definition.command, resolver);
             }
         }
         Err(error) => checks.push(DoctorCheck {
@@ -916,7 +1143,7 @@ pub fn doctor(workspace: &Workspace) -> Vec<DoctorCheck> {
     }
     checks.push(clef_sdk_link_check(workspace));
     for executable in ["ghc", "cabal"] {
-        let found = resolver.resolve(executable);
+        let found = resolver.resolve_toolchain(executable);
         checks.push(DoctorCheck {
             name: executable.to_owned(),
             ok: found.is_ok(),
@@ -1219,6 +1446,62 @@ mod tests {
             "{}",
             checks[0].detail
         );
+    }
+
+    #[test]
+    fn doctor_uses_the_first_toolchain_but_rejects_ambiguous_native_providers() {
+        let temporary = tempfile::tempdir().expect("temporary workspace");
+        let workspace = Workspace::at(temporary.path());
+        fs::create_dir_all(&workspace.control).expect("workspace control directory");
+        fs::write(&workspace.config_path, DEFAULT_CONFIG).expect("workspace config");
+        let first = temporary.path().join("first toolchain");
+        let second = temporary.path().join("second toolchain");
+        let tool_name = |name: &str| {
+            if cfg!(windows) {
+                format!("{name}.EXE")
+            } else {
+                name.to_owned()
+            }
+        };
+        for directory in [&first, &second] {
+            fs::create_dir_all(directory).expect("toolchain directory");
+            for name in ["ghc", "cabal", "codex"] {
+                let path = directory.join(tool_name(name));
+                fs::write(&path, b"fixture").expect("tool fixture");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                        .expect("executable permissions");
+                }
+            }
+        }
+
+        for directories in [[&first, &second], [&second, &first]] {
+            let resolver = ExecutableResolver::new(
+                env::join_paths(directories).expect("test PATH"),
+                Some(std::ffi::OsString::from(".EXE")),
+                &workspace.root,
+            );
+            let checks = doctor_with_resolver(&workspace, &resolver);
+            for name in ["ghc", "cabal"] {
+                let check = checks
+                    .iter()
+                    .find(|check| check.name == name)
+                    .expect("tool check");
+                assert!(check.ok, "{}", check.detail);
+                assert_eq!(
+                    PathBuf::from(&check.detail),
+                    directories[0].join(tool_name(name))
+                );
+            }
+            let provider = checks
+                .iter()
+                .find(|check| check.name == "provider-native:codex")
+                .expect("native provider check");
+            assert!(!provider.ok);
+            assert!(provider.detail.contains("ambiguous"), "{}", provider.detail);
+        }
     }
 
     #[test]

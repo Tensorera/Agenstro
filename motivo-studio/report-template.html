@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Motivo · 工作观察</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f3f4ef;
+        --panel: #fff;
+        --ink: #25342f;
+        --muted: #66766c;
+        --line: #dce3dc;
+        --accent: #32664b;
+        --wash: #eaf2e8;
+        --warning: #866120;
+        --danger: #9b4440;
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        font-size: 16px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        line-height: 1.65;
+      }
+      a {
+        color: var(--accent);
+        text-underline-offset: 0.2em;
+        overflow-wrap: anywhere;
+      }
+      a:hover {
+        text-decoration-thickness: 2px;
+      }
+      button {
+        cursor: pointer;
+        font: inherit;
+        background: var(--panel);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 0.4rem 0.8rem;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      :focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 3px;
+      }
+      .masthead {
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      .masthead-inner {
+        max-width: 1160px;
+        padding: 1rem 2rem;
+        margin: auto;
+        display: flex;
+        gap: 1.25rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .brand {
+        font-size: 1.05rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        display: flex;
+        gap: 0.8rem;
+        align-items: center;
+      }
+      .brand-mark {
+        width: 22px;
+        height: 22px;
+        border: 3px solid var(--accent);
+        border-radius: 4px;
+        box-shadow: 5px -5px 0 -2px var(--wash);
+        transform: rotate(-6deg);
+      }
+      .masthead-note {
+        color: var(--muted);
+        font-size: 0.83rem;
+        margin-right: auto;
+      }
+      .reader-actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .reader-actions[hidden] {
+        display: none;
+      }
+      .document {
+        max-width: 1100px;
+        margin: 2.5rem auto 4rem;
+        padding: 0 2rem;
+      }
+      .motivo-header {
+        margin-bottom: 2rem;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 0.76rem;
+        font-weight: 750;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        margin: 0 0 0.6rem;
+      }
+      h1 {
+        font-size: clamp(1.8rem, 4vw, 2.8rem);
+        line-height: 1.22;
+        letter-spacing: -0.035em;
+        margin: 0.4rem 0 1rem;
+        max-width: 920px;
+        overflow-wrap: anywhere;
+      }
+      h2 {
+        font-size: 1.22rem;
+        line-height: 1.4;
+        margin: 0 0 1rem;
+      }
+      h3 {
+        font-size: 1rem;
+        line-height: 1.5;
+        margin: 1.3rem 0 0.5rem;
+      }
+      p {
+        margin: 0.6rem 0 1rem;
+      }
+      .lede {
+        max-width: 850px;
+        font-size: 1.12rem;
+        color: var(--muted);
+      }
+      main > section,
+      main > article,
+      .run-card,
+      .artifact,
+      .reflection {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+      }
+      .section-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr));
+        gap: 1rem;
+      }
+      .section-grid > * {
+        min-width: 0;
+      }
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 0.7rem 1.4rem;
+        padding: 1.2rem 0;
+        font-size: 0.87rem;
+      }
+      .meta-grid dt {
+        color: var(--muted);
+        font-size: 0.76rem;
+        margin: 0 0 0.2rem;
+      }
+      .meta-grid dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .status {
+        display: inline-block;
+        border-radius: 5px;
+        background: var(--wash);
+        padding: 0.18rem 0.55rem;
+        font-size: 0.78rem;
+        font-weight: 650;
+      }
+      .status-failed,
+      .status-timeout,
+      .status-experiment-failed,
+      .status-timed-out,
+      .status-cancelled,
+      .status-needs-check {
+        background: #fbede4;
+        color: var(--danger);
+      }
+      .status-running,
+      .status-recorded {
+        background: #f5edda;
+        color: var(--warning);
+      }
+      .meta-grid strong,
+      .meta-grid span {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+      .meta-grid span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .report-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.7rem 1.2rem;
+        margin: 1rem 0;
+        font-size: 0.85rem;
+      }
+      aside.note,
+      .note {
+        border-left: 3px solid var(--accent);
+        padding: 0.65rem 1rem;
+        background: var(--wash);
+        font-size: 0.9rem;
+        border-radius: 0 6px 6px 0;
+        margin: 1rem 0;
+      }
+      .run-list,
+      .samples {
+        list-style: none;
+        padding: 0;
+      }
+      .run-card:hover {
+        border-color: var(--accent);
+      }
+      .run-card h2,
+      .run-card h3 {
+        margin-top: 0;
+      }
+      .timeline {
+        padding-left: 1.2rem;
+        border-left: 2px solid var(--line);
+        list-style: none;
+      }
+      .sample {
+        position: relative;
+        margin: 0 0 1.3rem;
+        padding: 0 0 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+      .timeline .sample::before {
+        content: "";
+        position: absolute;
+        left: -1.55rem;
+        top: 0.5rem;
+        width: 0.6rem;
+        height: 0.6rem;
+        background: var(--accent);
+        border-radius: 50%;
+      }
+      .table-scroll {
+        max-width: 100%;
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1rem 0;
+        font-size: 0.9rem;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.8rem 0.75rem;
+        border-bottom: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      th {
+        color: var(--muted);
+        font-size: 0.8rem;
+        font-weight: 650;
+        background: var(--paper);
+      }
+      details {
+        border-top: 1px solid var(--line);
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+      details[open] summary {
+        color: var(--ink);
+        margin-bottom: 0.75rem;
+      }
+      pre,
+      code {
+        font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        font-size: 0.86em;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: var(--paper);
+        padding: 1rem;
+        border-radius: 7px;
+        line-height: 1.65;
+        max-height: 42rem;
+        overflow: auto;
+      }
+      blockquote {
+        color: var(--muted);
+        margin: 1rem 0;
+        border-left: 3px solid var(--line);
+        padding-left: 1rem;
+      }
+      .empty {
+        padding: 2rem 0;
+        color: var(--muted);
+      }
+      .footer {
+        border-top: 1px solid var(--line);
+        max-width: 1036px;
+        margin: 0 auto;
+        padding: 1.25rem 0 2rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .footer p {
+        margin: 0.2rem 0;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --paper: #17221d;
+          --panel: #202e26;
+          --ink: #e2e9df;
+          --muted: #adbdaf;
+          --line: #394b3d;
+          --accent: #b2d7a6;
+          --wash: #293f2c;
+          --warning: #e4c68d;
+          --danger: #f2b6a7;
+        }
+        .status-failed,
+        .status-timeout,
+        .status-experiment-failed,
+        .status-timed-out,
+        .status-cancelled,
+        .status-needs-check {
+          background: #50342c;
+        }
+        .status-running,
+        .status-recorded {
+          background: #433e2a;
+        }
+      }
+      @media (max-width: 640px) {
+        .masthead-inner {
+          padding: 1rem;
+          gap: 0.7rem;
+        }
+        .masthead-note {
+          width: calc(100% - 140px);
+          font-size: 0.75rem;
+        }
+        .document {
+          padding: 0 1rem;
+          margin-top: 1.5rem;
+        }
+        main > section,
+        main > article,
+        .artifact,
+        .reflection,
+        .run-card {
+          padding: 1rem;
+        }
+        .footer {
+          margin: 0 1rem;
+        }
+        th,
+        td {
+          padding: 0.6rem 0.35rem;
+          font-size: 0.83rem;
+        }
+      }
+      @media print {
+        :root {
+          color-scheme: light;
+          --paper: #fff;
+          --panel: #fff;
+          --ink: #111;
+          --muted: #555;
+          --line: #ccc;
+          --accent: #24583b;
+          --wash: #f4f6f2;
+        }
+        .reader-actions,
+        .masthead-note {
+          display: none;
+        }
+        .document {
+          padding: 0;
+          margin: 1rem 0;
+          max-width: none;
+        }
+        pre {
+          max-height: none;
+        }
+        article,
+        .sample {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="masthead">
+      <div class="masthead-inner">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"></span>MOTIVO</div>
+        <span class="masthead-note">工作观察 · 在原来的 coding agent 中继续协作</span>
+        <div class="reader-actions" hidden>
+          <button type="button" id="expand-evidence">展开证据</button>
+          <button type="button" id="reload-report">重新载入报告</button>
+        </div>
+      </div>
+    </div>
+    <div class="document">
+      <!-- MOTIVO_CONTENT -->
+    </div>
+    <footer class="footer">
+      <p>这是已记录工作的快照。请以报告中的生成时间、观察时间和材料来源判断进展。</p>
+      <p>需要调整方向时，在当前 coding agent 对话中继续。关闭此页不影响执行。</p>
+    </footer>
+    <script>
+      (() => {
+        document.querySelector(".reader-actions").hidden = false;
+        const expand = document.getElementById("expand-evidence");
+        expand.addEventListener("click", () => {
+          const shouldOpen = expand.getAttribute("aria-expanded") !== "true";
+          document.querySelectorAll(".document details").forEach((detail) => {
+            detail.open = shouldOpen;
+          });
+          expand.setAttribute("aria-expanded", String(shouldOpen));
+          expand.textContent = shouldOpen ? "收起证据" : "展开证据";
+        });
+        document.getElementById("reload-report").addEventListener("click", () => {
+          window.location.reload();
+        });
+      })();
+    </script>
+  </body>
+</html>

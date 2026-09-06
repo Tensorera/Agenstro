@@ -95,8 +95,6 @@ if "%~1"=="codex" (
 
 #[cfg(unix)]
 fn create_fake_script(directory: &Path) -> Vec<String> {
-    use std::os::unix::fs::PermissionsExt;
-
     let script = directory.join("fake-provider.sh");
     fs::write(
         &script,
@@ -122,12 +120,10 @@ esac
 "#,
     )
     .expect("fake shell provider");
-    let mut permissions = fs::metadata(&script)
-        .expect("script metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("script executable");
-    vec![script.to_string_lossy().into_owned()]
+    // Execute the stable interpreter, not the freshly written fixture inode.
+    // Concurrent forked tests may temporarily retain the script's writable
+    // descriptor and make direct exec fail with ETXTBSY (Text file busy).
+    vec!["/bin/sh".to_owned(), script.to_string_lossy().into_owned()]
 }
 
 #[test]
@@ -205,6 +201,30 @@ fn providers_use_exact_permissive_native_arguments_and_normalize_results() {
             _ => unreachable!(),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn fake_provider_runs_while_its_script_is_open_for_writing() {
+    let workspace = tempdir().expect("workspace");
+    let fake = FakeNativeCli::create();
+    // A concurrently forked child can retain another test's write descriptor
+    // until it execs, even after fs::write has returned in the creating thread.
+    // Holding a writer reproduces the same inode condition deterministically.
+    let _inherited_writer = fs::OpenOptions::new()
+        .write(true)
+        .open(fake._directory.path().join("fake-provider.sh"))
+        .expect("retained script writer");
+    let (code, frames, diagnostics) = call_provider(
+        "codex",
+        "invoke",
+        json!({"prompt":"fixture only", "workspace":workspace.path(), "options":fake.options()}),
+    );
+    assert_eq!(code, 0, "frames: {frames:?}; diagnostics: {diagnostics}");
+    assert_eq!(
+        frames.last().expect("terminal")["value"]["text"],
+        "TACTUS_OK"
+    );
 }
 
 #[test]
@@ -567,7 +587,10 @@ fn provider_host_kills_native_output_that_exceeds_its_line_bound() {
     assert_eq!(code, 1, "{diagnostics}");
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0]["ok"], false);
-    assert_eq!(frames[0]["error"]["code"], "outcome_unknown");
+    assert_eq!(
+        frames[0]["error"]["code"], "outcome_unknown",
+        "frames: {frames:?}; diagnostics: {diagnostics}"
+    );
     assert_eq!(
         frames[0]["error"]["details"]["cause"],
         "native_output_limit"

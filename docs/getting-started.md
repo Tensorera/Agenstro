@@ -1,65 +1,130 @@
 ---
-title: Build the first Agenstro workflow
+title: Start with your coding agent
 status: alpha
 owners: [documentation]
-last_verified: 2026-09-01
+last_verified: 2026-09-05
 applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
 
-# Build the first Agenstro workflow
+# Start with your coding agent
 
-This tutorial creates one model-free Clef workflow, checks it, and runs it
-through Tactus. It then shows where provider-assisted generation fits without
-mixing live model access into the offline proof.
+Use Agenstro in three steps: initialize a folder, open your chosen coding-agent
+CLI there, and ask that agent to help complete the work. Motivo supplies methods
+for uncertainty and coordination. Clef and Tactus execute explicit Haskell
+workflows when the work calls for them.
+
+The commands below also serve as a small offline acceptance exercise; the agent
+can perform them for you. You do not need to start a desktop client, configure
+a second conversation, or learn Haskell before describing the task.
 
 ## Before starting
 
-Complete [Installation](install.md) and verify:
+Complete [Installation](install.md), then verify the installed tools:
 
-```powershell
+```text
 tactus --version
 ghc --numeric-version
 cabal --numeric-version
 ```
 
-Choose a disposable or already trusted project directory. Tactus does not
-sandbox Haskell code or plugins.
+Use a disposable or trusted project for the first exercise. Ordinary Tactus
+Haskell and plugins can perform `IO`; the specific `motivo.test` effect provides
+the separate Linux experiment sandbox.
 
-## 1. Initialize the workspace
+## 1. Initialize the project folder
 
-From the project root:
+From a terminal, point Tactus to the project and the installed Clef package.
+On Linux, for example:
 
-```powershell
-$repoRoot = (Resolve-Path D:\src\Agenstro).Path
-$projectRoot = "D:\work\hello-agenstro"
-New-Item -ItemType Directory -Force $projectRoot | Out-Null
-Set-Location $projectRoot
-
-tactus init --sdk (Join-Path $repoRoot "clef-sdk")
-tactus doctor
+```sh
+tactus init /path/to/project --sdk /path/to/Agenstro/clef-sdk
+cd /path/to/project
 ```
 
-The important result is:
+The corresponding Windows command uses Windows paths:
+
+```powershell
+tactus init D:\work\project --sdk D:\src\Agenstro\clef-sdk
+Set-Location D:\work\project
+```
+
+The relevant workspace layout is:
 
 ```text
 .tactus/
-  tactus.toml       provider, effect, and plugin registry
+  tactus.toml       provider, effect and plugin registry
   cabal.project     link to the Clef package
-  PROMPT.md         generation instructions
-  scripts/          Haskell entries and helper modules
-  runs/             diagnostic event journals and summaries
-  skills/tactus/    agent guidance for editing workflows
+  PROMPT.md         instructions for workflow generation
+  scripts/          business Haskell entries and helpers
+  motivoscript/     eight independent Motivo entries and shared helpers
+  motivotest/       bounded experiment fixtures and results
+  motivo/           method reports, samples and index.html
+  runs/             Tactus diagnostic journals and summaries
+  skills/tactus/    Haskell authoring and runtime rules
+  skills/motivo/    method guidance and the offline HTML template
 ```
 
-`init` preserves existing files. Use [Tactus workspace and configuration](tactus-workspace.md)
-before manually changing this layout.
+`init` preserves existing files and installs short host-agent skill pointers.
+For setup failures, run `tactus doctor`; see
+[Tactus workspace and configuration](tactus-workspace.md) before modifying the
+layout or changing SDK references.
 
-## 2. Add an offline Clef program
+## 2. Open your chosen coding agent here
 
-Create `.tactus/scripts/010_offline.hs`:
+For example, start either `codex` or `claude` from the initialized project
+folder. Keep using that CLI's model, authentication, permission and conversation
+controls. Agenstro does not infer those settings from Tactus's default provider.
+
+The main agent stays responsible for understanding your goal, choosing a useful
+next action and explaining what changed. No Motivo task service takes over the
+conversation.
+
+## 3. Ask the agent to use Motivo when it helps
+
+An initial request can be ordinary language:
+
+> Use Motivo to investigate why importing a large folder is slow. Start with the
+> relevant code and existing evidence, record what remains uncertain, and show
+> me the report before proposing a focused experiment.
+
+The methods are clarify, investigate, analyze, research, probe, organize,
+retrospect and handoff. The agent selects one where it helps; it need not run
+all eight or write a custom workflow for a simple task.
+
+By default, a template records the main agent's existing Markdown. It accepts
+ordinary prose; missing suggested sections remain unknown rather than requiring
+a model call to repair a report format. For example, the agent can save its
+notes to `.tactus/motivo/drafts/investigation.md` and execute:
+
+```sh
+tactus run --scripts-dir .tactus/motivoscript \
+  --script .tactus/motivoscript/020_investigate.hs \
+  -- --input .tactus/motivo/drafts/investigation.md --agent Codex
+```
+
+The output gives the run's `report.html` and `.tactus/motivo/index.html`. Open
+one in a browser. Each HTML file contains its own data and needs no server or
+port. Refreshing it reads the newest generated snapshot; the page cannot observe
+unrecorded agent activity or initiate execution. The agent should still explain
+findings and next actions in your conversation.
+
+A non-probe method can request one independent context using explicit
+`--provider NAME` and optional `--model MODEL`. This does not inherit the main
+agent's memory or silently use a default provider. Probe instead calls the
+`motivo.test` effect: fixtures and persistent writes stay below
+`.tactus/motivotest/<run>/<sample>`, and the maximum experiment deadline is 600
+seconds. If enforcing isolation is unavailable, it refuses the experiment.
+See [Motivo Studio](motivo-studio.md) for the complete method and report flow.
+
+## Try one offline business workflow
+
+When a repeatable action needs a Haskell entry, the main agent follows the
+Tactus skill and writes it under `.tactus/scripts`. This small example makes no
+model call. Save it as `.tactus/scripts/010_offline.hs`:
 
 ```haskell
+{-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
 import Clef
@@ -73,117 +138,45 @@ main = do
   print result
 ```
 
-This is an ordinary Haskell executable. `Workflow` supplies typed composition;
-`requireBecause` stops the workflow if the stated condition is false.
-
-## 3. Discover and check it
-
-```powershell
-tactus list
-tactus check .tactus\scripts\010_offline.hs
-```
-
-`list` distinguishes runnable numbered entries from helper modules. `check`
-asks Cabal and GHC to compile without running workflow code.
-
-The first check on a new machine is a cold build. Cabal may download package
-metadata and compile dependencies. A longer finite budget can be supplied:
-
-```powershell
-tactus check --timeout-seconds 7200 .tactus\scripts\010_offline.hs
-```
-
-## 4. Run it
-
-```powershell
-tactus run --script .tactus\scripts\010_offline.hs
-```
-
-The final program output is `42`. Tactus also creates a run record below
-`.tactus/runs`. Human-facing Agenstro messages use only `[state]`, `[info]`,
-`[warning]`, and `[error]`; structured diagnostic evidence stays in the run
-journal. See [Logs and run evidence](observability.md).
-
-## 5. Add more stages
-
-Runnable files use increasing three-digit prefixes:
+Check and execute only this entry:
 
 ```text
-.tactus/scripts/
-  010_discover.hs
-  020_transform.hs
-  030_review.hs
-  Tactus/Shared.hs
+tactus list
+tactus check .tactus/scripts/010_offline.hs
+tactus run --script .tactus/scripts/010_offline.hs
 ```
 
-Bulk selection is explicit. `--all` checks all Haskell sources or runs all
-numbered entries in numeric/path order:
+The program prints `42`. `check` asks Cabal and GHC to compile without executing
+the workflow; a cold build may download and compile dependencies. `run` also
+creates diagnostic evidence below `.tactus/runs`. Query it with:
 
-```powershell
-tactus check --all
-tactus run --all
-```
-
-Use an inclusive numeric range, or repeat `--script` in the desired order:
-
-```powershell
-tactus check --from 20 --through 30
-tactus run --from 20 --through 30
-```
-
-```powershell
-tactus run `
-  --script .tactus\scripts\020_transform.hs `
-  --script .tactus\scripts\030_review.hs
-```
-
-Calling `check` or `run` with no paths, `--all`, or range is rejected. This
-prevents an omitted argument from silently executing a whole workspace.
-
-Query the resulting journals through the bounded read-only commands:
-
-```powershell
+```text
 tactus runs summarize --since 24h
-tactus runs list --state outcome_unknown
 tactus runs unfinished
 ```
 
-Provider choice is inside the Haskell workflow or the workspace default. Script
-selection does not change the provider.
+Ordinary `list`, `check --all` and `run --all` select only `.tactus/scripts`.
+They do not include Motivo methods. A source path, explicit `--all`, or numeric
+range is required for check/run; an omitted selection cannot silently execute
+the workspace. A logical entry is not a transaction or a rollback mechanism.
 
-## 6. Generate a workflow with a provider
+Provider-assisted `tactus generate --provider NAME GOAL...` remains available
+when explicitly useful. Generation reads `.tactus/PROMPT.md` and the Tactus skill,
+may compile-check changes, and does not automatically execute the generated
+business workflow. An agent already working in the project can usually author
+that entry directly. Keep generation guidance separate from optional shared
+business-call `runtime_instructions`.
 
-First complete [Provider setup](providers.md). Then ask one configured provider
-to create or extend scripts:
+## Continue from the result
 
-```powershell
-tactus generate --provider codex `
-  "Create a typed three-stage workflow: discover inputs, transform them, then review the result."
-```
+A published method, returned provider response or passing small experiment does
+not establish that your whole task is complete. The main agent should connect
+the observed evidence to your goal, make the next authorized change, and review
+what the actual result teaches.
 
-Generation reads `.tactus/PROMPT.md` and the bundled Tactus skill. It may create
-new numbered entries or update existing scripts and helpers. It may compile-check
-selected sources for feedback, but it does not automatically run the business
-workflow. Always inspect and check the result:
-
-```powershell
-tactus list
-git diff -- .tactus\scripts
-tactus check --all
-```
-
-A later `generate` call sees the current workspace and may add or modify
-scripts. It does not erase earlier workflows by policy, so state the desired
-scope precisely and use version control.
-
-`PROMPT.md` guides the authoring agent only. Business provider calls have no
-shared instruction prefix by default. If they need one, create a separate
-file and set `runtime_instructions = ".tactus/RUNTIME.md"` in `tactus.toml`.
-
-## 7. Read the next guide
-
-- Learn the EDSL: [Program with Clef](clef.md).
-- Understand files and defaults: [Tactus workspace and configuration](tactus-workspace.md).
-- Add external capabilities: [Author a local plugin](plugin-authoring.md).
-- Keep a task alive between runs: [Segno persistent tasks](segno.md).
-- Open the workspace visually: [Motivo Studio](motivo-studio.md).
+- Method examples and reports: [Motivo Studio](motivo-studio.md).
+- Haskell composition: [Program with Clef](clef.md).
+- Source selection and commands: [CLI reference](reference/cli-v0.3.md).
+- External capabilities: [Author a local plugin](plugin-authoring.md).
+- Persistent execution: [Segno persistent tasks](segno.md).
+- Runtime evidence: [Logs and run evidence](observability.md).

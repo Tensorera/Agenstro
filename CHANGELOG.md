@@ -3,6 +3,16 @@
 This project is a source alpha. Versions describe checked-in contracts; they
 do not imply a package-registry release or compatibility guarantee.
 
+
+## Unreleased — agent-led Motivo
+
+- Return the user conversation and method choice to the existing coding agent.
+- Add eight independent Haskell method templates and project-discoverable Motivo skills.
+- Add generic Tactus `--scripts-dir` selection, keeping business and method scripts separate.
+- Replace the Electron client with standalone read-only HTML reports.
+- Add the Linux `motivo.test` effect with a single 1–600 second deadline and a confined experiment directory.
+- Preserve Clef, Segno, existing runtime APIs and historical `.motivo/tasks` files.
+
 ## Unreleased
 
 ### Added

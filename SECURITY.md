@@ -1,7 +1,8 @@
 # Security policy
 
 Agenstro `0.3` is an AGPL-3.0-only source alpha for trusted local development.
-It is not a security boundary.
+Its general workflow runtime is not a security boundary. The optional
+`motivo.test` effect has the narrower execution boundary described below.
 
 ## Execution model
 
@@ -37,9 +38,32 @@ The current project aims to:
 - keep credentials, runtime state, private notes, and generated transcripts out
   of the repository.
 
-It does not currently claim hostile-code isolation, plugin signing, credential
-brokering, exactly-once execution, reliable process-tree termination, or
-deterministic replay of arbitrary Haskell `IO`.
+Ordinary workflow execution does not claim hostile-code isolation, plugin
+signing, credential brokering, exactly-once execution, complete termination of
+arbitrary detached process trees, or deterministic replay of Haskell `IO`.
+
+## Motivo experiment boundary
+
+On Linux, `motivo.test` uses Bubblewrap namespaces and read-only mounts to
+restrict experiment writes to `.tactus/motivotest/<run-id>/<sample-id>`. It
+isolates the network, withholds the host environment and user configuration,
+and supervises all experiment descendants within one deadline of at most
+600 seconds. Missing isolation support is an error; no unrestricted fallback
+is provided. Other platforms currently cannot execute this effect.
+
+This boundary applies to the experiment command, not the enclosing Haskell
+program, main coding agent, or optional independent provider call. Project
+files remain readable, including any secrets stored in the project. Time and
+retained log limits are not general disk, RAM, or CPU quotas. The host-side
+workspace and plugin are trusted; a same-authority host process racing path
+replacement is outside this boundary. See the
+[plugin specification](plugins/motivo-test/README.md) for mount and supervision
+details and the real Linux isolation tests.
+
+Motivo reports embed escaped text and require no server or external resources.
+They still contain user-supplied task evidence, which should be reviewed before
+sharing. A rendered report is neither verification of that evidence nor an
+execution capability.
 
 ## Handling credentials
 

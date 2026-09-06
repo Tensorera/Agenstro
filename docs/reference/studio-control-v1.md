@@ -1,7 +1,7 @@
 ---
 title: Studio control API v1
 status: alpha
-owners: [tactus, motivo]
+owners: [tactus]
 last_verified: 2026-09-05
 applies_to: "agenstro.studio/v1 and tactus.control/v1"
 platforms: [windows, ubuntu]
@@ -9,8 +9,8 @@ platforms: [windows, ubuntu]
 
 # Studio control API v1
 
-The Studio control API is the read-only, machine-facing boundary between the
-Rust Tactus runtime and Motivo Studio. It is separate from
+The Studio control API is a read-only, machine-facing inspection boundary
+provided by the Rust Tactus runtime for CLI tools and other consumers. It is separate from
 `agenstro.plugin/v1`: clients use it to inspect an initialized workspace and
 page through validated trace events, not to implement plugins.
 
@@ -18,13 +18,12 @@ Human-decision reads and answers share the `tactus.control/v1` envelope but
 have their own bounded domain contract; see
 [Session document and control API v1](session-control-v1.md).
 
-Motivo Tasks are a separate local application boundary. Named renderer IPC
-calls reach Motivo's main-process task service, which owns
-`.motivo/tasks/<uuid>.json` and the optional `.motivo/METHOD.md` guidance.
-Provider requests use the existing Tactus plugin dispatch protocol. Tasks do
-not add commands or fields to this Studio API, and their report history is not
-derived from trace events. See [Motivo Studio](../motivo-studio.md) and
-[ADR-0007](../adr/0007-motivo-task-method.md).
+Motivo now consists of a skill, eight independent Haskell method templates and
+locally generated HTML reports. The user's existing coding agent owns the
+conversation. The offline report page neither calls this API nor consumes an
+Electron/IPC task service. These inspection commands remain supported Tactus
+APIs; see [Motivo Studio](../motivo-studio.md) and
+[ADR-0008](../adr/0008-agent-led-motivo.md) for the current method boundary.
 
 ## Commands
 
@@ -65,9 +64,9 @@ A control error uses the same envelope and a stable, redacted failure:
 doctor check passed or that a traced plugin invocation succeeded.
 
 `--exact-root` rejects upward workspace discovery with
-`workspace_root_mismatch`. Motivo always uses it so Electron main's private
-redaction root is exactly the workspace Tactus inspected; the error never
-reveals the discovered parent path.
+`workspace_root_mismatch`. A consumer that needs the inspected workspace to
+match its supplied root should use this option. The error never reveals the
+discovered parent path.
 
 ## Workspace snapshot
 
@@ -172,10 +171,9 @@ run id, or summary count yields `corrupt`.
   configuration are runtime internals. Runtime configuration is removed after
   the supervised command; Studio clients must not read either implementation
   detail directly.
-- Motivo starts Tactus with an argument array and `shell: false`; the renderer
-  receives validated Studio projections and never owns the workspace root.
-  Motivo's separate task IPC additionally carries validated business reports;
-  it does not change this API's projection or redaction rules.
+- Consumers invoking Tactus should pass an argument array and validate the
+  control envelope. The current Motivo HTML report has no command channel or
+  access to these APIs; it displays data rendered by the method helper.
 
 The current reference limits and DTOs live in the Rust
 `tactus-runtime::studio` module. Changes that break these rules require a new

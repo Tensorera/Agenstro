@@ -181,7 +181,7 @@ function Invoke-FastSteps {
         Invoke-NativeCommand "cargo" @("fmt", "--all", "--check")
     }
     Invoke-QualityStep "rust-check" {
-        Invoke-NativeCommand "cargo" @("check", "-p", "tactus-runtime", "--all-targets", "--locked")
+        Invoke-NativeCommand "cargo" @("check", "--workspace", "--all-targets", "--locked")
     }
     Invoke-QualityStep "haskell-build-werror" {
         Invoke-NativeCommand "cabal" @(
@@ -202,28 +202,25 @@ function Invoke-FastSteps {
     Invoke-QualityStep "motivo-lint" {
         Invoke-NativeCommand "npm" @("run", "lint") (Join-Path $repositoryRoot "motivo-studio")
     }
-    Invoke-QualityStep "motivo-typecheck" {
-        Invoke-NativeCommand "npm" @("run", "typecheck") (Join-Path $repositoryRoot "motivo-studio")
-    }
 }
 
 function Invoke-FullSteps {
     Invoke-FastSteps
     Invoke-QualityStep "rust-clippy" {
         Invoke-NativeCommand "cargo" @(
-            "clippy", "-p", "tactus-runtime", "--all-targets", "--locked", "--", "-D", "warnings"
+            "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"
         )
     }
     Invoke-QualityStep "rust-tests" {
-        Invoke-NativeCommand "cargo" @("test", "-p", "tactus-runtime", "--locked")
+        Invoke-NativeCommand "cargo" @("test", "--workspace", "--locked")
     }
     Invoke-QualityStep "rust-msrv-check" {
         Invoke-NativeCommand "cargo" @(
-            "+1.88.0", "check", "-p", "tactus-runtime", "--all-targets", "--locked"
+            "+1.88.0", "check", "--workspace", "--all-targets", "--locked"
         )
     }
     Invoke-QualityStep "rust-msrv-tests" {
-        Invoke-NativeCommand "cargo" @("+1.88.0", "test", "-p", "tactus-runtime", "--locked")
+        Invoke-NativeCommand "cargo" @("+1.88.0", "test", "--workspace", "--locked")
     }
     Invoke-QualityStep "topology-reference-tests" {
         Invoke-NativeCommand "cargo" @(
@@ -272,6 +269,14 @@ function Invoke-FullSteps {
     }
     Invoke-QualityStep "motivo-tests" {
         Invoke-NativeCommand "npm" @("test") (Join-Path $repositoryRoot "motivo-studio")
+    }
+    Invoke-QualityStep "motivo-installed-methods" {
+        # init embeds the templates, skill and observer: test a freshly built binary.
+        Invoke-NativeCommand "cargo" @("build", "--workspace", "--locked")
+        $tactusName = if ($IsWindows) { "tactus.exe" } else { "tactus" }
+        Invoke-NativeCommand $pythonCommand @(
+            "motivo/tests/run.py", "--tactus", (Join-Path $cargoTarget "debug/$tactusName"), "--installed-only"
+        )
     }
     Invoke-QualityStep "motivo-package" {
         Invoke-NativeCommand "npm" @("run", "package") (Join-Path $repositoryRoot "motivo-studio")
@@ -452,14 +457,14 @@ try {
                 throw "Release validation stopped because the dependency audit failed."
             }
             Invoke-QualityStep "rust-release-build" {
-                Invoke-NativeCommand "cargo" @("build", "--release", "--locked", "-p", "tactus-runtime")
+                Invoke-NativeCommand "cargo" @("build", "--release", "--locked", "--workspace")
             }
             Invoke-QualityStep "cabal-source-distributions" {
                 Invoke-NativeCommand "cabal" @("sdist", "--builddir=../Build/cabal") (Join-Path $repositoryRoot "clef-sdk")
                 Invoke-NativeCommand "cabal" @("sdist", "--builddir=../Build/cabal") (Join-Path $repositoryRoot "segno-flow")
             }
-            Invoke-QualityStep "motivo-installers" {
-                Invoke-NativeCommand "npm" @("run", "make") (Join-Path $repositoryRoot "motivo-studio")
+            Invoke-QualityStep "motivo-offline-report" {
+                Invoke-NativeCommand "npm" @("run", "build") (Join-Path $repositoryRoot "motivo-studio")
             }
         }
     }

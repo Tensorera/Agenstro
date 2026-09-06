@@ -113,6 +113,10 @@ more precise access events without changing that limitation.
 
 The cutover initially froze Motivo. The `0.3` follow-up revives only a thin
 TypeScript/React projection over versioned, redacted Rust control queries.
+The following Studio arrangement describes the historical desktop client;
+[ADR-0008](0008-agent-led-motivo.md) replaces it with agent-led methods and
+offline HTML. Tactus's generic control API remains supported.
+
 Electron main owns the selected root and Tactus child; the sandboxed renderer
 receives named, schema-checked IPC. Motivo does not parse runtime state or own a
 second daemon/workflow runtime.

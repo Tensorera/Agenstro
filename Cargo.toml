@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "tactus-runtime",
+  "plugins/motivo-test",
 ]
 
 [workspace.package]

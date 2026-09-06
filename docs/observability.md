@@ -2,7 +2,7 @@
 title: Logs, state transitions, and run evidence
 status: alpha
 owners: [tactus, motivo]
-last_verified: 2026-08-17
+last_verified: 2026-09-05
 applies_to: "Clef/Tactus/Motivo 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -36,8 +36,8 @@ State is the currently authoritative condition at one layer:
   `Succeeded`, `Failed`, `OutcomeUnknown`);
 - versioned Segno business state, which is deliberately separate from
   lifecycle state; and
-- Motivo action projection state, which mirrors Tactus rather than creating a
-  new runtime state machine.
+- the last recorded Motivo method or experiment condition, which describes
+  saved evidence and does not constitute a live task controller.
 
 ### Input (`i`)
 
@@ -69,7 +69,9 @@ consult:
 
 - current source and `.tactus/tactus.toml` configuration;
 - prior typed values within the running Clef workflow;
-- Tactus run diagnostics used by people and tools for investigation; and
+- Tactus run diagnostics used by people and tools for investigation;
+- Motivo method inputs, samples, artifacts, and reflections used by the main
+  coding agent to choose its next step; and
 - Segno trigger cursors, occurrence lifecycle, attempts, fencing tokens, and
   business-state revisions.
 
@@ -79,7 +81,7 @@ call.
 
 ## Human presentation
 
-Shells and Motivo Studio use exactly four labels:
+Tactus human logs and its control projections use exactly four labels:
 
 ```text
 [state] A provider invocation started.
@@ -193,15 +195,60 @@ removed after the command. Crash leftovers use a private prefix, an ownership
 lease, and bounded stale cleanup; they are internal files, not published
 evidence.
 
-## Motivo projection
+## Motivo method evidence and HTML snapshots
 
-Motivo asks Tactus for versioned, redacted workspace and run projections. It
-does not parse TOML or read `.tactus/runs` directly.
+The main coding agent chooses a Motivo method and interprets its results in the
+existing conversation. Eight Haskell templates live in `.tactus/motivoscript`:
+clarify, investigate, analyze, research, probe, organize, retrospect, and handoff.
+Their sequence is chosen for the problem; template numbering is not a required
+pipeline.
 
-Canonical `presentation` fields become the four visible labels. Legacy or raw
-event data stays under closed technical details. If the desktop output budget
-is exceeded, Motivo keeps draining the child process, emits one warning, drops
-additional projection text, and preserves the real Tactus exit outcome.
+Method inputs, samples, and reports are stored separately from runtime journals:
+
+```text
+.tactus/motivo/
+  index.html
+  runs/<run-id>/
+    request.md
+    run.json
+    samples.jsonl
+    report.md
+    report.html
+    artifacts/
+.tactus/motivotest/<run-id>/<sample-id>/
+```
+
+Samples retain append order and observed times. A parent-run reference records
+a declared dependency; wall-clock order alone does not establish causality.
+Retrospectives compare expectations with observations, cite evidence, identify
+what to keep or change, and hand a next step back to the main agent. Model or
+agent names supplied by the caller are provenance labels, not confirmation
+that a particular provider actually ran. Missing identity remains unknown.
+
+Motivo Studio consists of self-contained, pre-rendered HTML. Core content is
+readable with JavaScript disabled; optional reading controls do not execute
+work or contact a provider. There is no runtime Node/Electron, IPC, local
+server, listening port, or adjacent-file fetch. Publication replaces a complete
+snapshot. Refresh reloads the file, and its generation time tells the reader
+how current the evidence is. A page left open is not a live connection.
+
+`recorded` means submitted method notes were published. It does not establish
+task correctness, successful tests, or completion of the user's goal. A
+`running` experiment entry is only the last recorded condition and can be stale
+after a crash. Inspect experiment logs and Tactus diagnostics before deciding
+whether repeating an interrupted action is appropriate.
+
+The `probe` method invokes `motivo.test`; its Linux backend confines persistent
+experiment writes to `.tactus/motivotest` and applies one preparation/execution
+deadline of at most 600 seconds. Unsupported platforms or unavailable isolation
+refuse execution. These restrictions apply to that plugin, not all Haskell or
+agent activity. The returned exit, timeout, and log evidence is distinct from
+the agent's explanation of why an experiment behaved that way.
+
+Method artifacts intentionally contain business material and are not covered
+by Tactus journal redaction. Sharing one HTML snapshot shares its embedded
+evidence; linked attachments may remain local. Old `.motivo/tasks` histories
+are not resumed or rewritten by this observation layer.
 
 ## What to inspect after a failure
 
@@ -210,7 +257,8 @@ Use this order:
 1. read the final human `[state]`, `[warning]`, or `[error]` message;
 2. identify the command and run ID;
 3. inspect `summary.json` for the authoritative diagnostic outcome;
-4. page structured events through `tactus studio events RUN_ID` or Motivo;
+4. page structured events through `tactus studio events RUN_ID`; for a Motivo
+   method, also inspect its report, sample records, and experiment logs;
 5. for `OutcomeUnknown`, inspect the external provider/system and workspace;
 6. for Segno, also inspect lifecycle and business-state history; and
 7. retry only after the idempotency and side-effect risk is understood.

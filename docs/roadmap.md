@@ -24,14 +24,17 @@ The release candidate path contains:
   control projections;
 - Segno as one Haskell, single-node, at-least-once persistent-task driver with
   pure interval/UTC-cron planning and separate SQLite lifecycle/business state;
-- Motivo Studio as a TypeScript task method and React/Electron interface over
-  Tactus, with bounded agent calls, local task reports, optional investigation
-  branches, and the existing session-answer channel; and
+- Motivo as a skill used by the existing coding agent, eight independent
+  Haskell method templates, local evidence, and offline HTML snapshots;
+- `motivo.test` as a separate Linux experiment effect with confined persistent
+  writes and a preparation/execution deadline of at most 600 seconds; and
 - a language-neutral one-shot `agenstro.plugin/v1` process boundary.
 
 The release gate covers Windows and Ubuntu source builds, local fake providers,
 cross-language Haskell/Rust execution, the multi-step topology example, Segno
-virtual-time behavior, Motivo package creation, and strict documentation.
+virtual-time behavior, Motivo's static reader build, and strict documentation.
+Real experiment-isolation checks require a Linux host with usable Bubblewrap
+namespaces; other platforms refuse experiment execution.
 
 ## Release hardening
 
@@ -46,7 +49,8 @@ operate, and extend without enlarging the core:
    C#, and Haskell;
 5. formalize run-retention and diagnostic export commands;
 6. add supported reconciliation operations for Segno `OutcomeUnknown`; and
-7. stabilize the public control DTOs used by Motivo.
+7. evaluate Motivo methods on real tasks and improve report clarity and skill
+   discoverability without adding another task client.
 
 ## Clef direction
 
@@ -76,12 +80,13 @@ current SQLite driver.
 
 ## Motivo direction
 
-Motivo owns task-level method and interaction while Tactus owns execution. The
-current method offers investigate, try, integrate, and conclude as optional
-actions, uses one shared provider-call budget, and keeps handoffs in `.motivo`.
-Project method text is replaceable; report shape remains a stable application
-boundary. [ADR-0007](adr/0007-motivo-task-method.md) supersedes the former
-projection-only charter for this surface.
+The existing coding agent owns the conversation, chooses methods, and applies
+their results. Motivo offers clarify, investigate, analyze, research, probe,
+organize, retrospect, and handoff as independent Haskell templates in
+`.tactus/motivoscript`. Business execution stays in `.tactus/scripts`; samples
+and reports live in `.tactus/motivo`. Experiments use `.tactus/motivotest`
+through the enforcing plugin. [ADR-0008](adr/0008-agent-led-motivo.md) replaces
+the former desktop-owned task loop.
 
 Useful next work includes task-level evaluation against direct-agent baselines,
 better bounded context selection, and turning demonstrated repeated procedures
@@ -89,16 +94,22 @@ into optional Clef workflows. Improvements must be measured on real task
 outcomes, cost, and time; a report schema or a more elaborate method does not
 establish a capability gain.
 
-Accessibility, richer trace filtering, and signed installers remain useful.
-The existing Tactus Sessions interface still has no `session advance` planner.
-Motivo task persistence does not add a background scheduler, automatic external
-reconciliation, native-session replay, or isolation for parallel writers.
+Useful refinements include more legible evidence links, accessible offline
+reports, and additional experiment backends only when they can enforce their
+advertised limits. The current HTML reader needs no runtime Node/Electron,
+server, or port. A recorded report does not certify task completion or prove a
+model capability improvement.
+
+The existing Tactus session API still has no `session advance` planner. Method
+records do not add a background scheduler, native-session replay, automatic
+external reconciliation, or isolation for arbitrary concurrent business writes.
 
 ## Explicit non-goals for 0.3
 
 The current line does not promise:
 
-- hostile-code sandboxing;
+- universal sandboxing of arbitrary Haskell, providers, or plugins beyond the
+  explicit `motivo.test` experiment contract;
 - a hosted or multi-user Tactus service;
 - credential brokerage or authentication;
 - exactly-once external effects;

@@ -227,4 +227,4 @@ Before publishing a source revision:
 7. tag the exact commit only after CI succeeds.
 
 The AGPL applies to the repository code. Third-party providers, compilers,
-Electron, Node packages, and other dependencies retain their own licenses.
+Development dependencies and plugin dependencies retain their own licenses.

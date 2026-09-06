@@ -138,6 +138,46 @@ impl ExecutableResolver {
         }
     }
 
+    /// Find the first executable toolchain command in PATH order, as check/run do.
+    ///
+    /// Preserve the launch path: a symlink such as a mise shim can depend on its
+    /// original name. Provider and plugin resolution remains strict in `resolve`.
+    pub(crate) fn resolve_toolchain(
+        &self,
+        command: &str,
+    ) -> Result<PathBuf, ExecutableResolutionError> {
+        let command_path = Path::new(command);
+        let explicit = command_path.is_absolute() || command_path.components().count() > 1;
+        let paths = if explicit {
+            vec![self.working_directory.join(command_path)]
+        } else {
+            env::split_paths(&self.search_path)
+                .map(|directory| self.working_directory.join(directory).join(command_path))
+                .collect()
+        };
+        #[cfg(windows)]
+        let paths = paths
+            .into_iter()
+            .flat_map(|path| {
+                if path.extension().is_some() {
+                    vec![path]
+                } else {
+                    self.windows_extensions()
+                        .iter()
+                        .map(|extension| append_extension(&path, extension))
+                        .collect()
+                }
+            })
+            .collect::<Vec<_>>();
+        paths
+            .into_iter()
+            .find(|path| is_toolchain_executable(path))
+            .ok_or_else(|| ExecutableResolutionError::NotFound {
+                command: command.to_owned(),
+                explicit,
+            })
+    }
+
     fn explicit_candidates(&self, command: &Path) -> Vec<PathBuf> {
         let candidate = if command.is_absolute() {
             command.to_path_buf()
@@ -221,6 +261,24 @@ impl ExecutableResolver {
                 .collect();
         }
         extensions
+    }
+}
+
+fn is_toolchain_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -355,6 +413,42 @@ mod tests {
             panic!("expected ambiguity")
         };
         assert_eq!(candidates.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_lookup_skips_nonexecutables_and_preserves_the_shim_launch_path() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = temporary.path().join("first");
+        let shims = temporary.path().join("shims");
+        fs::create_dir_all(&first).expect("first directory");
+        fs::create_dir_all(&shims).expect("shim directory");
+        fs::write(first.join("ghc"), b"not executable").expect("nonexecutable fixture");
+        fs::set_permissions(first.join("ghc"), fs::Permissions::from_mode(0o644))
+            .expect("nonexecutable permissions");
+        let launcher = temporary.path().join("toolchain-manager");
+        fs::write(&launcher, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("launcher permissions");
+        let shim = shims.join("ghc");
+        symlink(&launcher, &shim).expect("toolchain shim");
+        let resolver = ExecutableResolver::new("first:shims", None, temporary.path());
+
+        assert_eq!(
+            resolver.resolve_toolchain("ghc").expect("executable shim"),
+            shim
+        );
+
+        fs::remove_file(&shim).expect("remove shim");
+        assert!(matches!(
+            resolver.resolve_toolchain("ghc"),
+            Err(ExecutableResolutionError::NotFound {
+                explicit: false,
+                ..
+            })
+        ));
     }
 
     #[cfg(windows)]

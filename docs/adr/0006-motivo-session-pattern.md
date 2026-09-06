@@ -1,10 +1,17 @@
 # ADR-0006: Durable sessions and Motivo Studio's return channel
 
-- Status: Accepted, staged
+- Status: Accepted for Tactus session semantics; former Motivo desktop surface superseded
 - Date: 2026-08-20
 - Scope: Tactus session control and Motivo Studio
 - Extends: ADR-0003 and ADR-0005
 - Relates to: ADR-0004, which remains unchanged
+
+> This ADR preserves the session design and the implementation boundary at its
+> original date. [ADR-0008](0008-agent-led-motivo.md) subsequently replaced the
+> Motivo desktop session views and return channel with agent-led methods and
+> offline HTML observations. Tactus's `session list`, `session show` and
+> `session answer` APIs remain available. References below to Motivo renderer,
+> picker or IPC behavior describe the historical desktop implementation.
 
 ## Context
 

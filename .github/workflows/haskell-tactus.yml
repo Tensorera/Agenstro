@@ -33,10 +33,10 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - name: Check formatting
         run: cargo +stable fmt --all --check
-      - name: Check Tactus
-        run: cargo +stable check -p tactus-runtime --all-targets --locked
-      - name: Lint Tactus
-        run: cargo +stable clippy -p tactus-runtime --all-targets --locked -- -D warnings
+      - name: Check the Rust workspace
+        run: cargo +stable check --workspace --all-targets --locked
+      - name: Lint the Rust workspace
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - name: Test Tactus without model calls
         run: cargo +stable test -p tactus-runtime --locked
       - name: Test the topology reference program
@@ -57,7 +57,7 @@ jobs:
       - name: Install MSRV
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check Tactus at MSRV
-        run: cargo +1.88.0 check -p tactus-runtime --all-targets --locked
+        run: cargo +1.88.0 check --workspace --all-targets --locked
       - name: Test Tactus at MSRV
         run: cargo +1.88.0 test -p tactus-runtime --locked
       - name: Remove Rust build artifacts
@@ -93,8 +93,8 @@ jobs:
           cabal-version: ${{ matrix.cabal }}
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
-      - name: Build the Rust Tactus executable
-        run: cargo +stable build -p tactus-runtime --bin tactus --locked
+      - name: Build Tactus and the optional experiment plugin
+        run: cargo +stable build --workspace --locked
       - name: Put Tactus on PATH
         shell: bash
         run: echo "$CARGO_TARGET_DIR/debug" >> "$GITHUB_PATH"
@@ -106,6 +106,9 @@ jobs:
         run: cabal test --builddir=Build/cabal clef-sdk:test:clef-sdk-tests --test-show-details=direct --ghc-options=-Werror
       - name: Test Segno with virtual time and fake process boundaries
         run: cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --test-show-details=direct --ghc-options=-Werror
+      - name: Exercise installed Motivo methods without model calls
+        shell: bash
+        run: python motivo/tests/run.py --tactus "$CARGO_TARGET_DIR/debug/tactus" --installed-only
       - name: Type-check the model-free active-window persistent task
         run: >-
           cabal exec --builddir=Build/cabal -- ghc -fno-code -package clef-sdk -package segno-flow
@@ -155,8 +158,8 @@ jobs:
           printf '%s\n' 'import Clef' 'main :: IO ()' 'main = runTactus (liftIO (putStrLn "TACTUS_CI_OK"))' > "$smoke/.tactus/scripts/010_ci.hs"
           tactus list --root "$smoke" --json
           tactus doctor --root "$smoke" --json
-          tactus check --root "$smoke"
-          tactus run --root "$smoke" | grep -F TACTUS_CI_OK
+          tactus check --root "$smoke" --all
+          tactus run --root "$smoke" --all | grep -F TACTUS_CI_OK
       - name: Type-check the multi-step topology workflows
         shell: bash
         run: |
@@ -192,8 +195,26 @@ jobs:
         shell: pwsh
         run: ./Test/repository/test-documentation-contract.ps1
 
+  motivo-isolation:
+    name: Motivo real Linux isolation (Rust ${{ matrix.rust }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, "1.88.0"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Install Rust
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Test the real experiment boundary
+        run: cargo +${{ matrix.rust }} test -p motivo-test --locked
+
   motivo-studio:
-    name: Motivo Studio (${{ matrix.os }})
+    name: Motivo offline observer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -218,9 +239,7 @@ jobs:
         run: npm run format:check
       - name: Lint
         run: npm run lint
-      - name: Type-check all Electron boundaries
-        run: npm run typecheck
       - name: Test without model calls
         run: npm test
-      - name: Package the desktop application
+      - name: Package the standalone HTML template
         run: npm run package

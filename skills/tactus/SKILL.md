@@ -11,9 +11,12 @@ imports. Use `tactus doctor --root <workspace> --json` to diagnose setup errors.
 
 ## Source rules
 
-- Store Haskell sources below `.tactus/scripts`. Files named
+- Store business Haskell sources below `.tactus/scripts`. Other source trees
+  below `.tactus`, such as `.tactus/motivoscript`, require an explicit
+  `--scripts-dir` on `list`, `check`, and `run`. Files named
   `NNN_name.hs` or `NNN_name.lhs` are runnable entries; helpers are ordinary Haskell modules.
-  Keep selected paths within this directory, including resolved symlinks.
+  Keep selected paths within the selected directory; linked files and directories
+  are not accepted as explicit sources. Source selection is not an IO sandbox.
 - Entries declare `module Main (main) where`, import `Clef`, and expose
   `main :: IO ()`. Run a `Workflow a` with `runTactus`; use ordinary Haskell
   functions and values for local computation.

@@ -1,8 +1,8 @@
 ---
 title: Session document and control API v1
 status: alpha
-owners: [tactus, motivo]
-last_verified: 2026-08-31
+owners: [tactus]
+last_verified: 2026-09-05
 applies_to: "agenstro.session/v1 and tactus.control/v1"
 platforms: [windows, ubuntu]
 ---
@@ -10,8 +10,11 @@ platforms: [windows, ubuntu]
 # Session document and control API v1
 
 `agenstro.session/v1` is the durable projection of one human decision session.
-Tactus owns its storage; Motivo and other clients use the commands on this page
-and never parse `.tactus/sessions` directly.
+Tactus owns its storage; consumers use the commands on this page and never
+parse `.tactus/sessions` directly. These APIs remain available independently of
+Motivo. Current Motivo uses the main coding-agent conversation, eight Haskell
+methods and offline HTML reports; it has no session picker or answer IPC. See
+[ADR-0008](../adr/0008-agent-led-motivo.md).
 
 This stage defines read and answer control. Planner execution and
 `session advance` are reserved until the planner registration contract is
@@ -166,24 +169,27 @@ and do not expose the workspace root.
 Each session document is limited to 1 MiB and each transcript record to 2 MiB.
 Listing scans at most 2,000 entries, reads and serializes at most 8 MiB of
 recognized session data, returns at most 200 sessions, and sorts them by newest
-update before applying the requested limit. The 8 MiB projection ceiling leaves
-headroom inside Motivo's 9 MiB control-stdout budget.
+update before applying the requested limit. Consumers should allow envelope overhead in addition to the 8 MiB projection
+ceiling when bounding command output.
 
 ## Compatibility
 
 - Reject an unknown top-level `api` and unknown closed enum values.
 - External clients may tolerate additive fields in a recognized v1 document,
-  but must project it into their own bounded, strict IPC shape.
+  but should validate and bound the representation passed to their application.
 - Session and axis identities are stable. Renaming an axis discards its stored
   answer relationship.
 - Session ids match `session-[A-Za-z0-9-]+`, are bounded to 128 characters,
   and are matched with exact case. Producers should prefer lowercase and must
   not create identities that differ only by case across workspaces.
-- The renderer never receives a workspace path and never writes session files.
-- Motivo IPC additionally binds list/show/answer requests to the opaque
-  workspace handle that produced the visible view, preventing a stale choice
-  from being redirected into a newly opened workspace.
+- Consumers must bind an answer to the workspace and session that produced
+  the displayed brief, so changing the active workspace cannot redirect an old
+  choice into another workspace. Use the Tactus answer command rather than
+  writing session files directly.
+- Offline Motivo reports provide no answer command, IPC handler or session
+  storage mutation.
 
-See [ADR-0006](../adr/0006-motivo-session-pattern.md) for the staged planner
-boundary and the [implementation status](../design-bundle-status.md) for
-deferred decisions.
+See [ADR-0006](../adr/0006-motivo-session-pattern.md) and the
+[historical implementation status](../design-bundle-status.md) for the original
+session design and staged planner decisions. Their former desktop UI describes
+that historical implementation, not the current Motivo interface.
