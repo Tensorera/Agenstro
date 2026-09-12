@@ -116,7 +116,8 @@ impl ExecutableResolver {
         }
     }
 
-    /// Resolve one command, rejecting both missing and ambiguous matches.
+    /// Resolve one command, rejecting both missing and ambiguous matches while
+    /// preserving the launch path of symlinks and shims.
     pub(crate) fn resolve(&self, command: &str) -> Result<PathBuf, ExecutableResolutionError> {
         let command_path = Path::new(command);
         let explicit = command_path.is_absolute() || command_path.components().count() > 1;
@@ -171,7 +172,7 @@ impl ExecutableResolver {
             .collect::<Vec<_>>();
         paths
             .into_iter()
-            .find(|path| is_toolchain_executable(path))
+            .find(|path| is_executable(path))
             .ok_or_else(|| ExecutableResolutionError::NotFound {
                 command: command.to_owned(),
                 explicit,
@@ -210,7 +211,7 @@ impl ExecutableResolver {
                 return normalize_candidates(
                     directories
                         .map(|directory| directory.join(command))
-                        .filter(|path| path.is_file()),
+                        .filter(|path| is_executable(path)),
                 );
             }
             let extensions = self.windows_extensions();
@@ -221,7 +222,7 @@ impl ExecutableResolver {
                             append_extension(&directory.join(command), extension)
                         })
                     })
-                    .filter(|path| path.is_file()),
+                    .filter(|path| is_executable(path)),
             );
         }
         #[cfg(not(windows))]
@@ -229,7 +230,7 @@ impl ExecutableResolver {
             normalize_candidates(
                 directories
                     .map(|directory| directory.join(command))
-                    .filter(|path| path.is_file()),
+                    .filter(|path| is_executable(path)),
             )
         }
     }
@@ -264,7 +265,7 @@ impl ExecutableResolver {
     }
 }
 
-fn is_toolchain_executable(path: &Path) -> bool {
+fn is_executable(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
     };
@@ -293,13 +294,15 @@ fn normalize_candidates(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<Pa
     let mut seen = BTreeSet::new();
     let mut output = Vec::new();
     for candidate in candidates {
-        let normalized = dunce::canonicalize(&candidate).unwrap_or(candidate);
+        // Canonical paths identify duplicate installations, but a shim can
+        // depend on the original argv[0] or the directory it was invoked from.
+        let normalized = dunce::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
         #[cfg(windows)]
         let key = normalized.to_string_lossy().to_lowercase();
         #[cfg(not(windows))]
         let key = normalized.as_os_str().to_os_string();
         if seen.insert(key) {
-            output.push(normalized);
+            output.push(candidate);
         }
     }
     output
@@ -364,10 +367,7 @@ mod tests {
         let resolved = resolver
             .resolve("工具 with space/agent.bin")
             .expect("relative explicit executable");
-        assert_eq!(
-            resolved,
-            dunce::canonicalize(executable).expect("canonical")
-        );
+        assert_eq!(resolved, executable);
     }
 
     #[test]
@@ -381,10 +381,7 @@ mod tests {
         let resolved = resolver
             .resolve(executable.to_str().expect("UTF-8 fixture path"))
             .expect("absolute explicit executable");
-        assert_eq!(
-            resolved,
-            dunce::canonicalize(executable).expect("canonical")
-        );
+        assert_eq!(resolved, executable);
     }
 
     #[test]
@@ -400,6 +397,14 @@ mod tests {
         let name = "claude";
         fs::write(first.join(name), b"first").expect("first executable");
         fs::write(second.join(name), b"second").expect("second executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [&first, &second] {
+                fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o755))
+                    .expect("executable permissions");
+            }
+        }
         let resolver = ExecutableResolver::new(
             search_path(&[&first, &second]),
             Some(OsString::from(".EXE")),
@@ -413,6 +418,79 @@ mod tests {
             panic!("expected ambiguity")
         };
         assert_eq!(candidates.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_lookup_preserves_shim_paths_while_deduplicating_their_targets() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let launcher = temporary.path().join("provider-manager");
+        fs::write(&launcher, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("launcher permissions");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        for directory in [&first, &second] {
+            fs::create_dir(directory).expect("shim directory");
+            symlink(&launcher, directory.join("claude")).expect("provider shim");
+        }
+        for directories in [[&first, &second], [&second, &first]] {
+            let resolver = ExecutableResolver::new(
+                search_path(&[directories[0], directories[1]]),
+                None,
+                temporary.path(),
+            );
+            assert_eq!(
+                resolver.resolve("claude").expect("one distinct provider"),
+                directories[0].join("claude")
+            );
+            assert_eq!(
+                resolver.resolve("first/claude").expect("explicit shim"),
+                first.join("claude")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_lookup_ignores_nonexecutable_path_matches() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let executable_directory = temporary.path().join("executable");
+        let plain_directory = temporary.path().join("plain");
+        for (directory, mode) in [(&executable_directory, 0o755), (&plain_directory, 0o644)] {
+            fs::create_dir(directory).expect("candidate directory");
+            let path = directory.join("claude");
+            fs::write(&path, b"fixture").expect("candidate fixture");
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("candidate permissions");
+        }
+        for directories in [
+            [&executable_directory, &plain_directory],
+            [&plain_directory, &executable_directory],
+        ] {
+            let resolver = ExecutableResolver::new(
+                search_path(&[directories[0], directories[1]]),
+                None,
+                temporary.path(),
+            );
+            assert_eq!(
+                resolver.resolve("claude").expect("one executable provider"),
+                executable_directory.join("claude")
+            );
+        }
+        let resolver =
+            ExecutableResolver::new(search_path(&[&plain_directory]), None, temporary.path());
+        assert!(matches!(
+            resolver.resolve("claude"),
+            Err(ExecutableResolutionError::NotFound {
+                explicit: false,
+                ..
+            })
+        ));
     }
 
     #[cfg(unix)]
@@ -463,7 +541,7 @@ mod tests {
 
         assert_eq!(
             resolver.resolve("claude").expect("default PATHEXT"),
-            dunce::canonicalize(executable).expect("canonical")
+            executable
         );
     }
 
@@ -483,7 +561,7 @@ mod tests {
 
         assert_eq!(
             resolver.resolve("claude").expect("cmd launcher"),
-            dunce::canonicalize(launcher).expect("canonical")
+            temporary.path().join("claude.CMD")
         );
     }
 
@@ -506,7 +584,7 @@ mod tests {
             resolver
                 .resolve("tools/claude")
                 .expect("explicit cmd launcher"),
-            dunce::canonicalize(launcher).expect("canonical")
+            tools.join("claude.CMD")
         );
     }
 
@@ -524,7 +602,7 @@ mod tests {
 
         assert_eq!(
             resolver.resolve("codex").expect("default PATHEXT"),
-            dunce::canonicalize(executable).expect("canonical")
+            temporary.path().join("codex.EXE")
         );
     }
 
@@ -542,7 +620,7 @@ mod tests {
 
         assert_eq!(
             resolver.resolve("opencode").expect("normalized PATHEXT"),
-            dunce::canonicalize(executable).expect("canonical")
+            temporary.path().join("opencode.BAT")
         );
     }
 }

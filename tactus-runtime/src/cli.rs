@@ -5470,7 +5470,7 @@ command = ["tactus", "provider-host", "codex"]
         fs::write(
             &sidecar,
             concat!(
-                r#"{"type":"state_transition","code":"workflow.transition","level":"state","message":"DO_NOT_PERSIST_TRANSITION_MESSAGE","subject":"workflow:test","state_before":"domain.ready","trigger":{"kind":"request","source":"clef.workflow","code":"workflow.requested","details":{"unknown":"DO_NOT_PERSIST_TRIGGER_DETAILS"}},"guard":{"condition":"DO_NOT_PERSIST_GUARD_CONDITION","passed":true,"reason":"DO_NOT_PERSIST_GUARD_REASON"},"state_after":"domain.running","context":{"prompt":"DO_NOT_PERSIST_PROMPT","unknown":"DO_NOT_PERSIST_CONTEXT"}}"#,
+                r#"{"type":"state_transition","code":"workflow.transition","level":"state","message":"DO_NOT_PERSIST_TRANSITION_MESSAGE","subject":"workflow:test","state_before":"domain.ready","trigger":{"kind":"request","source":"clef.workflow","code":"workflow.request.accepted","details":{"unknown":"DO_NOT_PERSIST_TRIGGER_DETAILS"}},"guard":{"condition":"DO_NOT_PERSIST_GUARD_CONDITION","passed":true,"reason":"DO_NOT_PERSIST_GUARD_REASON"},"state_after":"domain.running","context":{"prompt":"DO_NOT_PERSIST_PROMPT","unknown":"DO_NOT_PERSIST_CONTEXT"}}"#,
                 "\n",
                 r#"{"type":"message","code":"workflow.notice","level":"warning","message":"DO_NOT_PERSIST_MESSAGE_TEXT","context":{"unknown":"DO_NOT_PERSIST_MESSAGE_CONTEXT"}}"#,
                 "\n"
@@ -5501,7 +5501,9 @@ command = ["tactus", "provider-host", "codex"]
         assert_eq!(events[0].kind, "runtime.state_transition");
         assert_eq!(events[0].data["state_before"], "domain.ready");
         assert_eq!(events[0].data["trigger"]["kind"], "request");
-        assert_eq!(events[0].data["trigger"]["code"], "workflow.requested");
+        let transition: crate::journal::StateTransition =
+            serde_json::from_value(events[0].data.clone()).expect("typed imported transition");
+        assert_eq!(transition.trigger.code, "workflow.request.accepted");
         assert_eq!(events[0].data["guard"]["passed"], true);
         assert_eq!(events[0].data["state_after"], "domain.running");
         assert_eq!(events[1].kind, "runtime.message");

@@ -117,7 +117,7 @@ def regex_worker() -> int:
         elif operation == "consistency":
             value = {
                 "present": [
-                    [variant for variant in group if compile_pattern(variant, True).search(text)]
+                    [variant for variant in group if compile_pattern(variant, False).search(text)]
                     for group in payload["groups"]
                 ]
             }

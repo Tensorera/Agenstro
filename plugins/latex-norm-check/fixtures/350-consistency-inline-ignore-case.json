@@ -1,0 +1,11 @@
+{
+  "name": "350-consistency-inline-ignore-case",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r35", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "The Colour plot uses COLOR.\n",
+      "norms": [{"id": "prose.consistency.spelling", "statement": "Use one spelling convention.", "severity": "Style", "spec": {"kind": "Consistency", "specGroups": [["(?i:colour)", "(?i:color)"]]}}]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": ["prose.consistency.spelling"], "checked": ["prose.consistency.spelling"], "unchecked": []}
+}

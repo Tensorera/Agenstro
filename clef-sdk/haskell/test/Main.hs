@@ -742,15 +742,24 @@ testRuntimeConfig executable workspace = do
       legacyWithoutLimits = case valid of
         Object fields -> Object (KeyMap.delete "limits" (KeyMap.delete "plugins" fields))
         _ -> valid
-      derivedOuterLimit = case legacyWithoutLimits of
+      configuredLimits limits = case legacyWithoutLimits of
         Object fields ->
           Object
             ( KeyMap.insert
                 "limits"
-                (object ["provider_timeout_seconds" .= (3600 :: Int)])
+                limits
                 fields
             )
         _ -> valid
+      derivedOuterLimit providerSeconds =
+        configuredLimits (object ["provider_timeout_seconds" .= (providerSeconds :: Int)])
+      explicitOuterLimit providerSeconds outerSeconds =
+        configuredLimits
+          ( object
+              [ "provider_timeout_seconds" .= (providerSeconds :: Int),
+                "provider_outer_timeout_seconds" .= (outerSeconds :: Int)
+              ]
+          )
       invalidRelativeWorkspace =
         object
           [ "api" .= ("clef.runtime/v1" :: Text),
@@ -818,13 +827,26 @@ testRuntimeConfig executable workspace = do
       assertEqual "legacy config defaults provider concurrency" 4 (limitMaxConcurrentProviderCalls (runtimeLimits config))
       assertEqual "legacy config defaults transport limits" defaultRuntimeLimits (runtimeLimits config)
     Left workflowError -> failTest $ "legacy config without limits failed: " <> show workflowError
-  case decodeRuntimeConfig (strictEncode derivedOuterLimit) of
+  forM_ [(61, 121), (120, 180), (180, 240), (239, 299), (240, 300), (3600, 4500)] $ \(providerSeconds, outerSeconds) ->
+    case decodeRuntimeConfig (strictEncode (derivedOuterLimit providerSeconds)) of
+      Right config ->
+        assertEqual
+          ("missing provider outer limit derives cleanup headroom for " <> show providerSeconds <> " seconds")
+          outerSeconds
+          (limitProviderOuterTimeoutSeconds (runtimeLimits config))
+      Left workflowError -> failTest $ "derived provider outer limit failed: " <> show workflowError
+  case decodeRuntimeConfig (strictEncode (explicitOuterLimit 120 240)) of
     Right config ->
       assertEqual
-        "missing provider outer limit derives cleanup headroom"
-        4500
+        "explicit provider outer limit is preserved"
+        240
         (limitProviderOuterTimeoutSeconds (runtimeLimits config))
-    Left workflowError -> failTest $ "derived provider outer limit failed: " <> show workflowError
+    Left workflowError -> failTest $ "explicit provider outer limit failed: " <> show workflowError
+  forM_ [(61, 120), (120, 179)] $ \(providerSeconds, outerSeconds) ->
+    case decodeRuntimeConfig (strictEncode (explicitOuterLimit providerSeconds outerSeconds)) of
+      Left (RuntimeConfigError message)
+        | "must leave at least 60 seconds" `Text.isInfixOf` message -> pure ()
+      other -> failTest $ "insufficient explicit provider cleanup headroom should fail, received " <> show other
   case decodeRuntimeConfig (strictEncode invalidRelativeWorkspace) of
     Left (RuntimeConfigError _) -> pure ()
     other -> failTest $ "relative workspace should fail, received " <> show other

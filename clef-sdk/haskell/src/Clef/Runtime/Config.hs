@@ -229,7 +229,7 @@ providerDispatchDeadlineSecondsFor = limitProviderTimeoutSeconds
 
 providerCleanupHeadroomSeconds :: Int -> Int
 providerCleanupHeadroomSeconds providerSeconds =
-  min (15 * 60) (max 1 (providerSeconds `div` 4))
+  min (15 * 60) (max 60 (providerSeconds `div` 4))
 
 validateRuntimeLimits :: RuntimeLimits -> Either Text RuntimeLimits
 validateRuntimeLimits limits = do

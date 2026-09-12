@@ -1,0 +1,11 @@
+{
+  "name": "340-consistency-mixed-command-case",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "r34", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "$\\phi + \\Phi$\n",
+      "norms": [{"id": "math.consistency.phi-case", "statement": "Use a consistent phi command.", "severity": "Style", "spec": {"kind": "Consistency", "specGroups": [["\\\\phi\\b", "\\\\Phi\\b"]]}}]
+    }
+  },
+  "expect": {"ok": true, "violationNorms": ["math.consistency.phi-case"], "checked": ["math.consistency.phi-case"], "unchecked": []}
+}

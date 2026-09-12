@@ -1389,10 +1389,7 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "provider-native:reviewer");
         assert!(checks[0].ok, "{}", checks[0].detail);
-        assert_eq!(
-            PathBuf::from(&checks[0].detail),
-            dunce::canonicalize(executable).expect("canonical executable")
-        );
+        assert_eq!(PathBuf::from(&checks[0].detail), executable);
     }
 
     #[test]
@@ -1408,6 +1405,17 @@ mod tests {
         let executable = "claude";
         fs::write(first.join(executable), b"first").expect("first provider");
         fs::write(second.join(executable), b"second").expect("second provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [&first, &second] {
+                fs::set_permissions(
+                    directory.join(executable),
+                    fs::Permissions::from_mode(0o755),
+                )
+                .expect("provider executable permissions");
+            }
+        }
         let definition = ProviderDefinition {
             command: vec![
                 "tactus".to_owned(),
@@ -1434,8 +1442,6 @@ mod tests {
             "{}",
             checks[0].detail
         );
-        let first = dunce::canonicalize(first).expect("canonical first directory");
-        let second = dunce::canonicalize(second).expect("canonical second directory");
         assert!(
             checks[0].detail.contains(&first.display().to_string()),
             "{}",

@@ -339,11 +339,14 @@ impl RunJournal {
     pub fn record_transition(
         &mut self,
         state_before: impl Into<String>,
-        trigger: TransitionTrigger,
+        mut trigger: TransitionTrigger,
         guard: TransitionGuard,
         state_after: impl Into<String>,
         presentation: Presentation,
     ) -> Result<u64, JournalError> {
+        // Preserve the typed field even when an external trigger code must be
+        // fingerprinted. Evidence still uses the general redaction policy.
+        trigger.code = durable_diagnostic_code(&trigger.code);
         let transition = StateTransition {
             state_before: state_before.into(),
             trigger,
@@ -888,9 +891,18 @@ fn public_diagnostic_code(value: &str) -> bool {
             | "workflow.generation_requested"
             | "workflow.generation_completed"
             | "workflow.requested"
+            | "workflow.request.accepted"
+            | "workflow.control.cancelled"
             | "workflow.result.error"
+            | "workflow.result.exception"
+            | "workflow.result.success"
+            | "plugin.request.accepted"
+            | "plugin.result.failure"
+            | "plugin.result.success"
+            | "plugin.result.unknown"
             | "plugin.invocation_requested"
             | "plugin.dispatch_requested"
+            | "plugin.deadline_elapsed"
             | "plugin.cancellation_requested"
             | "plugin.supervision_completed"
             | "test.requested"
@@ -1128,6 +1140,58 @@ mod tests {
             event.presentation.expect("presentation").message,
             "测试任务已开始"
         );
+    }
+
+    #[test]
+    fn durable_transition_codes_preserve_builtin_identity_and_redact_unknowns_as_strings() {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let mut journal = RunJournal::create(&workspace).expect("journal");
+        let codes = [
+            "workflow.request.accepted",
+            "workflow.control.cancelled",
+            "workflow.result.error",
+            "workflow.result.exception",
+            "workflow.result.success",
+            "plugin.request.accepted",
+            "plugin.result.failure",
+            "plugin.result.success",
+            "plugin.result.unknown",
+            "plugin.deadline_elapsed",
+            "invalid_identifier.0123456789abcdef",
+            "DO_NOT_PERSIST_TRIGGER_CODE",
+        ];
+        for code in codes {
+            journal
+                .record_transition(
+                    "running",
+                    TransitionTrigger::new(TriggerKind::InternalResult, "clef.workflow", code)
+                        .with_details(json!({"code":"DO_NOT_PERSIST_EVIDENCE_CODE"})),
+                    TransitionGuard::new("result observed", true, "The workflow completed."),
+                    "succeeded",
+                    Presentation::new(PresentationCategory::State, "Workflow completed."),
+                )
+                .expect("transition");
+        }
+        journal.finish(outcome()).expect("finish");
+
+        let encoded = fs::read_to_string(journal.event_path()).expect("event file");
+        assert_eq!(encoded.lines().count(), codes.len());
+        assert!(!encoded.contains("DO_NOT_PERSIST"));
+        for (line, code) in encoded.lines().zip(codes) {
+            let event: TraceEvent = serde_json::from_str(line).expect("trace event");
+            let transition: StateTransition =
+                serde_json::from_value(event.data).expect("typed durable transition");
+            if code == "DO_NOT_PERSIST_TRIGGER_CODE" {
+                assert!(transition.trigger.code.starts_with("invalid_identifier."));
+            } else {
+                assert_eq!(transition.trigger.code, code);
+            }
+            assert_eq!(
+                transition.trigger.details.expect("evidence")["code"]["redacted"],
+                true
+            );
+        }
     }
 
     #[test]
