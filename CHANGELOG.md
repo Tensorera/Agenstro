@@ -4,6 +4,16 @@ This project is a source alpha. Versions describe checked-in contracts; they
 do not imply a package-registry release or compatibility guarantee.
 
 
+## Unreleased — daemon, Segno service and live output
+
+- Add opt-in Tactus daemon supervision with independent provider selection,
+  periodic monitoring, bounded source repairs and explicit escalation.
+- Add a Haskell Segno service for registering timestamp-driven
+  `.tactus/segno.hs` tasks across local workspaces, durable invocation status
+  and a read-only localhost dashboard.
+- Add `tactus watch` for live provider output with bounded in-memory history;
+  durable run journals retain their existing content summaries.
+
 ## Unreleased — agent-led Motivo
 
 - Return the user conversation and method choice to the existing coding agent.

@@ -62,6 +62,25 @@ fn main() {
                 "value":{"prompt":request["params"]["prompt"]}
             }));
         }
+        "daemon-repair" | "daemon-escalate" => {
+            let workspace = request["params"]["workspace"].as_str().expect("workspace");
+            let prompt = request["params"]["prompt"].as_str().expect("daemon prompt");
+            std::fs::write(
+                std::path::Path::new(workspace).join("daemon-prompt.txt"),
+                prompt,
+            )
+            .expect("prompt fixture");
+            let value = if mode == "daemon-repair" {
+                assert!(
+                    prompt.contains("synthetic compiler error"),
+                    "compiler stderr reaches repair prompt"
+                );
+                serde_json::json!({"action":"repair","summary":"Fix a local unresolved identifier","old":"broken","new":"pure ()"})
+            } else {
+                serde_json::json!({"action":"escalate","summary":"This failure needs review"})
+            };
+            write_json(&serde_json::json!({"type":"result","id":id,"ok":true,"value":value}));
+        }
         "topology-stage" => topology_stage(&request, &id),
         "echo-params" => write_json(&serde_json::json!({
             "type":"result",

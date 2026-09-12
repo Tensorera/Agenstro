@@ -1,13 +1,13 @@
 //! Bounded process-group supervision and incremental plugin transport.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::{self, Read, Write},
     ops::{Deref, DerefMut},
     path::PathBuf,
     process::{Command, ExitStatus, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -330,72 +330,67 @@ impl ProcessSupervisor {
             .stderr(Stdio::inherit())
             .envs(&spec.environment);
         let mut child = SupervisedChild::new(command.group_spawn().map_err(ProcessError::Spawn)?);
-        let started = Instant::now();
-        loop {
-            if cancellation.is_cancelled() {
-                let outcome = command_termination(&mut child, CommandKind::Cancelled, started);
-                if outcome.kind != CommandKind::RuntimeFailed {
-                    child.disarm();
-                }
-                return Ok(outcome);
-            }
-            if spec
-                .limits
-                .deadline
-                .is_some_and(|deadline| started.elapsed() >= deadline)
-            {
-                let outcome =
-                    command_termination(&mut child, CommandKind::DeadlineExceeded, started);
-                if outcome.kind != CommandKind::RuntimeFailed {
-                    child.disarm();
-                }
-                return Ok(outcome);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let cleanup = cleanup_owned_group(&mut child);
-                    if cleanup.is_ok() {
-                        child.disarm();
-                    }
-                    return Ok(match cleanup {
-                        Ok(()) => CommandOutcome {
-                            kind: CommandKind::Exited,
-                            exit_code: status.code(),
-                            error: None,
-                            elapsed_ms: elapsed_millis(started.elapsed()),
-                        },
-                        Err(error) => CommandOutcome {
-                            kind: CommandKind::RuntimeFailed,
-                            exit_code: status.code(),
-                            error: Some(format!(
-                                "cannot clean the completed command process group: {error}"
-                            )),
-                            elapsed_ms: elapsed_millis(started.elapsed()),
-                        },
-                    });
-                }
-                Ok(None) => thread::sleep(POLL_INTERVAL),
-                Err(error) => {
-                    let mut message = format!("cannot wait for command: {error}");
-                    let (exit_code, reaped) = match kill_and_wait(&mut child) {
-                        Ok(status) => (status.code(), true),
-                        Err(kill_error) => {
-                            message.push_str(&format!("; cannot reap it: {kill_error}"));
-                            (None, false)
-                        }
-                    };
-                    if reaped {
-                        child.disarm();
-                    }
-                    return Ok(CommandOutcome {
-                        kind: CommandKind::RuntimeFailed,
-                        exit_code,
-                        error: Some(message),
-                        elapsed_ms: elapsed_millis(started.elapsed()),
-                    });
-                }
-            }
+        Ok(wait_command(&mut child, spec, cancellation))
+    }
+
+    /// Run a command while teeing stderr and retaining only its bounded tail.
+    /// Capture and terminal-writer degradation never change the process outcome.
+    /// The caller owns the returned text; it must not enter a durable journal.
+    pub fn run_command_with_stderr(
+        &self,
+        spec: &ProcessSpec,
+        cancellation: &CancellationToken,
+        limit: usize,
+    ) -> Result<(CommandOutcome, String), ProcessError> {
+        validate_spec(spec)?;
+        if limit == 0 || limit > 1024 * 1024 {
+            return Err(ProcessError::InvalidSpec(
+                "command stderr capture limit must be between 1 and 1048576".to_owned(),
+            ));
         }
+        let mut command = Command::new(&spec.command[0]);
+        command
+            .args(&spec.command[1..])
+            .current_dir(&spec.cwd)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::piped())
+            .envs(&spec.environment);
+        let mut child = SupervisedChild::new(command.group_spawn().map_err(ProcessError::Spawn)?);
+        let stderr = take_pipe(&mut child, Pipe::Stderr)?.into_stderr();
+        let tail = Arc::new(Mutex::new(VecDeque::with_capacity(limit)));
+        let reader_tail = Arc::clone(&tail);
+        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(8);
+        let tee = thread::spawn(move || {
+            let stderr = io::stderr();
+            while let Ok(chunk) = receiver.recv() {
+                if stderr.lock().write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        let reader =
+            thread::spawn(move || capture_command_stderr(stderr, reader_tail, sender, limit));
+        let outcome = wait_command(&mut child, spec, cancellation);
+        let capture = finish_worker(reader, PIPE_WORKER_DRAIN_TIMEOUT);
+        let _ = finish_worker(tee, PIPE_WORKER_DRAIN_TIMEOUT);
+        let bytes: Vec<u8> = tail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect();
+        let text = String::from_utf8_lossy(&bytes);
+        let marker = match capture {
+            WorkerFinish::Completed(Ok(true)) => {
+                "[Earlier stderr omitted; bounded tail follows.]\n"
+            }
+            WorkerFinish::Completed(Ok(false)) => "",
+            WorkerFinish::Completed(Err(_)) | WorkerFinish::Panicked | WorkerFinish::Stalled => {
+                "[Stderr capture incomplete; available tail follows.]\n"
+            }
+        };
+        Ok((outcome, format!("{marker}{text}")))
     }
 
     /// Invoke one plugin, delivering validated frames through a bounded worker.
@@ -751,6 +746,111 @@ impl ProcessSupervisor {
             elapsed_ms: elapsed_millis(started.elapsed()),
             progress: Some(progress),
         })
+    }
+}
+
+fn wait_command(
+    child: &mut SupervisedChild,
+    spec: &ProcessSpec,
+    cancellation: &CancellationToken,
+) -> CommandOutcome {
+    let started = Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            let outcome = command_termination(child, CommandKind::Cancelled, started);
+            if outcome.kind != CommandKind::RuntimeFailed {
+                child.disarm();
+            }
+            return outcome;
+        }
+        if spec
+            .limits
+            .deadline
+            .is_some_and(|deadline| started.elapsed() >= deadline)
+        {
+            let outcome = command_termination(child, CommandKind::DeadlineExceeded, started);
+            if outcome.kind != CommandKind::RuntimeFailed {
+                child.disarm();
+            }
+            return outcome;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let cleanup = cleanup_owned_group(child);
+                if cleanup.is_ok() {
+                    child.disarm();
+                }
+                return match cleanup {
+                    Ok(()) => CommandOutcome {
+                        kind: CommandKind::Exited,
+                        exit_code: status.code(),
+                        error: None,
+                        elapsed_ms: elapsed_millis(started.elapsed()),
+                    },
+                    Err(error) => CommandOutcome {
+                        kind: CommandKind::RuntimeFailed,
+                        exit_code: status.code(),
+                        error: Some(format!(
+                            "cannot clean the completed command process group: {error}"
+                        )),
+                        elapsed_ms: elapsed_millis(started.elapsed()),
+                    },
+                };
+            }
+            Ok(None) => thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                let mut message = format!("cannot wait for command: {error}");
+                let (exit_code, reaped) = match kill_and_wait(child) {
+                    Ok(status) => (status.code(), true),
+                    Err(kill_error) => {
+                        message.push_str(&format!("; cannot reap it: {kill_error}"));
+                        (None, false)
+                    }
+                };
+                if reaped {
+                    child.disarm();
+                }
+                return CommandOutcome {
+                    kind: CommandKind::RuntimeFailed,
+                    exit_code,
+                    error: Some(message),
+                    elapsed_ms: elapsed_millis(started.elapsed()),
+                };
+            }
+        }
+    }
+}
+
+fn capture_command_stderr(
+    mut stderr: impl Read,
+    tail: Arc<Mutex<VecDeque<u8>>>,
+    sender: SyncSender<Vec<u8>>,
+    limit: usize,
+) -> io::Result<bool> {
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stderr.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(truncated);
+        }
+        {
+            let mut tail = tail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if count >= limit {
+                truncated |= !tail.is_empty() || count > limit;
+                tail.clear();
+                tail.extend(&buffer[count - limit..count]);
+            } else {
+                let excess = (tail.len() + count).saturating_sub(limit);
+                truncated |= excess > 0;
+                tail.drain(..excess);
+                tail.extend(&buffer[..count]);
+            }
+        }
+        // A slow terminal cannot block draining the child's diagnostic pipe.
+        let _ = sender.try_send(buffer[..count].to_vec());
     }
 }
 
@@ -1115,6 +1215,53 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_diagnostics_keep_tail_and_drain_when_terminal_queue_is_full() {
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        sender.send(Vec::new()).expect("fill terminal queue");
+        let mut bytes = vec![b'x'; 32 * 1024];
+        bytes.extend_from_slice(b"actual compiler failure");
+        let truncated =
+            capture_command_stderr(io::Cursor::new(bytes), Arc::clone(&tail), sender, 23)
+                .expect("drain stderr without waiting for terminal");
+        assert!(truncated);
+        assert_eq!(
+            tail.lock().unwrap().iter().copied().collect::<Vec<_>>(),
+            b"actual compiler failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_command_stderr_preserves_exit_and_deadline() {
+        let directory = tempfile::tempdir().expect("command workspace");
+        let mut spec = ProcessSpec::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'compiler failure' >&2; exit 7".to_owned(),
+            ],
+            directory.path(),
+        );
+        let (outcome, stderr) = ProcessSupervisor
+            .run_command_with_stderr(&spec, &CancellationToken::new(), 1024)
+            .expect("captured command");
+        assert_eq!(outcome.kind, CommandKind::Exited);
+        assert_eq!(outcome.exit_code, Some(7));
+        assert_eq!(stderr, "compiler failure");
+
+        spec.command[2] = "printf 'before timeout' >&2; sleep 30".to_owned();
+        spec.limits.deadline = Some(Duration::from_millis(100));
+        let started = Instant::now();
+        let (outcome, stderr) = ProcessSupervisor
+            .run_command_with_stderr(&spec, &CancellationToken::new(), 1024)
+            .expect("bounded command");
+        assert_eq!(outcome.kind, CommandKind::DeadlineExceeded);
+        assert!(stderr.contains("before timeout"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 
     struct FaultyDiagnosticReader;
 

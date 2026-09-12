@@ -2,7 +2,7 @@
 title: Agenstro CLI reference
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -34,6 +34,8 @@ contains spaces.
 | `tactus runtime-json` | Print Clef's normalized runtime config | `--root` |
 | `tactus check [SCRIPT...]` | Compile-check an explicit selection without executing | `--scripts-dir PATH`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds` |
 | `tactus run` | Execute an explicit selection of ordered entry scripts | `--scripts-dir PATH`, repeatable `--script`, `--all`, `--from NNN`, `--through NNN`, `--package NAME`, `--keep-going`, `--timeout-seconds`, `-- ARG...` |
+| `tactus run --daemon` | Monitor selected entries and optionally repair explicitly retryable failures | `--daemon-provider`, `--daemon-interval-seconds`, `--daemon-max-retries`, repeatable `--daemon-retry-script` |
+| `tactus watch` | Serve the local live provider-output viewer | `--root`, `--port` (default 47831) |
 | `tactus generate GOAL...` | Ask one provider to create or update Haskell sources, including helpers | `--provider NAME`, `--timeout-seconds`, `--json` |
 | `tactus plugin-call NAME METHOD` | Invoke a registry entry directly | `--namespace`, `--params JSON`, `--timeout-seconds`, `--json` |
 | `tactus smoke [NAME...]` | Probe configured plugins | `--live`, `--json` |
@@ -62,6 +64,12 @@ the workspace root (or supplied as a contained absolute path). Discovery,
 explicit source validation and helper imports use that selected root. The
 parameter changes source selection, not runtime filesystem permissions.
 Default business `--all` never includes `.tactus/motivoscript`.
+
+The standard Segno organizer can be explicitly selected with
+`run --script .tactus/segno.hs` or `check .tactus/segno.hs`. It remains excluded
+from default discovery and `run --all`; other unnumbered helpers cannot run.
+Daemon monitoring is opt-in per run. Automatic repairs also require an explicit
+retryable entry allowlist; see [provider setup](../providers.md#optional-task-daemon).
 
 `check`/`run --timeout-seconds` applies separately to each Cabal/GHC/runghc
 process; zero disables this existing per-process timeout. It is not the total
@@ -126,6 +134,18 @@ the [session control API](session-control-v1.md).
 | `segno driver` | Run the single-node wake/poll/execute loop | `--root`, `--poll-seconds`, `--task-timeout-seconds` |
 | `segno status` | Inspect runtime-owned lifecycle | `--job TASK`, `--json` |
 | `segno history` | Inspect lifecycle or business-state history | `--state-key`, `--occurrence`, `--limit`, `--json` |
+| `segno service register NAME` | Register one workspace's `.tactus/segno.hs` | `--root`, `--every-seconds`, `--task-timeout-seconds` |
+| `segno service list` | List machine-local registered workspaces | `--json` |
+| `segno service status` | Inspect registered tasks and service invocation history | `--json`, `--limit` |
+| `segno service once` | Execute currently due registered work and print a JSON summary | |
+| `segno service start` | Run the local scheduler and read-only dashboard | `--port` (default 47832), `--no-web` |
+| `segno service pause NAME` | Disable future scheduled invocations | |
+| `segno service resume NAME` | Schedule a fresh future invocation after inspection | |
+
+Service commands accept the parent option `segno service --registry PATH ...`;
+otherwise `SEGNO_REGISTRY` or the platform user-data directory selects the
+SQLite registry. See [Segno](../segno.md#machine-local-timestamp-service) for
+the timestamp/result contract and example organization of working directories.
 
 The task timeout is per Tactus build/run phase, defaults to 15,300 seconds, and
 accepts 1–604,800 seconds. Segno derives a longer Running lease from it.
@@ -189,8 +209,10 @@ can contain failed or `outcome_unknown` occurrences.
 
 `OutcomeUnknown` means an external effect may have happened but no trustworthy
 terminal result was obtained. Segno does not retry it automatically. Version
-0.3 has no mutation command to resolve it; inspect lifecycle history and local
-run evidence before deciding how to reconcile the external system.
+0.3 has no mutation command to resolve a typed-driver unknown occurrence;
+inspect lifecycle history and local run evidence before reconciling the
+external system. The machine-local service's `resume` enables future work and
+preserves the unknown occurrence unchanged.
 
 ## Version checks
 

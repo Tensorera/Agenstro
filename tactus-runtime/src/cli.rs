@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::{
     adapters::{SUPERVISED_PROCESS_GROUP_ENV, run_provider_host, run_workspace_paths_host},
+    daemon::{Daemon, DaemonArguments},
     executable::effective_path,
     journal::{
         JournalError, Presentation, PresentationCategory, RunJournal, RunSummary, TransitionGuard,
@@ -165,9 +166,21 @@ enum Command {
         /// always included. Repeat for more than one extension package.
         #[arg(long = "package", value_parser = validate_haskell_package)]
         packages: Vec<String>,
+        /// Optional provider-driven monitoring and bounded repairs.
+        #[command(flatten)]
+        daemon: DaemonArguments,
         /// Arguments passed to every selected entry after `--`.
         #[arg(last = true)]
         arguments: Vec<String>,
+    },
+    /// View live provider output and recent runs in a local web browser.
+    Watch {
+        /// Start path for upward workspace discovery.
+        #[arg(long, visible_alias = "cwd", default_value = ".")]
+        root: PathBuf,
+        /// Loopback HTTP port.
+        #[arg(long, default_value_t = crate::watch::DEFAULT_PORT)]
+        port: u16,
     },
     /// Ask a provider to create or update Haskell workflow sources.
     Generate {
@@ -518,6 +531,7 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             scripts_dir,
             timeout_seconds,
             packages,
+            daemon,
             arguments,
         } => run_scripts_command(
             &root,
@@ -527,7 +541,13 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
             &arguments,
             keep_going,
             timeout_seconds,
+            daemon,
         ),
+        Command::Watch { root, port } => {
+            let cancellation = install_cancellation()?;
+            crate::watch::serve(&root, port, &cancellation)?;
+            Ok(0)
+        }
         Command::Generate {
             goal,
             provider,
@@ -1106,6 +1126,7 @@ fn check(
     Ok(first_failure)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scripts_command(
     start: &Path,
     scripts_dir: Option<&Path>,
@@ -1114,10 +1135,11 @@ fn run_scripts_command(
     arguments: &[String],
     keep_going: bool,
     timeout_seconds: Option<u64>,
+    daemon_arguments: DaemonArguments,
 ) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?.with_scripts_directory(scripts_dir)?;
-    let timeout_seconds =
-        timeout_seconds.unwrap_or(workspace.load_config()?.limits.script_timeout_seconds);
+    let config = workspace.load_config()?;
+    let timeout_seconds = timeout_seconds.unwrap_or(config.limits.script_timeout_seconds);
     let cancellation = install_cancellation()?;
     let scripts = select_scripts(&workspace, selection, true)?;
     if scripts.is_empty() {
@@ -1128,6 +1150,48 @@ fn run_scripts_command(
     let started = std::time::Instant::now();
     let (mut journal, journal_create_error) = create_journal_preserving_execution(&workspace);
     let run_id = journal.run_id().to_owned();
+    let daemon = if daemon_arguments.daemon {
+        let policy = config.daemon.with_arguments(&daemon_arguments);
+        policy.validate().map_err(CliError::InvalidArguments)?;
+        let provider = policy.provider.clone().unwrap_or(config.default_provider);
+        workspace.resolve_plugin(
+            &workspace.load_config()?,
+            &provider,
+            PluginNamespace::Provider,
+        )?;
+        let provider_workspace = workspace.clone();
+        let provider_timeout = policy.timeout_seconds;
+        Some(
+            Daemon::new(
+                &workspace,
+                policy,
+                journal.run_path(),
+                Arc::new(move |prompt, cancellation| {
+                    let params =
+                        serde_json::json!({"prompt":prompt,"workspace":provider_workspace.root,"options":{"timeout_seconds":provider_timeout - 60}});
+                    let report = invoke_registered(
+                        &provider_workspace,
+                        &provider,
+                        "invoke",
+                        params.as_object().expect("object").clone(),
+                        InvocationControl {
+                            namespace: PluginNamespace::Provider,
+                            timeout_seconds: provider_timeout,
+                            console_events: false,
+                            cancellation,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                    successful_value(&report).ok_or_else(|| {
+                        format!("daemon provider returned {:?}", report.summary.outcome.kind)
+                    })
+                }),
+            )
+            .map_err(CliError::InvalidArguments)?,
+        )
+    } else {
+        None
+    };
     let started_presentation = Presentation::new(
         PresentationCategory::State,
         format!(
@@ -1181,6 +1245,7 @@ fn run_scripts_command(
                 &cancellation,
                 &tool_runtime.environment,
                 tool_runtime.directory.path(),
+                daemon.as_ref(),
                 |observation| match observation {
                     ScriptBatchObservation::Prepared => {
                         reached_running = true;
@@ -1417,6 +1482,7 @@ fn execute_script_batch(
     cancellation: &CancellationToken,
     environment: &BTreeMap<String, String>,
     diagnostic_directory: &Path,
+    daemon: Option<&Daemon>,
     mut on_observation: impl FnMut(ScriptBatchObservation<'_>) -> ClefSidecarFacts,
 ) -> Result<ScriptBatchExecution, CliError> {
     let project = workspace.control.display().to_string();
@@ -1436,6 +1502,12 @@ fn execute_script_batch(
         cancellation,
     )?;
     if !build.is_success() {
+        if let Some(daemon) = daemon {
+            daemon.escalate(
+                &workspace.control,
+                "Cabal preparation failed; entry repair was not attempted",
+            );
+        }
         return Ok(ScriptBatchExecution {
             command: build,
             script_started: false,
@@ -1462,31 +1534,72 @@ fn execute_script_batch(
         );
         command.extend([format!("--ghc-arg={include}"), script.display().to_string()]);
         command.extend_from_slice(arguments);
-        let diagnostic_path = diagnostic_directory.join(format!(
-            "clef-script-{index:04}-{}.jsonl",
-            std::process::id()
-        ));
-        let mut script_environment = environment.clone();
-        script_environment.insert(
-            "TACTUS_WORKFLOW_NAME".to_owned(),
-            workspace_relative_script(workspace, script),
-        );
-        script_environment.insert(
-            "TACTUS_DIAGNOSTIC_PATH".to_owned(),
-            diagnostic_path.display().to_string(),
-        );
-        let status = execute_tool(
-            workspace,
-            command,
-            &script_environment,
-            timeout_seconds,
-            cancellation,
-        );
-        let facts = on_observation(ScriptBatchObservation::Diagnostics(&diagnostic_path));
-        let status = status?;
-        let clef_outcome_unknown =
-            facts.outcome_unknown || (facts.observation_ambiguous && !status.is_success());
-        elapsed_ms = elapsed_ms.saturating_add(status.elapsed_ms);
+        let mut attempt = 0;
+        let (status, clef_outcome_unknown) = loop {
+            let diagnostic_path = diagnostic_directory.join(format!(
+                "clef-script-{index:04}-{attempt:02}-{}.jsonl",
+                std::process::id()
+            ));
+            let mut script_environment = environment.clone();
+            script_environment.insert(
+                "TACTUS_WORKFLOW_NAME".to_owned(),
+                workspace_relative_script(workspace, script),
+            );
+            script_environment.insert(
+                "TACTUS_DIAGNOSTIC_PATH".to_owned(),
+                diagnostic_path.display().to_string(),
+            );
+            let monitor = daemon
+                .map(|daemon| daemon.monitor(script, &diagnostic_path, attempt, cancellation));
+            let status = if daemon.is_some() {
+                let mut spec = ProcessSpec::new(command.clone(), &workspace.root);
+                spec.environment = script_environment;
+                spec.limits.deadline =
+                    (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
+                ProcessSupervisor
+                    .run_command_with_stderr(&spec, cancellation, 16 * 1024)
+                    .map_err(CliError::Process)
+            } else {
+                execute_tool(
+                    workspace,
+                    command.clone(),
+                    &script_environment,
+                    timeout_seconds,
+                    cancellation,
+                )
+                .map(|status| (status, String::new()))
+            };
+            drop(monitor);
+            let facts = on_observation(ScriptBatchObservation::Diagnostics(&diagnostic_path));
+            let (status, compiler_stderr) = match status {
+                Ok(status) => status,
+                Err(error) => {
+                    if let Some(daemon) = daemon {
+                        daemon.escalate(script, &error.to_string());
+                    }
+                    return Err(error);
+                }
+            };
+            let clef_outcome_unknown =
+                facts.outcome_unknown || (facts.observation_ambiguous && !status.is_success());
+            elapsed_ms = elapsed_ms.saturating_add(status.elapsed_ms);
+            let repaired = daemon.is_some_and(|daemon| {
+                daemon.repair_after_failure(
+                    script,
+                    &diagnostic_path,
+                    &status,
+                    clef_outcome_unknown,
+                    attempt,
+                    &compiler_stderr,
+                    cancellation,
+                )
+            });
+            if repaired && !cancellation.is_cancelled() {
+                attempt += 1;
+                continue;
+            }
+            break (status, clef_outcome_unknown);
+        };
         on_observation(ScriptBatchObservation::ScriptFinished {
             script,
             outcome: &status,
@@ -2405,6 +2518,12 @@ fn select_scripts(
         let mut selected = Vec::with_capacity(explicit.len());
         for value in explicit {
             let resolved = workspace.resolve_script_path(value)?;
+            if resolved == workspace.control.join("segno.hs") {
+                if !selected.contains(&resolved) {
+                    selected.push(resolved);
+                }
+                continue;
+            }
             let Some(script) = discovered.iter().find(|script| script.path == resolved) else {
                 return Err(CliError::InvalidArguments(format!(
                     "script must be a discovered Haskell source below {}: {}",
@@ -3567,6 +3686,8 @@ fn invoke_registered(
     );
     apply_transport_limits(&mut spec, &config.limits);
     spec.environment = tool_runtime.environment.clone();
+    spec.environment
+        .insert("TACTUS_WATCH_RUN_ID".to_owned(), run_id.clone());
     attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
     spec.limits.deadline =
         (control.timeout_seconds != 0).then(|| Duration::from_secs(control.timeout_seconds));
@@ -3906,6 +4027,10 @@ fn dispatch(
     );
     apply_transport_limits(&mut spec, &config.limits);
     spec.environment = tool_runtime.environment.clone();
+    spec.environment.insert(
+        "TACTUS_WATCH_RUN_ID".to_owned(),
+        journal.run_id().to_owned(),
+    );
     attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
     spec.limits.deadline = (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
 
@@ -4550,6 +4675,9 @@ pub enum CliError {
     /// Workspace operation failed.
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// Live stream viewer failed.
+    #[error(transparent)]
+    Watch(#[from] crate::watch::WatchError),
     /// Run-journal query or maintenance failed.
     #[error(transparent)]
     Runs(#[from] crate::runs::RunsError),

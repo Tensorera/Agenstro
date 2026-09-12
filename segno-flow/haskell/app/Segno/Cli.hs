@@ -11,7 +11,7 @@ import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy.Char8 as LazyChar8
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (NominalDiffTime)
+import Data.Time (NominalDiffTime, getCurrentTime)
 import Options.Applicative
   ( Parser,
     ParserInfo,
@@ -75,6 +75,11 @@ import Segno.Store.SQLite
     lifecycleStatus,
     segnoPaths,
   )
+import Segno.Service (defaultServiceEnvironment, runServiceLoop, serviceOnceWith)
+import Segno.Service.Registry
+  ( ServiceJob (..), defaultRegistryPath, initialiseRegistry, listServiceJobs,
+    registerServiceJob, serviceRunHistory, setServiceJobEnabled )
+import Segno.Service.Web (withServiceWeb)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
@@ -89,6 +94,15 @@ data Command
   | TimePlugin Text
   | StatePlugin
   | ActiveWindowPlugin
+  | Service (Maybe FilePath) ServiceCommand
+
+data ServiceCommand
+  = ServiceRegister Text FilePath Int Int
+  | ServiceList Bool
+  | ServiceStatus Bool Int
+  | ServiceOnce
+  | ServiceStart Int Bool
+  | ServiceEnabled Text Bool
 
 main :: IO ()
 main = do
@@ -122,6 +136,28 @@ commandParser =
       <> command "time-plugin" (info timePluginParser (progDesc "Run a time trigger plugin-v1 host"))
       <> command "state-plugin" (info (pure StatePlugin) (progDesc "Run the SQLite state plugin-v1 host"))
       <> command "active-window-plugin" (info (pure ActiveWindowPlugin) (progDesc "Run the Windows active-window plugin-v1 host"))
+      <> command "service" (info serviceParser (progDesc "Register and schedule workspace segno.hs tasks on this machine"))
+
+serviceParser :: Parser Command
+serviceParser = Service
+  <$> optional (strOption (long "registry" <> metavar "PATH" <> help "SQLite registry path; defaults to SEGNO_REGISTRY or platform user data"))
+  <*> hsubparser
+    ( command "register" (info (ServiceRegister <$> taskName <*> rootOption <*> everyOption <*> taskTimeoutOption) (progDesc "Register .tactus/segno.hs; first invocation is immediately due"))
+      <> command "list" (info (ServiceList <$> jsonOption) (progDesc "List registered workspace schedules"))
+      <> command "status" (info (ServiceStatus <$> jsonOption <*> option boundedLimitReader (long "limit" <> value 100 <> metavar "N")) (progDesc "Show registered tasks and recent invocation results"))
+      <> command "once" (info (pure ServiceOnce) (progDesc "Recover expired leases and run due workspace tasks once"))
+      <> command "start" (info (ServiceStart <$> option (boundedReader "port" 1024 65535) (long "port" <> value 47832 <> metavar "PORT") <*> switch (long "no-web" <> help "Disable the localhost status listener")) (progDesc "Run the foreground service; web status defaults to 127.0.0.1:47832"))
+      <> command "pause" (info (ServiceEnabled <$> taskName <*> pure False) (progDesc "Pause future invocations without interrupting running work"))
+      <> command "resume" (info (ServiceEnabled <$> taskName <*> pure True) (progDesc "Acknowledge uncertain work and schedule a fresh future timestamp"))
+    )
+  where
+    taskName = Text.pack <$> strArgument (metavar "NAME")
+    everyOption = option (boundedReader "every-seconds" 1 31536000) (long "every-seconds" <> metavar "SECONDS" <> help "Required interval between scheduled invocations")
+
+boundedReader :: String -> Int -> Int -> ReadM Int
+boundedReader label minimumValue maximumValue = eitherReader $ \encoded -> case reads encoded of
+  [(number, "")] | number >= minimumValue && number <= maximumValue -> Right number
+  _ -> Left (label <> " must be in " <> show minimumValue <> ".." <> show maximumValue)
 
 rootOption :: Parser FilePath
 rootOption = strOption (long "root" <> short 'r' <> metavar "PATH" <> value "." <> help "Tactus workspace or a descendant")
@@ -259,6 +295,34 @@ execute selected = case selected of
   TimePlugin pluginName -> runTimePluginHost pluginName
   StatePlugin -> runStatePluginHost
   ActiveWindowPlugin -> runActiveWindowPluginHost
+  Service configured commandValue -> do
+    registry <- maybe defaultRegistryPath pure configured
+    initialiseRegistry registry
+    let environment = defaultServiceEnvironment registry
+    case commandValue of
+      ServiceRegister name root seconds timeoutSeconds -> do
+        now <- getCurrentTime
+        workspace <- discoverWorkspaceRoot root
+        job <- registerServiceJob registry name workspace seconds timeoutSeconds now
+        putStrLn ("registered " <> Text.unpack (serviceJobName job) <> "\t" <> serviceJobRoot job)
+      ServiceList json -> do
+        jobs <- listServiceJobs registry
+        if json then emitJson jobs else forM_ jobs $ \job ->
+          putStrLn (Text.unpack (serviceJobName job) <> "\t" <> serviceJobRoot job <> "\tevery=" <> show (serviceJobEverySeconds job) <> "s\t" <> if serviceJobEnabled job then "enabled" else "paused")
+      ServiceStatus json limit -> do
+        jobs <- listServiceJobs registry
+        runs <- serviceRunHistory registry limit
+        if json then emitJson (object ["jobs" .= jobs, "runs" .= runs]) else forM_ runs emitJson
+      ServiceOnce -> serviceOnceWith environment registry >>= emitJson
+      ServiceStart port noWeb -> do
+        hPutStrLn stderr ("segno: registry " <> registry)
+        if noWeb then runServiceLoop environment registry else do
+          hPutStrLn stderr ("segno: status http://127.0.0.1:" <> show port)
+          withServiceWeb registry port (runServiceLoop environment registry)
+      ServiceEnabled name enabled -> do
+        now <- getCurrentTime
+        setServiceJobEnabled registry name enabled now
+        putStrLn ((if enabled then "resumed " else "paused ") <> Text.unpack name)
 
 emitJson :: ToJSON value => value -> IO ()
 emitJson = LazyChar8.putStrLn . encode

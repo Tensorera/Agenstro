@@ -5,6 +5,7 @@
 
 pub mod adapters;
 pub mod cli;
+pub mod daemon;
 mod executable;
 pub mod journal;
 pub mod limits;
@@ -14,6 +15,7 @@ pub mod protocol;
 pub mod runs;
 pub mod session;
 pub mod studio;
+pub mod watch;
 pub mod workspace;
 
 pub use journal::{

@@ -2,7 +2,7 @@
 title: Agenstro public roadmap
 status: alpha
 owners: [release]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Agenstro 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -63,8 +63,9 @@ promotion of mined norms is not implied.
 
 ## Tactus direction
 
-Tactus should remain a small, dependable execution kernel rather than become a
-network daemon. Compatible work includes packaging, config migration tooling,
+Tactus includes opt-in provider daemon supervision and a localhost stream
+viewer. Persistent scheduling remains in Haskell Segno. Further work includes
+packaging, config migration tooling,
 bounded run inspection/retention, provider adapter acceptance, and stronger
 cross-platform descendant cleanup. Session planner registration and
 `session advance` require an explicit invocation contract before they become
@@ -72,7 +73,9 @@ runtime commands.
 
 ## Segno direction
 
-Segno's next useful work is operational rather than distributed: explicit
+Segno now also offers a machine-local registry, standard timestamp-driven
+`.tactus/segno.hs` entry and a read-only dashboard. Further work is operational:
+explicit
 reconciliation, configurable policies, lease renewal for very long tasks,
 additional trigger/state plugins, and better backup/inspection. Multi-node
 coordination would require a new consistency design and is not implied by the

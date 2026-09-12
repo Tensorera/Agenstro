@@ -1,0 +1,15 @@
+[Unit]
+Description=Segno persistent workspace task service
+
+[Service]
+Type=simple
+# Install segno and tactus here, or change both ExecStart and PATH to their
+# actual installation directories. Include Cabal/GHC in PATH as well.
+ExecStart=%h/.local/bin/segno service start --port 47832
+Environment=PATH=%h/.local/bin:%h/.ghcup/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

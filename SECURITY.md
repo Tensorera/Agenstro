@@ -65,6 +65,20 @@ They still contain user-supplied task evidence, which should be reviewed before
 sharing. A rendered report is neither verification of that evidence nor an
 execution capability.
 
+## Optional daemon and local viewers
+
+The Tactus daemon uses a configured provider with that provider's existing
+authority. Runtime-applied repair proposals are limited to a selected,
+explicitly retryable Haskell source, but the native agent itself is trusted
+code. Monitoring instructions do not sandbox it. Ambiguous external outcomes
+must be reconciled before scheduling another attempt.
+
+The Tactus stream viewer and Segno dashboard bind to loopback. They are local
+operator surfaces, not remote execution services. Live provider text is
+retained in bounded viewer memory rather than the redacted journal; Segno
+task information is persisted in its registry. Both can contain business data.
+Do not expose these listeners through a public proxy.
+
 ## Handling credentials
 
 Do not store provider tokens or machine-local configuration in

@@ -4,7 +4,8 @@ Agenstro `0.3` keeps the user's existing coding agent as its first interface.
 Clef is the Haskell EDSL, Tactus is the Rust execution kernel, Segno is the
 Haskell persistent-task driver, and Motivo supplies a project skill, eight
 Haskell method templates, and offline HTML observation. Do not revive the
-removed desktop task loop, Python/Rust Segno stack, or legacy daemon path.
+removed desktop task loop, Python/Rust Segno stack, or legacy daemon path. New daemon supervision is an opt-in Tactus component;
+the Haskell Segno service owns persistent scheduling.
 
 All contributions are accepted under the repository's GNU AGPL v3.0-only
 license. Do not copy code whose license is incompatible with `AGPL-3.0-only`;
@@ -142,10 +143,13 @@ Keep the runtime separated into the existing concerns:
 - `protocol`: strict incremental `agenstro.plugin/v1` frame decoding;
 - `studio`: the versioned read-only Studio control projection;
 - `session`: validated durable decision-session storage and control commands;
+- `daemon`: bounded provider supervision, repair proposals and escalation;
+- `watch`: ephemeral local provider streams and the read-only browser viewer;
 - `cli`: the public command surface and error/exit-code mapping.
 
 The public CLI contract is `init`, `list`, `prompt`, `generate`, `check`,
-`run`, `doctor`, `smoke`, and `plugin-call`. `dispatch`, `provider-host`, and
+`run` (including opt-in `--daemon`), `watch`, `doctor`, `smoke`, `plugin-call`,
+`runs`, `studio`, and `session`. `dispatch`, `provider-host`, and
 `effect-host` are internal subcommands used to keep all plugin calls under the
 same Rust supervisor.
 

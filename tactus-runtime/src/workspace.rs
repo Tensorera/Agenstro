@@ -94,6 +94,14 @@ instructions = ".tactus/PROMPT.md"
 # Optional shared business-task instructions; omitted means no runtime prefix.
 # runtime_instructions = ".tactus/RUNTIME.md"
 
+# Optional daemon policy; activate per task with `tactus run --daemon`.
+# [daemon]
+# provider = "claude-code"
+# interval_seconds = 60
+# timeout_seconds = 120
+# max_retries = 1
+# retry_scripts = [] # Only explicitly idempotent entries may be repaired/rerun.
+
 [limits]
 max_concurrent_provider_calls = 4
 check_timeout_seconds = 1800
@@ -210,6 +218,9 @@ pub struct RuntimeConfig {
     /// Validated process, transport, and provider concurrency policy.
     #[serde(default)]
     pub limits: RuntimeLimits,
+    /// Optional task daemon policy; activated only by `tactus run --daemon`.
+    #[serde(default)]
+    pub daemon: crate::daemon::DaemonConfig,
     /// Provider convenience registry.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderDefinition>,
@@ -348,7 +359,9 @@ impl Workspace {
     /// Resolve an explicit source without following links or leaving the selected tree.
     pub fn resolve_script_path(&self, source: &Path) -> Result<PathBuf, WorkspaceError> {
         let candidate = workspace_path(&self.root, source)?;
-        if !candidate.starts_with(&self.scripts_path) {
+        let standard_segno = self.scripts_path == self.control.join(SCRIPTS_DIRECTORY)
+            && candidate == self.control.join("segno.hs");
+        if !candidate.starts_with(&self.scripts_path) && !standard_segno {
             return Err(WorkspaceError::InvalidConfig(format!(
                 "script must be below the selected scripts directory {}: {}",
                 self.scripts_path.display(),
@@ -369,8 +382,8 @@ impl Workspace {
                 source.display()
             )));
         }
-        let resolved = dunce::canonicalize(candidate).map_err(WorkspaceError::Io)?;
-        if !resolved.starts_with(&self.scripts_path) {
+        let resolved = dunce::canonicalize(&candidate).map_err(WorkspaceError::Io)?;
+        if !resolved.starts_with(&self.scripts_path) && !(standard_segno && resolved == candidate) {
             return Err(WorkspaceError::InvalidConfig(
                 "script resolved outside the selected scripts directory".to_owned(),
             ));
@@ -641,6 +654,16 @@ impl RuntimeConfig {
         self.limits
             .validate()
             .map_err(WorkspaceError::InvalidConfig)?;
+        self.daemon
+            .validate()
+            .map_err(WorkspaceError::InvalidConfig)?;
+        if let Some(provider) = &self.daemon.provider
+            && !self.providers.contains_key(provider)
+        {
+            return Err(WorkspaceError::InvalidConfig(format!(
+                "daemon provider {provider:?} is not registered"
+            )));
+        }
         for (name, plugin) in &self.providers {
             validate_command("providers", name, &plugin.command)?;
             let options = plugin

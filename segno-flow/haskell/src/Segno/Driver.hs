@@ -11,6 +11,7 @@ module Segno.Driver
     RunSummary (..),
     systemClock,
     processRunner,
+    runProcessBytes,
     defaultDriverEnvironment,
     discoverWorkspaceRoot,
     initialiseWorkspace,

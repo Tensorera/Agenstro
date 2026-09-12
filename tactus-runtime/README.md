@@ -10,8 +10,10 @@ The canonical user references are [Installation](../docs/install.md),
 [CLI reference](../docs/reference/cli-v0.3.md). This component README stays
 focused on the Rust package and implementation boundary.
 
-It intentionally does not contain a daemon, authentication system, credential
-broker, artifact/CAS service, checkpoint restore, or rollback engine.
+Optional daemon supervision monitors a selected run through a separately
+configured provider. `tactus watch` serves a live local provider-output viewer.
+Persistent scheduling remains in Segno. Neither component adds workflow
+rollback or a provider credential broker.
 
 Tactus is licensed with the rest of Agenstro under
 [GNU AGPL v3.0 only](../LICENSE).

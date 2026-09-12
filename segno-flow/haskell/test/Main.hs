@@ -89,6 +89,7 @@ import System.Directory
   )
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.FilePath (makeRelative, takeDirectory, (</>))
+import ServiceTests (runServiceTests)
 
 main :: IO ()
 main = do
@@ -104,6 +105,7 @@ main = do
   run "outcome unknown is not automatically retried" testOutcomeUnknownStops
   run "virtual clock and fake runner execute one persistent occurrence" testVirtualDriver
   run "virtual minute task checkpoints three windows and survives restart" testVirtualWindowPersistence
+  runServiceTests
   putStrLn "segno-flow: all tests passed"
 
 run :: String -> IO () -> IO ()

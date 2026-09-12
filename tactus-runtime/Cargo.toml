@@ -46,5 +46,9 @@ path = "tests-rust/runtime.rs"
 name = "adapters"
 path = "tests-rust/adapters.rs"
 
+[[test]]
+name = "daemon"
+path = "tests-rust/daemon.rs"
+
 [lints]
 workspace = true

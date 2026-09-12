@@ -2,7 +2,7 @@
 title: Agenstro 0.3 architecture
 status: alpha
 owners: [architecture]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, Segno Haskell 0.3.0.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -16,15 +16,16 @@ events, and records factual run evidence. Segno is the Haskell driver for typed
 persistent tasks. The user's existing coding agent owns the conversation and
 chooses Motivo methods. Motivo supplies a project skill, eight editable Haskell
 templates, and evidence reports; Motivo Studio renders read-only HTML snapshots.
-There is no second agent client or application-owned task loop.
+An optional Tactus daemon supervises a run; the separate Segno service owns
+persistent scheduling across project workspaces.
 
 The architectural split is:
 
 | Component | Owns | Deliberately does not own |
 | --- | --- | --- |
 | Clef `0.3.0.0` | `Workflow a`, typed tasks/effects/plugins, explicit parallelism, typed requirements, typed norms/rubrics, incremental event sink, typed `Trigger state event`/`State state`/`PersistentTask` boundary | Provider catalogue, permission policy, custom language parser, scheduler loop, lifecycle database, artifacts, authentication |
-| Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio/session control DTOs and the durable session store | Haskell workflow/planner semantics, provider credentials, daemon/API service, replay, rollback, GUI |
-| Segno `0.3.0.0` | Single-node driver, trigger cursors, occurrence lifecycle, leases/fences, SQLite state plugin, interval/cron planning, invocation/result handoff to Tactus | Workflow value semantics, distributed consensus, exactly-once effects, rollback, replay, provider execution |
+| Tactus `0.3.0` | `.tactus` workspace, typed TOML, script selection, Cabal/GHC commands, one-shot dispatch, process groups, event journals, built-in adapters, Studio/session control DTOs, durable sessions, optional daemon supervision and a local streaming viewer | Haskell workflow/planner semantics, provider credentials, persistent scheduling, replay, rollback |
+| Segno `0.3.0.0` | Single-node driver, trigger cursors, occurrence lifecycle, leases/fences, SQLite state plugin, interval/cron planning, invocation/result handoff to Tactus, machine-local registry and read-only service dashboard | Workflow value semantics, distributed consensus, exactly-once effects, rollback, replay, provider execution |
 | Motivo `0.3.0` | Skill guidance, eight Haskell method templates, `.tactus/motivo` records and artifacts, offline HTML observation | Main conversation, provider registry, process-supervision kernel, Tactus sessions, Segno state, autonomous task loop, replay, credentials |
 | `motivo.test` effect | Linux experiment isolation and a shared deadline of at most 600 seconds | General Haskell sandboxing, business-workflow policy, remote experiments, automatic retries |
 | Plugins | Provider/effect/domain behavior behind `agenstro.plugin/v1` | Core workflow composition and runtime ownership |
@@ -92,7 +93,35 @@ useful; an open HTML page never schedules work. The optional
 Segno driver owns persistent scheduling: it must wait even when no workflow
 process exists. Each trigger,
 state, workflow, provider, and effect invocation is still a separately
-correlated process operation; Segno does not expose a network daemon API.
+correlated process operation. `segno service start` adds a local scheduler and
+read-only web dashboard for registered `.tactus/segno.hs` tasks. It shares no
+business-state database with the Tactus daemon.
+
+## Optional supervision and live observation
+
+`tactus run --daemon` starts a provider-backed monitor for the selected task.
+Timer prompts inspect progress while a script is active. Repair decisions are
+made after it stops, so the runtime never reruns a still-active script. An
+independent daemon provider can return a bounded source-replacement proposal
+for a failed, explicitly retryable entry. Tactus validates and applies the
+proposal and limits retry attempts. Missing results, ambiguous external effects,
+out-of-scope proposals and exhausted budgets become escalation evidence.
+The provider is trusted local code; a prompt asking it to inspect only does
+not add a filesystem sandbox to its native CLI.
+
+`tactus watch` listens on localhost and presents live provider output alongside
+run evidence. Adapter publication uses a bounded, optional channel, and the
+viewer keeps a bounded in-memory history. Closing or slowing the viewer must
+not change a provider's terminal outcome. The durable journal continues to
+summarize provider content. Starting this viewer does not launch a provider.
+
+`segno service` owns a separate machine-local registry and SQLite invocation
+history. Each registered workspace supplies `.tactus/segno.hs`; the service
+passes one UTC timestamp and expects a correlated status code plus structured
+information. The script organizes timestamp-specific work directories and
+calls ordinary business entries with a work-directory argument. Scheduler
+state, workspace organization and business logic therefore have separate
+owners. Service restarts preserve completed history and pause ambiguous work.
 
 ## Clef: static composition, open runtime
 
@@ -473,8 +502,10 @@ Tactus includes translations for three native agent CLIs:
 | `claude-code` | `claude -p --dangerously-skip-permissions --output-format stream-json ...` | open `effort` |
 | `opencode` | `opencode run --auto --format json ...` plus inline `permission=allow` | open `variant` (with effort fallback) |
 
-Each adapter consumes the native stream to derive its live terminal value, but
-does not forward token-level provider JSON or free text as user/journal events.
+Each adapter consumes the native stream to derive its live terminal value.
+When `tactus watch` is running, recognized assistant output is also sent to
+the viewer through a bounded ephemeral local channel. Provider text remains
+absent from persisted user/journal events.
 It emits one bounded `provider.diagnostic` aggregate containing counts, byte
 sizes, event-type fingerprints, truncation state, and hashes. Offline `smoke`
 resolves the executable/version; live smoke sends a minimal request. Tests use
@@ -524,8 +555,8 @@ isolation.
 
 The `0.3` architecture has no:
 
-- network daemon/API, service discovery, or persistent provider session;
-- authentication, capability token, approval UI, or credential broker;
+- remote execution API or persistent provider session;
+- provider authentication, approval UI, or credential broker;
 - artifact tracker, workspace transaction, or rollback;
 - exactly-once provider/effect guarantee or automatic retry after an
   ambiguous external outcome;

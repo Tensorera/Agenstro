@@ -2,7 +2,7 @@
 title: Tactus workspace and configuration
 status: alpha
 owners: [tactus]
-last_verified: 2026-08-20
+last_verified: 2026-09-12
 applies_to: "tactus-runtime 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -152,6 +152,7 @@ must cross the JSON runtime boundary without changing meaning.
 | `instructions` | path string | yes | UTF-8 generation prompt; relative paths resolve from the workspace root |
 | `runtime_instructions` | path string | no | UTF-8 instructions shared by business-task provider invocations; omitted means an empty prefix; relative paths resolve from the workspace root |
 | `limits` | table | no | Workspace-owned deadlines, transport budgets, and provider concurrency; omitted fields use validated defaults |
+| `daemon` | table | no | Optional monitoring provider, interval, deadline, retry budget and explicit retryable entries; activated by `run --daemon` |
 | `providers` | table | yes in practice | Provider convenience registry; must contain `default_provider` |
 | `effects` | table | no | Effect operations and optional invocation observers |
 | `plugins` | table | no | Open generic plugin registry |
@@ -168,6 +169,26 @@ If an existing project relied on business guidance in `PROMPT.md`, move that
 guidance into the explicitly configured runtime file. Initialization preserves
 existing project-owned prompt files; update old generation guidance if it
 still requires multiple stages or forbids compile checking.
+
+### Daemon policy
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `provider` | `default_provider` | Independent provider registry key |
+| `interval_seconds` | `60` | Delay between monitoring calls, 1–86400 seconds |
+| `timeout_seconds` | `120` | Deadline per daemon provider invocation, 61–3600 seconds (60 seconds reserved for native cleanup) |
+| `max_retries` | `1` | Maximum repairs/reruns per authorized entry, 0–10 |
+| `retry_scripts` | `[]` | Workspace-relative paths explicitly authorized for idempotent repair/rerun |
+
+The table configures policy; `tactus run --daemon` activates supervision for
+one task. Unknown fields and invalid bounds are rejected. See
+[provider setup](providers.md#optional-task-daemon) for a complete example and
+the repair/escalation contract.
+
+The standard `.tactus/segno.hs` organizer is an explicit-only exception to
+numbered business entries. It can be selected by `check .tactus/segno.hs` or
+`run --script .tactus/segno.hs`; default `run --all` does not include it.
+Other control files and ordinary helper modules are not runnable entries.
 
 ### Provider definition
 

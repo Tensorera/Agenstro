@@ -184,6 +184,84 @@ fn script_directory_selection_reaches_list_check_and_run() {
     assert!(!arguments.contains("010_method.hs"));
 }
 
+#[cfg(unix)]
+#[test]
+fn standard_segno_entry_requires_explicit_selection_and_preserves_timestamp() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (temporary, project) = initialized_project();
+    let entry = project.join(".tactus/segno.hs");
+    fs::write(&entry, "main = pure ()\n").expect("Segno entry");
+    fs::write(project.join(".tactus/Other.hs"), "main = pure ()\n")
+        .expect("unrelated control source");
+    fs::write(
+        project.join(".tactus/scripts/010_business.hs"),
+        "main = pure ()\n",
+    )
+    .expect("business entry");
+    let tools = temporary.path().join("tools");
+    fs::create_dir(&tools).expect("fake tool directory");
+    let cabal = tools.join("cabal");
+    fs::write(
+        &cabal,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$TACTUS_TEST_ARGUMENTS\"\n",
+    )
+    .expect("fake Cabal");
+    fs::set_permissions(&cabal, fs::Permissions::from_mode(0o755)).expect("executable fixture");
+    let log = temporary.path().join("arguments.log");
+    // This command uses only the fake tool; no installed Cabal or provider is needed.
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tactus"))
+            .args(args)
+            .current_dir(&project)
+            .env("PATH", &tools)
+            .env("TACTUS_TEST_ARGUMENTS", &log)
+            .output()
+            .expect("run Tactus")
+    };
+    let timestamp = "2026-09-12T12:34:56Z";
+    for args in [
+        vec!["check", ".tactus/segno.hs"],
+        vec!["run", "--script", ".tactus/segno.hs", "--", timestamp],
+    ] {
+        fs::write(&log, "").expect("clear command log");
+        let output = invoke(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recorded = fs::read_to_string(&log).expect("command log");
+        assert!(recorded.contains("segno.hs"));
+        assert!(!recorded.contains("010_business.hs"));
+        if args[0] == "run" {
+            assert_eq!(recorded.lines().last(), Some(timestamp));
+        }
+    }
+    fs::write(&log, "").expect("clear command log");
+    assert!(invoke(&["run", "--all"]).status.success());
+    let recorded = fs::read_to_string(&log).expect("business command log");
+    assert!(recorded.contains("010_business.hs"));
+    assert!(!recorded.contains("segno.hs"));
+    assert!(
+        !invoke(&["run", "--script", ".tactus/Other.hs"])
+            .status
+            .success()
+    );
+
+    fs::remove_file(&entry).expect("replace fixture with link");
+    let outside = temporary.path().join("segno.hs");
+    fs::write(&outside, "main = pure ()\n").expect("external fixture");
+    symlink(&outside, &entry).expect("linked entry");
+    fs::write(&log, "").expect("clear command log");
+    assert!(
+        !invoke(&["run", "--script", ".tactus/segno.hs"])
+            .status
+            .success()
+    );
+    assert!(fs::read_to_string(&log).expect("command log").is_empty());
+}
+
 #[test]
 fn session_control_api_lists_shows_and_answers_with_typed_envelopes() {
     let (_temporary, project) = initialized_project();

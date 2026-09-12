@@ -262,6 +262,18 @@ function Invoke-FullSteps {
             "-m", "mkdocs", "build", "--strict", "--site-dir", (Join-Path $runRoot "site")
         )
     }
+    Invoke-QualityStep "segno-service-acceptance" {
+        $segnoBinary = & cabal list-bin --builddir=Build/cabal segno-flow:exe:segno
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not locate the built Segno executable."
+        }
+        $tactusName = if ($IsWindows) { "tactus.exe" } else { "tactus" }
+        Invoke-NativeCommand $pythonCommand @(
+            "Test/repository/test-segno-service.py",
+            "--tactus", (Join-Path $cargoTarget "debug/$tactusName"),
+            "--segno", ([string]$segnoBinary).Trim()
+        )
+    }
     Invoke-QualityStep "documentation-examples" {
         Invoke-NativeCommand "pwsh" @(
             "-NoProfile", "-File", "Test/repository/test-clef-documentation-examples.ps1"

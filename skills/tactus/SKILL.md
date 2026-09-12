@@ -17,6 +17,8 @@ imports. Use `tactus doctor --root <workspace> --json` to diagnose setup errors.
   `NNN_name.hs` or `NNN_name.lhs` are runnable entries; helpers are ordinary Haskell modules.
   Keep selected paths within the selected directory; linked files and directories
   are not accepted as explicit sources. Source selection is not an IO sandbox.
+  The standard `.tactus/segno.hs` organizer is an explicit-only exception:
+  select it with `--script .tactus/segno.hs`; ordinary `run --all` excludes it.
 - Entries declare `module Main (main) where`, import `Clef`, and expose
   `main :: IO ()`. Run a `Workflow a` with `runTactus`; use ordinary Haskell
   functions and values for local computation.
@@ -66,6 +68,7 @@ tactus run --root /path/to/project --script .tactus/scripts/010_explain.hs
 ```
 
 Read [references/commands.md](references/commands.md) for selection and plugin
-syntax. Never blindly retry `OutcomeUnknown`, a timeout after dispatch, or a
+syntax, optional daemon supervision, live output and Segno registration.
+Never blindly retry `OutcomeUnknown`, a timeout after dispatch, or a
 missing terminal response: inspect the recorded and external outcome first.
 See [references/outcomes.md](references/outcomes.md) for diagnostic commands.

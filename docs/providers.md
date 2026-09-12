@@ -2,7 +2,7 @@
 title: Configure coding-agent providers
 status: alpha
 owners: [tactus]
-last_verified: 2026-08-17
+last_verified: 2026-09-12
 applies_to: "tactus-runtime provider adapters 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -92,6 +92,69 @@ invokeWith
   task
   input
 ```
+
+## Optional task daemon
+
+Enable the daemon separately for each run:
+
+```sh
+tactus run --script .tactus/scripts/010_work.hs --daemon --daemon-provider reviewer
+```
+
+The daemon injects periodic prompts through the selected registered provider.
+It observes the running entry and reports anomalies. Configuring a daemon
+provider does not enable it on ordinary runs. A separate registry entry allows
+its model, effort, executable and options to differ from the business provider:
+
+```toml
+[providers.reviewer]
+command = ["tactus", "provider-host", "claude-code"]
+effort = "high"
+
+[daemon]
+provider = "reviewer"
+interval_seconds = 60
+timeout_seconds = 120
+max_retries = 1
+retry_scripts = [".tactus/scripts/010_work.hs"]
+```
+
+`retry_scripts` explicitly authorizes automatic repair and rerun of those
+entries after a known failure. Only include scripts whose effects can safely
+be repeated. Without an allowlist the daemon monitors and escalates. A command
+can add one entry with `--daemon-retry-script PATH`, repeated as needed.
+`--daemon-max-retries` and `--daemon-interval-seconds` override the workspace
+policy for this run; all daemon override flags require `--daemon`.
+
+When an authorized entry fails, the provider may propose one exact textual
+replacement in that entry. Tactus checks the source has not changed, requires
+a unique nonempty match and bounds the replacement to 8 KiB per fragment.
+It applies the proposal and reruns only that entry with its original arguments.
+The default maximum is one repair per entry. Result ambiguity, cancellation,
+invalid proposals, out-of-scope changes and an exhausted budget are escalated
+instead of retried. The daemon's native provider retains its configured tool
+authority; these proposal rules do not sandbox the provider itself.
+
+The daemon provider returns one JSON object, either directly as its plugin
+result or as JSON in the built-in adapter's `text` value:
+
+```json
+{"action":"continue","summary":"The task is still progressing."}
+```
+
+```json
+{"action":"escalate","summary":"The failure requires a business decision."}
+```
+
+```json
+{"action":"repair","summary":"Correct the local name.","old":"misspelledName","new":"correctName"}
+```
+
+Monitoring accepts only `continue` or `escalate`; repair is considered after a
+known failure. Reports are saved in the task's run directory as `daemon.jsonl`,
+and escalations are also printed to stderr. This is local reporting; it does
+not send email, chat messages or webhooks. Daemon invocations can contact or bill
+the independently configured provider.
 
 ## OpenCode model and effort
 

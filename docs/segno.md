@@ -2,7 +2,7 @@
 title: Segno persistent tasks
 status: alpha
 owners: [segno]
-last_verified: 2026-08-17
+last_verified: 2026-09-12
 applies_to: "Segno Flow Haskell 0.3.0.0"
 platforms: [windows, ubuntu]
 ---
@@ -32,6 +32,114 @@ job.
 Use the canonical [installation guide](install.md) to install or upgrade
 Tactus and the `segno` executable. This guide assumes both commands resolve and
 that `tactus check --help` contains the repeatable `--package` option.
+
+## Machine-local timestamp service
+
+Use `segno service` to register tasks from multiple local workspaces in one
+Haskell scheduler. Each workspace supplies exactly one standard entry,
+`.tactus/segno.hs`. Ordinary business scripts stay in `.tactus/scripts`.
+The typed `install`/`driver` interface described below remains available.
+
+Initialize both SDK links, copy `segno-flow/examples/service/segno.hs` into `.tactus/segno.hs`,
+and register the workspace:
+
+```sh
+tactus init /path/to/project --sdk /path/to/Agenstro/clef-sdk
+segno init --root /path/to/project --sdk /path/to/Agenstro/segno-flow
+segno service register daily-report --root /path/to/project --every-seconds 86400
+segno service list --json
+segno service once
+segno service status --json
+segno service start --port 47832
+```
+
+Registration requires the standard entry to exist. The first invocation is
+due immediately. `once` executes currently due work and exits; `start` keeps
+the scheduler and its read-only dashboard running until stopped. Open
+`http://127.0.0.1:47832` to inspect registered tasks and invocation history.
+The dashboard does not execute scripts or change the registry.
+
+The initial service runs tasks sequentially; a long task delays other tasks
+while the web dashboard remains responsive. Each `once` turn processes at
+most 100 due tasks. `start --no-web` runs only the scheduler.
+
+The default registry is `agenstro/segno/registry.sqlite3` below the platform's
+user data directory. Set `SEGNO_REGISTRY` or pass `--registry PATH` before the service subcommand to select another registry. It is independent of each
+workspace's business-state files and legacy typed-task lifecycle databases.
+For example:
+
+```sh
+segno service --registry /path/to/registry.sqlite3 list --json
+segno service pause daily-report
+segno service resume daily-report
+```
+
+Pause prevents future invocations; it does not cancel an already running one.
+Resume schedules a fresh future timestamp. Inspect external effects before
+resuming a task paused by an unknown outcome. Resume never replays the old
+timestamp or changes its recorded outcome.
+
+### Standard `segno.hs` contract
+
+The service executes the entry through Tactus with one ISO-8601 UTC timestamp
+argument. This is the logical scheduled time; delayed polls coalesce missed
+intervals into the latest due time. A workspace cannot have overlapping service
+invocations. Use this minimal entry:
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+module Main (main) where
+
+import Data.Aeson (object, (.=))
+import Segno.Service.Protocol (serviceMain)
+
+main :: IO ()
+main = serviceMain $ \timestamp -> do
+  -- Organize this occurrence's working directory, then call business scripts.
+  pure (0, object ["scheduled_at" .= timestamp])
+```
+
+`serviceMain` parses the timestamp and atomically writes the result to the
+per-invocation `SEGNO_SERVICE_RESULT_PATH` supplied by the service. It accepts
+a status code in `0..255` and any JSON information value. A known business
+failure returns a nonzero status code while the organizer exits normally
+after publishing the result. Diagnostic stdout is not the result channel.
+
+```json
+{
+  "api": "agenstro.segno-service-result/v1",
+  "timestamp": "2026-09-12T12:00:00Z",
+  "status_code": 0,
+  "info": {"message": "report completed"}
+}
+```
+
+Results are bounded to 1 MiB and must match the invocation timestamp. Missing,
+malformed, mismatched or uncertain results become `outcome_unknown` and pause
+the schedule. An expired running lease also becomes unknown, including after
+a service crash. Completed history survives a restart. A known failure is
+recorded; the next scheduled timestamp remains eligible.
+
+### Separate organization from business work
+
+Let the organizer create a stable timestamp directory, inspect its own
+completion markers, and invoke numbered business scripts with a work-directory
+argument after Tactus's `--` separator:
+
+```sh
+tactus run --script .tactus/scripts/010_report.hs -- --work-dir /path/to/occurrence
+```
+
+The business script reads `--work-dir` with `getArgs`, works within that
+directory, and leaves reusable artifacts there. The organizer owns directory
+layout, completion markers and the final service status. The central registry
+owns schedule and invocation history. Business data does not belong in the
+scheduler's lifecycle tables; use `info` for a concise status and artifact
+references. Timestamp naming alone does not make external effects idempotent.
+
+`segno service start` is a foreground service command suitable for an operating
+system service manager. Installing it does not automatically register an OS
+startup service or enable any business task.
 
 ## Initialize a project
 
@@ -278,6 +386,14 @@ fencing tokens, package discovery, trigger-failure isolation,
 `OutcomeUnknown` non-retry, and a virtual 0/60/120-second active-window task
 that checkpoints three revisions and survives a simulated driver restart.
 
+The service suite additionally covers machine-local claims, timestamp result
+validation, missed-interval coalescing, lease recovery, job isolation and the
+HTTP dashboard. The repository's `Full` profile also runs
+`Test/repository/test-segno-service.py`: it initializes two isolated workspaces,
+executes the supplied organizers and business scripts through actual Tactus
+and Haskell, then checks durable results and non-repetition after a new CLI
+invocation. It makes no model calls.
+
 ## Explicit non-goals
 
 Segno `0.3` does not provide:
@@ -289,7 +405,7 @@ Segno `0.3` does not provide:
 - automatic rollback of checkpoints or external effects;
 - an operator mutation command for resolving `OutcomeUnknown` occurrences;
 - automatic migration of the removed Python/Rust Segno registry/state; or
-- authentication, hostile-code sandboxing, or a network service API.
+- provider authentication, hostile-code sandboxing, or a remote execution API.
 
 See [Architecture](architecture.md), [ADR-0004](adr/0004-haskell-segno-persistent-tasks.md),
 and [Troubleshooting](troubleshooting.md) for the ownership and failure

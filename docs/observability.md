@@ -2,7 +2,7 @@
 title: Logs, state transitions, and run evidence
 status: alpha
 owners: [tactus, motivo]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Clef/Tactus/Motivo 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -13,6 +13,56 @@ Agenstro separates what a person should read from what a diagnostic tool should
 retain. Human surfaces show short natural-language state and severity messages;
 the persistent layer records bounded structured evidence about why state
 changed.
+
+## Live provider output
+
+Start the local viewer before launching provider work in the same workspace:
+
+```sh
+tactus watch --root /path/to/project --port 47831
+```
+
+Open the complete localhost URL printed by the command, including its
+`#token=...` fragment. In another terminal, start an ordinary `tactus run`,
+`generate` or provider invocation. The page shows recognized assistant output
+from the built-in Codex, Claude Code and OpenCode adapters as native events
+arrive. It also lists recent runs and their recorded state. Select a run to
+filter its live output and inspect its journal; use the follow control to keep
+new output in view.
+
+Claude partial messages and OpenCode text events can arrive incrementally.
+Codex output follows the granularity of its native JSON message events; the
+viewer cannot manufacture token deltas that the CLI does not expose. Custom
+provider hosts retain their existing journal diagnostics but do not acquire
+native text streaming automatically.
+
+The viewer is opt-in, read-only and bound to `127.0.0.1`. It keeps at most
+4 MiB / 4096 live events in memory and polls bounded pages. Refresh reconnects
+to retained output; stopping the viewer discards it. Start provider invocations
+after the viewer starts so their adapters can discover the local channel.
+Dropped packets, truncated text and expired history are indicated explicitly.
+A slow or closed viewer does not change the provider's terminal outcome.
+
+`.tactus/watch.json` is temporary connection metadata, including a local bearer
+token. The viewer holds a workspace lock and removes this descriptor when
+stopped. Raw assistant output travels through the local ephemeral channel; it
+does not become a retained transcript in `events.jsonl` or `summary.json`.
+The separate Motivo HTML report continues to be an offline snapshot.
+
+## Daemon and scheduled-task reports
+
+For `tactus run --daemon`, inspect `daemon.jsonl` in the enclosing task run
+directory. It records monitoring decisions, repair attempts and escalation.
+Escalations also appear on stderr. The daemon only retries explicitly
+authorized entries after a known failure, within its configured budget; see
+[provider setup](providers.md#optional-task-daemon).
+
+The Haskell `segno service start` dashboard defaults to
+`http://127.0.0.1:47832`. It displays registered workspaces and durable recent
+invocation states independently of Tactus's transient stream. The scheduler
+stores status codes and task-supplied information in its registry. See
+[Segno](segno.md#machine-local-timestamp-service) for the timestamp entry and
+unknown-outcome recovery rules.
 
 ## The execution model: `G(s, i, t, h)`
 

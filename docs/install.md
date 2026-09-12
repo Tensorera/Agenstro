@@ -2,7 +2,7 @@
 title: Install Agenstro 0.3
 status: alpha
 owners: [release]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Clef/Segno 0.3.0.0, Tactus/Motivo 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -11,7 +11,9 @@ platforms: [windows, ubuntu]
 
 Agenstro is built from a checkout. The user works in an existing coding-agent
 CLI; Motivo supplies a skill, Haskell templates, and offline HTML reports.
-There is no desktop client or background server to install.
+The default workflow needs no desktop client. Optional Tactus daemon
+supervision and streaming use the same binary; persistent scheduling uses the
+separately installed Haskell Segno executable.
 
 ## Prerequisites
 

@@ -2,7 +2,7 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Clef/Segno 0.3.0.0, Tactus 0.3.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -18,6 +18,8 @@ successful call to a live provider account.
 | Repository license | `AGPL-3.0-only` | Current | Current | root `LICENSE`, Cargo workspace, both Cabal packages, and Motivo package metadata agree |
 | Clef Haskell package | Cabal `0.3.0.0`, GHC2021, `base >=4.20 && <4.23` | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; fake JSONL plugins exercise typed tasks/plugins, norms/rubrics, bounded refinement, and incremental events |
 | Tactus runtime/CLI | Rust crate `0.3.0`, stable Rust | Current gate | Current gate | Cargo workspace format/check/test/clippy; isolated script-root selection and idempotent skill/template installation are covered alongside workspace/workflow/plugin and session operations |
+| Tactus daemon | Optional provider monitoring per run | Source implementation | Linux offline acceptance | Periodic prompts, bounded repair, explicit retry allowlist and unknown/cancelled non-retry use fake providers; native provider tool authority is unchanged |
+| Tactus stream viewer | `tactus watch`, localhost port 47831 | Source implementation | Linux local acceptance | Bounded transient assistant output, reconnection/history limits, local HTTP and journal projections; no durable raw transcript |
 | Plugin process ABI | `agenstro.plugin/v1` | Current gate | Current gate | strict correlation/lifecycle, Unicode, malformed/oversized frames, immediate events, bounded transport, low-priority observation loss, authoritative terminal preservation, and exit behavior use local fakes |
 | Run journal | `agenstro.trace/v1` | Current gate | Current gate | ordered append-flushed diagnostic events, atomic terminal summary, prompt/provider raw redaction, terminal-value summaries, and degraded-writer outcome preservation are tested; no replay/rollback claim |
 | Process supervision | Unix process group / Windows Job Object | Current gate | Current gate | deadline/cancellation/protocol failure terminate the owned group; deliberate Unix session escape remains outside process-group containment; remote completion is unknowable |
@@ -35,6 +37,7 @@ successful call to a live provider account.
 | Motivo Studio | Self-contained HTML `0.3.0` | Current gate | Current gate | format/lint/reader tests and static build; core content is pre-rendered, with no runtime Node/Electron, IPC, server, or execution controls |
 | `motivo.test` effect | Rust `0.3.0`, Linux Bubblewrap backend | Execution refused | Requires usable Bubblewrap namespaces | Real isolation tests cover confined persistent writes, project reads, child-process containment, shared deadlines, bounded logs, and failure without host execution; other platforms refuse experiments |
 | Segno Flow | Cabal `0.3.0.0`, GHC2021, single-node driver | Current gate | Current gate | `cabal build/test --builddir=Build/cabal`; virtual time and fake process boundaries cover planning/execution without a model or wall-clock minute |
+| Segno machine-local service | Haskell registry, `.tactus/segno.hs`, localhost port 47832 | Source implementation | Linux local acceptance | Durable cross-workspace registration, interval coalescing, serialized workspace claims and unknown-outcome pausing; no exactly-once effects |
 | Segno trigger composition | `Trigger state event` plus map/filter/merge/gate | Current gate | Current gate | GHC checks typed payload transformations and state-aware gates; plugin leaf manifests remain open JSON |
 | Segno time plugins | `time.interval`, `time.cron` (UTC) | Current gate | Current gate | pure plan/poll tests cover cursors, due occurrences, and next wake; plugin processes never sleep |
 | Segno SQLite state/lifecycle | business and lifecycle databases below `.tactus/segno/state` | Current gate | Current gate | local tests cover cross-job occurrence identity, checkpoint scoping, stale fences, trigger-failure isolation, and unknown non-retry; single-node only |
@@ -50,6 +53,8 @@ successful call to a live provider account.
 | `session answer` | Yes | Updates one local typed session and its answer transcript | No |
 | `check` | Yes apart from package resolution | Runs Cabal/GHC | No model call |
 | `run` | Depends on script | Yes, ordinary Haskell `IO` | Yes if the script invokes a provider/plugin |
+| `run --daemon` | No | Yes, script and trusted provider; bounded runtime-applied repairs | Yes, periodic daemon provider invocations |
+| `watch` | Yes | Read-only HTTP and transient stream observation | No provider invocation |
 | `smoke` | Yes | Starts selected plugin executable | Only with `--live` for provider adapters |
 | `plugin-call` | Depends on method | Yes | Yes for provider/network plugins |
 | `generate` | No | Provider may edit the workspace | Yes |
@@ -60,6 +65,8 @@ successful call to a live provider account.
 | `segno init/list/status/history` | Yes | Local layout and SQLite inspection | No |
 | `segno install` | No provider call | Runs the trusted task in describe mode through Tactus | Only if the task violates the describe contract with direct `IO` |
 | `segno once/driver` | Depends on installed tasks | Yes; executes each due Clef task through Tactus | Yes if a task invokes a provider/network plugin |
+| `segno service register/list/status/pause/resume` | Yes | Local registry writes or queries | No |
+| `segno service once/start` | Depends on registered tasks | Runs `.tactus/segno.hs` through Tactus | Yes if the organizer or business scripts invoke providers |
 
 ## Timing and delivery contract
 
@@ -84,12 +91,13 @@ successful call to a live provider account.
   bypass flags. OpenCode has the documented weaker caveat.
 - Protocol validation, argv execution, process groups, deadlines, and resource
   bounds improve reliability; they do not authenticate or sandbox code.
-- Tactus has no daemon, login/auth layer, credential broker, general artifact
-  tracker, workflow checkpoint, or rollback. Session answers use a narrow local
+- Tactus daemon supervision is opt-in and bounded to the current run. It adds
+  no provider login, credential broker, general artifact tracker, workflow
+  checkpoint, or rollback. Session answers use a narrow local
   turn CAS; it is not a workspace transaction facility.
-- Segno adds a local long-lived scheduling loop and business-state CAS. It is
-  not a network daemon, auth service, artifact store, workspace transaction, or
-  external-effect rollback mechanism.
+- Segno adds a machine-local scheduling service, read-only localhost dashboard
+  and business-state CAS. It provides no remote execution API, provider auth,
+  artifact store, workspace transaction, or external-effect rollback.
 - The user's chosen coding agent owns the conversation and method selection.
   Motivo supplies skill guidance, editable Haskell templates, and
   `.tactus/motivo` evidence. It does not own a provider registry, task loop,

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tactus · Live output</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><div><p class="eyebrow">TACTUS / OBSERVABILITY</p><h1>Live provider output</h1><p id="workspace">Local workspace</p></div><span id="connection" role="status">Connecting…</span></header>
+<main>
+<aside><h2>Runs <span id="count"></span></h2><button id="all" class="selected">All live output</button><div id="runs"></div></aside>
+<section class="reader"><div class="toolbar"><h2 id="subject">All live output</h2><label><input id="follow" type="checkbox" checked> Follow output</label><button id="clear">Clear display</button></div>
+<p class="note">Assistant text is captured while this viewer is running and kept in bounded memory. Journal history remains available after restart. Native stderr, credentials, prompts, and tool arguments are not forwarded.</p>
+<p id="notice" role="status"></p><div id="output" tabindex="0" aria-label="Live provider output"><p class="empty">Waiting for provider output. Start a Tactus task in this workspace.</p></div>
+<details id="history"><summary>Durable run history</summary><p id="history-state">Select a run to inspect its journal.</p><ol id="events"></ol></details>
+</section></main>
+<footer>Read-only local viewer · refresh reconnects to retained output · Ctrl-C in the terminal stops capture</footer>
+</body></html>

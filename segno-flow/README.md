@@ -9,6 +9,12 @@ The canonical user guide is [Segno persistent tasks](../docs/segno.md), with
 installation maintained separately in [Install Agenstro](../docs/install.md).
 This component README stays focused on package development and its example.
 
+`segno service` adds a machine-local registry for workspace `.tactus/segno.hs`
+organizers, durable interval invocation history, and a read-only localhost
+status page. The [offline service example](examples/service/README.md) shows
+timestamp-based state organization and a separately runnable business script.
+The existing typed task commands remain supported.
+
 The removed Python package, Rust `segnod` crates, ZIP task format, and separate
 desktop UI are not current compatibility surfaces.
 

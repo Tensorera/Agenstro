@@ -14,6 +14,10 @@ build-type:         Simple
 extra-source-files:
     examples/active-window/900_record_active_window.hs
     examples/active-window/README.md
+    examples/service/segno.hs
+    examples/service/010_business.hs
+    examples/service/README.md
+    examples/service/segno.service
 
 common warnings
   default-language: GHC2021
@@ -39,6 +43,7 @@ common dependencies
       cron ==0.7.2,
       directory >=1.3.8 && <1.4,
       filepath >=1.4.300 && <1.6,
+      network >=3.2 && <3.3,
       process >=1.6 && <1.7,
       scientific >=0.3.8 && <0.4,
       sqlite-simple ==0.4.19.0,
@@ -55,16 +60,23 @@ library
       Segno.Lifecycle
       Segno.Plugin
       Segno.Protocol
+      Segno.Service
+      Segno.Service.Protocol
+      Segno.Service.Registry
+      Segno.Service.Web
       Segno.Store.SQLite
       Segno.Trigger.Time
   if os(windows)
     build-depends: Win32 >=2.14 && <2.15
+  else
+    build-depends: unix >=2.8 && <2.9
 
 executable segno
   import: warnings, dependencies
   hs-source-dirs: haskell/app
   main-is: Main.hs
   other-modules: Segno.Cli
+  ghc-options: -threaded
   build-depends:
       optparse-applicative >=0.18 && <0.20,
       segno-flow
@@ -74,5 +86,9 @@ test-suite segno-flow-tests
   type: exitcode-stdio-1.0
   hs-source-dirs: haskell/test
   main-is: Main.hs
+  other-modules: ServiceTests
+  ghc-options: -threaded
   build-depends:
       segno-flow
+  if !os(windows)
+    build-depends: unix >=2.8 && <2.9

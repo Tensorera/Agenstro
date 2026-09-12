@@ -680,6 +680,7 @@ fn provider_arguments(
             "--dangerously-skip-permissions".to_owned(),
             "--output-format".to_owned(),
             "stream-json".to_owned(),
+            "--include-partial-messages".to_owned(),
             "--verbose".to_owned(),
             "--no-session-persistence".to_owned(),
         ],
@@ -1500,6 +1501,15 @@ fn run_provider_command<W: Write, E: Write>(
         timeout,
         limits,
     } = run;
+    let fallback_id = writer.id.as_str().unwrap_or("provider");
+    let mut live_output = NativeLiveOutput {
+        publisher: crate::watch::Publisher::connect(workspace, fallback_id, provider.name()),
+        claude_streamed: false,
+        has_text: false,
+    };
+    if let Some(publisher) = live_output.publisher.as_mut() {
+        publisher.emit("started", "Provider started.");
+    }
     let mut child = spawn_group(argv, Some(workspace), environment, true)?;
     let stdin = child.inner().stdin.take().ok_or_else(|| {
         dispatched_provider_failure(
@@ -1586,6 +1596,11 @@ fn run_provider_command<W: Write, E: Write>(
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(error);
+                }
+                if live_output.publisher.is_some()
+                    && let Ok(raw) = serde_json::from_slice::<Value>(&line)
+                {
+                    live_output.observe(provider, &raw);
                 }
             }
             Ok(OutputMessage::ReadError(error)) => {
@@ -1725,6 +1740,65 @@ fn run_provider_command<W: Write, E: Write>(
         result_recognized,
         reported_failure,
     })
+}
+
+/// This opt-in side channel never forwards native JSON, prompts, stderr, tool
+/// arguments, or authentication fields to either the viewer or plugin-v1.
+struct NativeLiveOutput {
+    publisher: Option<crate::watch::Publisher>,
+    claude_streamed: bool,
+    has_text: bool,
+}
+
+impl NativeLiveOutput {
+    fn observe(&mut self, provider: Provider, raw: &Value) {
+        let Some(publisher) = self.publisher.as_mut() else {
+            return;
+        };
+        if provider == Provider::ClaudeCode {
+            if raw.get("type").and_then(Value::as_str) == Some("stream_event") {
+                let event = &raw["event"];
+                if event["type"] == "message_start" {
+                    self.claude_streamed = false;
+                }
+                if event["type"] == "content_block_delta"
+                    && event["delta"]["type"] == "text_delta"
+                    && let Some(text) = event["delta"]["text"].as_str()
+                {
+                    publisher.emit("text.delta", text);
+                    self.claude_streamed = true;
+                    self.has_text = true;
+                }
+                return;
+            }
+            if raw["type"] == "assistant" && self.claude_streamed {
+                return;
+            }
+            if raw["type"] == "result" && self.has_text {
+                return;
+            }
+        }
+        let (fragments, final_text) = provider_event_text(provider, raw);
+        for text in fragments {
+            publisher.emit("text.message", text);
+            self.has_text = true;
+        }
+        if let Some(text) = final_text {
+            publisher.emit("text.final", text);
+            self.has_text = true;
+        }
+    }
+}
+
+impl Drop for NativeLiveOutput {
+    fn drop(&mut self) {
+        if let Some(publisher) = self.publisher.as_mut() {
+            publisher.emit(
+                "finished",
+                "Provider adapter stopped. Consult the run journal for its outcome.",
+            );
+        }
+    }
 }
 
 fn read_codex_last_message(
@@ -3520,6 +3594,121 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::sync::{Arc, Barrier};
+
+    fn live_test_sink(root: &Path) -> std::net::UdpSocket {
+        crate::workspace::initialize_workspace(root, None).expect("initialize");
+        let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("sink");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        fs::write(
+            root.join(".tactus/watch.json"),
+            serde_json::to_vec(&json!({
+                "api":"tactus.watch/v1", "port":socket.local_addr().expect("address").port(),
+                "token":"watch-offline-test-012345678901234567890123456789"
+            }))
+            .expect("descriptor"),
+        )
+        .expect("write descriptor");
+        socket
+    }
+
+    #[test]
+    fn live_projection_suppresses_auth_tools_thinking_and_duplicate_claude_text() {
+        let root = tempfile::tempdir().expect("temporary");
+        let socket = live_test_sink(root.path());
+        let mut live = NativeLiveOutput {
+            publisher: crate::watch::Publisher::connect(root.path(), "projection", "claude-code"),
+            claude_streamed: false,
+            has_text: false,
+        };
+        live.observe(
+            Provider::ClaudeCode,
+            &json!({"type":"system","api_key":"secret-auth"}),
+        );
+        live.observe(Provider::ClaudeCode, &json!({"type":"stream_event","event":{
+            "type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"private-thinking"}}}));
+        live.observe(Provider::ClaudeCode, &json!({"type":"stream_event","event":{
+            "type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"private-tool-arguments"}}}));
+        live.observe(
+            Provider::ClaudeCode,
+            &json!({"type":"stream_event","event":{
+            "type":"content_block_delta","delta":{"type":"text_delta","text":"hello 你好"}}}),
+        );
+        live.observe(Provider::ClaudeCode, &json!({"type":"assistant","message":{"content":[{"type":"text","text":"hello 你好"}]}}));
+        live.observe(
+            Provider::ClaudeCode,
+            &json!({"type":"result","result":"hello 你好"}),
+        );
+        let mut bytes = [0_u8; 65536];
+        let length = socket.recv(&mut bytes).expect("text delta");
+        let event: Value = serde_json::from_slice(&bytes[..length]).expect("packet");
+        assert_eq!(event["kind"], "text.delta");
+        assert_eq!(event["text"], "hello 你好");
+        socket.set_nonblocking(true).expect("nonblocking");
+        assert_eq!(
+            socket
+                .recv(&mut bytes)
+                .expect_err("no duplicate or private events")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_native_provider_publishes_partial_text_before_its_terminal_result() {
+        let root = tempfile::tempdir().expect("temporary");
+        let socket = live_test_sink(root.path());
+        let directory = root.path().to_path_buf();
+        let barrier_path = directory.join("allow-finish");
+        let worker = thread::spawn(move || {
+            let argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), r#"
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial visible output"}}}'
+while [ ! -f allow-finish ]; do sleep 0.01; done
+printf '%s\n' '{"type":"result","result":"complete output"}'
+"#.to_owned()];
+            let mut writer = HostWriter::new(Vec::new(), json!("delayed-live"));
+            let completed = run_provider_command(
+                ProviderRun {
+                    provider: Provider::ClaudeCode,
+                    argv: &argv,
+                    workspace: &directory,
+                    environment: &BTreeMap::new(),
+                    prompt: "hidden prompt",
+                    timeout: Some(Duration::from_secs(4)),
+                    limits: NativeProviderLimits::default(),
+                },
+                &mut writer,
+                &mut Vec::new(),
+            )
+            .expect("fake invocation");
+            (
+                completed.text,
+                String::from_utf8(writer.output).expect("plugin output"),
+            )
+        });
+        let mut bytes = [0_u8; 65536];
+        let first = socket.recv(&mut bytes).expect("start marker");
+        let first: Value = serde_json::from_slice(&bytes[..first]).expect("start packet");
+        assert_eq!(first["kind"], "started");
+        let length = socket.recv(&mut bytes).expect("partial before completion");
+        let event: Value = serde_json::from_slice(&bytes[..length]).expect("text packet");
+        let still_running = !worker.is_finished();
+        fs::write(barrier_path, "finish").expect("release provider");
+        let (result, protocol) = worker.join().expect("provider thread");
+        assert!(
+            still_running,
+            "provider must still be awaiting release when text arrives"
+        );
+        assert_eq!(event["text"], "partial visible output");
+        assert_eq!(result, "complete output");
+        assert!(
+            !protocol.contains("partial visible output"),
+            "raw text must not enter plugin diagnostics/journals"
+        );
+        assert!(!protocol.contains("hidden prompt"));
+    }
 
     #[test]
     fn builtin_host_accepts_requests_above_the_default_but_below_the_hard_ceiling() {

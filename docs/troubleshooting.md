@@ -2,7 +2,7 @@
 title: Agenstro 0.3 troubleshooting
 status: alpha
 owners: [support]
-last_verified: 2026-08-31
+last_verified: 2026-09-12
 applies_to: "Clef/Segno Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -42,7 +42,28 @@ If multiple results appear, remove the stale path from the current terminal or
 invoke the Cargo-installed executable by its full path. An old command surface
 can also report `0.3.0`; a missing `check --package` option proves that the
 selected binary predates Segno package linking. A surface that mentions
-workers, cells, notebooks, or a daemon is also obsolete.
+workers, cells, notebooks, or the old standalone daemon commands is obsolete.
+The current optional monitor is `tactus run --daemon`; live output uses
+`tactus watch`. If those options are missing, rebuild the current checkout.
+
+## Live output is empty or cannot connect
+
+Start `tactus watch` before the provider invocation, then open its complete
+printed URL including the token fragment. Restarting the viewer creates a new
+token and discards its in-memory output; open the new URL and reload the page.
+The previous invocation's journal remains available, but its assistant text
+cannot be recovered from that redacted journal. Only built-in provider
+adapters publish native assistant output automatically.
+
+An occupied port can be changed with `tactus watch --port N` or
+`segno service start --port N`. A workspace permits one Tactus viewer at a
+time. Both services bind to loopback; browser extensions or local browser
+policies may still block a page. Segno status is also available through
+`segno service status --json`.
+
+For a paused Segno service task, inspect its `outcome_unknown` record and
+external effects before `segno service resume NAME`. Resuming schedules a
+fresh timestamp and does not rewrite the uncertain history.
 
 ## `tactus init` cannot locate `clef-sdk`
 

@@ -16,10 +16,10 @@ The current release line is `0.3`.
 | Component | Responsibility |
 | --- | --- |
 | [Clef](clef-sdk/) | Small Haskell workflow, task, effect and plugin abstractions |
-| [Tactus](tactus-runtime/) | Script discovery, execution, provider/plugin supervision and diagnostics |
+| [Tactus](tactus-runtime/) | Script execution, optional daemon supervision, provider streaming and diagnostics |
 | [Motivo](skills/motivo/SKILL.md) | Methods for clarification, investigation, analysis, research, experiments, organization, retrospection and handoff |
 | [Motivo Studio](motivo-studio/) | Offline HTML that makes recorded evidence and decisions readable |
-| [Segno](segno-flow/) | Experimental persistent scheduling and business-state checkpoints |
+| [Segno](segno-flow/) | Haskell persistent scheduling, local task registry and business-state checkpoints |
 | [motivo.test](plugins/motivo-test/) | One bounded, isolated Linux experiment, limited to its sample directory and at most 600 seconds |
 
 The musical names describe distinct responsibilities. A clef provides a frame,
@@ -122,9 +122,31 @@ These restrictions belong to the experiment plugin. Ordinary trusted Haskell,
 project plugins and native agent sessions retain their own authority. Clef and
 Tactus do not acquire a universal domain validator or sandbox policy.
 
+## Optional task monitoring and live output
+
+Enable provider-backed supervision for a run and select its provider separately:
+
+```sh
+tactus run --script .tactus/scripts/010_work.hs --daemon --daemon-provider codex
+```
+
+Monitoring reports anomalies. Automatic repairs also require an explicitly
+retryable script; see [daemon setup](docs/providers.md#optional-task-daemon).
+
+To inspect live provider output, start the viewer before the task in another
+terminal and open the complete URL it prints:
+
+```sh
+tactus watch --port 47831
+```
+
+The viewer keeps bounded output in memory alongside recorded run status.
+See [observability](docs/observability.md#live-provider-output).
+
 ## Optional persistent tasks
 
-Segno is unchanged and remains experimental, single-node and at least once.
+Segno remains experimental, single-node and at least once. Its optional local
+service registers tasks across workspaces and exposes a read-only web dashboard.
 Install it only when work needs persistent triggers and business-state checkpoints:
 
 ```sh
