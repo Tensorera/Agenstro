@@ -1151,14 +1151,13 @@ fn run_scripts_command(
     let (mut journal, journal_create_error) = create_journal_preserving_execution(&workspace);
     let run_id = journal.run_id().to_owned();
     let daemon = if daemon_arguments.daemon {
-        let policy = config.daemon.with_arguments(&daemon_arguments);
+        let policy = config.daemon.clone().with_arguments(&daemon_arguments);
         policy.validate().map_err(CliError::InvalidArguments)?;
-        let provider = policy.provider.clone().unwrap_or(config.default_provider);
-        workspace.resolve_plugin(
-            &workspace.load_config()?,
-            &provider,
-            PluginNamespace::Provider,
-        )?;
+        let provider = policy
+            .provider
+            .clone()
+            .unwrap_or_else(|| config.default_provider.clone());
+        workspace.resolve_plugin(&config, &provider, PluginNamespace::Provider)?;
         let provider_workspace = workspace.clone();
         let provider_timeout = policy.timeout_seconds;
         Some(
@@ -1552,13 +1551,14 @@ fn execute_script_batch(
             let monitor = daemon
                 .map(|daemon| daemon.monitor(script, &diagnostic_path, attempt, cancellation));
             let status = if daemon.is_some() {
-                let mut spec = ProcessSpec::new(command.clone(), &workspace.root);
-                spec.environment = script_environment;
-                spec.limits.deadline =
-                    (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
-                ProcessSupervisor
-                    .run_command_with_stderr(&spec, cancellation, 16 * 1024)
-                    .map_err(CliError::Process)
+                execute_tool_with_stderr(
+                    workspace,
+                    command.clone(),
+                    &script_environment,
+                    timeout_seconds,
+                    cancellation,
+                    SCRIPT_STDERR_CAPTURE_LIMIT,
+                )
             } else {
                 execute_tool(
                     workspace,
@@ -2663,6 +2663,8 @@ fn cleanup_stale_tool_runtimes(temporary_root: &Path, stale_before: SystemTime) 
     }
 }
 
+/// Bounded stderr tail retained per daemon-supervised script attempt.
+const SCRIPT_STDERR_CAPTURE_LIMIT: usize = 16 * 1024;
 const MAX_CLEF_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CLEF_SIDECAR_LINE_BYTES: usize = 1024 * 1024;
 const MAX_CLEF_SIDECAR_RECORDS: usize = 10_000;
@@ -3223,17 +3225,20 @@ fn project_clef_outcome_unknown_cause(cause: &Map<String, Value>) -> Option<Valu
     Some(projected)
 }
 
-fn execute_tool(
+fn tool_spec(
     workspace: &Workspace,
     command: Vec<String>,
     environment: &BTreeMap<String, String>,
     timeout_seconds: u64,
-    cancellation: &CancellationToken,
-) -> Result<CommandOutcome, CliError> {
+) -> ProcessSpec {
     let mut spec = ProcessSpec::new(command, &workspace.root);
     spec.environment = environment.clone();
     spec.limits.deadline = (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
-    let outcome = ProcessSupervisor.run_command(&spec, cancellation)?;
+    spec
+}
+
+/// Name the terminal state whenever a supervised command did not exit on its own.
+fn report_unexpected_outcome(outcome: &CommandOutcome) {
     if outcome.kind != crate::process::CommandKind::Exited {
         render_presentation(&Presentation::new(
             PresentationCategory::Error,
@@ -3244,7 +3249,35 @@ fn execute_tool(
             ),
         ));
     }
+}
+
+fn execute_tool(
+    workspace: &Workspace,
+    command: Vec<String>,
+    environment: &BTreeMap<String, String>,
+    timeout_seconds: u64,
+    cancellation: &CancellationToken,
+) -> Result<CommandOutcome, CliError> {
+    let spec = tool_spec(workspace, command, environment, timeout_seconds);
+    let outcome = ProcessSupervisor.run_command(&spec, cancellation)?;
+    report_unexpected_outcome(&outcome);
     Ok(outcome)
+}
+
+/// Run a tool while retaining the bounded stderr tail the daemon reports on.
+fn execute_tool_with_stderr(
+    workspace: &Workspace,
+    command: Vec<String>,
+    environment: &BTreeMap<String, String>,
+    timeout_seconds: u64,
+    cancellation: &CancellationToken,
+    stderr_limit: usize,
+) -> Result<(CommandOutcome, String), CliError> {
+    let spec = tool_spec(workspace, command, environment, timeout_seconds);
+    let (outcome, stderr) =
+        ProcessSupervisor.run_command_with_stderr(&spec, cancellation, stderr_limit)?;
+    report_unexpected_outcome(&outcome);
+    Ok((outcome, stderr))
 }
 
 fn command_exit_code(outcome: &CommandOutcome) -> i32 {
