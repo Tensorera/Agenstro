@@ -5,9 +5,9 @@
 module ServiceTests (runServiceTests) where
 
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.Async (concurrently, withAsync)
-import Control.Exception (IOException, bracket, catch, try)
-import Control.Monad (unless, void)
+import Control.Concurrent.Async (concurrently, wait, waitCatch, withAsync)
+import Control.Exception (IOException, bracket, catch, finally, try)
+import Control.Monad (forM_, unless, void)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Key (Key)
@@ -15,8 +15,9 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isNothing)
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
+import qualified Database.SQLite.Simple as SQLite
 import Network.Socket
   ( Family (AF_INET), SocketType (Stream), SockAddr (SockAddrInet), bind, close,
     connect, defaultProtocol, getSocketName, socket, tupleToHostAddress )
@@ -26,6 +27,7 @@ import Segno.Service (ServiceEnvironment (..), serviceOnceWith)
 import Segno.Service.Protocol (ServiceResult (..), decodeServiceResult, readServiceResultFile)
 import Segno.Service.Registry
 import Segno.Service.Web (withServiceWeb)
+import qualified Segno.Store.SQLite as Store
 import System.Directory (createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Timeout (timeout)
@@ -38,6 +40,7 @@ runServiceTests = do
   test "strict timestamp/result contract" testResultContract
   test "result handoff rejects directories and special files" testResultFile
   test "machine registry rejects duplicate workspace and invalid interval" testRegistration
+  test "database connection setup waits for a competing lock" testBusyConnectionSetup
   test "concurrent claims exclude overlapping workspace invocation" testConcurrentClaims
   test "coalesced due timestamp and durable success/failure" testScheduling
   test "expired work pauses without replay; stale completion cannot overwrite" testRecovery
@@ -102,6 +105,28 @@ testConcurrentClaims = withFixture "claims" $ \registry root -> do
   assert (length (catMaybes [first, second]) == 1) "two processes claimed the same workspace"
   blocked <- claimServiceRun registry (addUTCTime 60 now)
   assert (blocked == Nothing) "active workspace overlapped at next interval"
+
+testBusyConnectionSetup :: IO ()
+testBusyConnectionSetup = withFixture "busy-setup" $ \registry root -> do
+  initialiseRegistry registry
+  let paths = Store.segnoPaths root
+  Store.initialiseStore paths
+  forM_
+    [ (registry, void (listServiceJobs registry)),
+      (Store.pathsBusinessDatabase paths, void (Store.businessHistory paths Nothing 1)),
+      (Store.pathsLifecycleDatabase paths, void (Store.lifecycleStatus paths Nothing))
+    ] $ \(path, inspect) -> bracket (SQLite.open path) SQLite.close $ \blocker -> do
+      -- A rollback-journal exclusive writer also blocks schema reads during
+      -- PRAGMA preparation, deterministically exercising connection setup.
+      SQLite.execute_ blocker "PRAGMA journal_mode = DELETE"
+      SQLite.execute_ blocker "BEGIN EXCLUSIVE"
+      started <- newEmptyMVar
+      withAsync (putMVar started () >> inspect) $ \reader -> do
+        early <- (takeMVar started >> timeout 100000 (waitCatch reader))
+          `finally` SQLite.execute_ blocker "ROLLBACK"
+        assert (isNothing early) ("connection setup did not wait for the competing lock: " <> show early <> ": " <> path)
+        completed <- timeout 2000000 (wait reader)
+        assert (completed == Just ()) ("connection setup did not recover after lock release: " <> path)
 
 testScheduling :: IO ()
 testScheduling = withFixture "schedule" $ \registry root -> do

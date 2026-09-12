@@ -12,6 +12,8 @@ do not imply a package-registry release or compatibility guarantee.
   output guidance, with focused routing from Motivo.
 - Distribute all three skills and add `tactus skills update` with preview,
   unchanged-file updates and incoming candidates that preserve local edits.
+- Release skill update locks explicitly when an operation finishes, and install
+  SQLite's busy timeout before Segno connection initialization acquires locks.
 - Add opt-in Tactus daemon supervision with independent provider selection,
   periodic monitoring, bounded source repairs and explicit escalation.
 - Add a Haskell Segno service for registering timestamp-driven

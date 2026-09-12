@@ -588,9 +588,11 @@ parseRevisionUnsafe encoded = maybe (error "database revision was not decimal") 
 
 withDatabase :: FilePath -> (Connection -> IO value) -> IO value
 withDatabase path action = bracket (open path) close $ \connection -> do
+  -- Connection setup must wait for short competing locks too, including when
+  -- SQLite prepares the journal-mode PRAGMA before any task transaction.
+  execute_ connection "PRAGMA busy_timeout = 5000"
   execute_ connection "PRAGMA journal_mode = WAL"
   execute_ connection "PRAGMA foreign_keys = ON"
-  execute_ connection "PRAGMA busy_timeout = 5000"
   execute_ connection "PRAGMA synchronous = FULL"
   execute_ connection "PRAGMA user_version = 1"
   action connection

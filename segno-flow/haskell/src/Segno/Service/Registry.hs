@@ -176,9 +176,11 @@ serviceRunHistory path limit = withRegistry path $ \connection -> do
 
 withRegistry :: FilePath -> (Connection -> IO a) -> IO a
 withRegistry path action = bracket (open path) close $ \connection -> do
+  -- PRAGMA preparation can itself need a database lock, so install the busy
+  -- handler before journal mode or any other database-dependent setup.
+  execute_ connection "PRAGMA busy_timeout = 5000"
   execute_ connection "PRAGMA journal_mode = WAL"
   execute_ connection "PRAGMA foreign_keys = ON"
-  execute_ connection "PRAGMA busy_timeout = 5000"
   execute_ connection "PRAGMA synchronous = FULL"
   action connection
 
