@@ -22,12 +22,13 @@ import Data.Aeson
   )
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
-import qualified Data.Text as Text
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (UTCTime)
 import Clef.Workflow (Plugin, Workflow, call, jsonPlugin)
 import Segno.Protocol (PluginFailure (..))
 
 #if defined(mingw32_HOST_OS)
+import qualified Data.Text as Text
+import Data.Time (getCurrentTime)
 import Foreign.Ptr (nullPtr)
 import Graphics.Win32.Window (getForegroundWindow, getWindowText, getWindowTextLength)
 #endif
