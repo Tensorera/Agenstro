@@ -122,6 +122,7 @@ the provider's terminal result.
 | Claude Code | Incremental partial-message text deltas |
 | OpenCode | Native text events |
 | Codex CLI | Native JSON message events, which may contain completed messages |
+| Google Antigravity CLI (`antigravity`, executable `agy`) | `agent_response` text deltas; the final response is not duplicated |
 
 Custom provider hosts do not acquire live text automatically. The viewer shows
 recognized assistant text; it does not reconstruct missing token deltas. Raw

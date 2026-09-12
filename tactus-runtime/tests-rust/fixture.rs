@@ -11,6 +11,10 @@ fn main() {
     let mode = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "success".to_owned());
+    if mode == "native-antigravity" {
+        native_antigravity();
+        return;
+    }
     if mode == "orphan-pipe-descendant" {
         orphan_pipe_descendant();
         return;
@@ -129,6 +133,127 @@ fn main() {
         "escaped-pipe" => escaped_pipe_parent(),
         "timeout" => thread::sleep(Duration::from_secs(30)),
         other => panic!("unknown fixture mode {other}"),
+    }
+}
+
+fn native_antigravity() {
+    use serde_json::json;
+    let capture =
+        std::path::PathBuf::from(std::env::var_os("FAKE_AGY_CAPTURE").expect("capture path"));
+    let arguments: Vec<String> = std::env::args().skip(2).collect();
+    std::fs::write(
+        capture.with_extension("args.json"),
+        serde_json::to_vec(&arguments).expect("argv JSON"),
+    )
+    .expect("capture argv");
+    std::fs::write(
+        capture.with_extension("env.json"),
+        serde_json::to_vec(&json!({
+            "AGY_CLI_DISABLE_AUTO_UPDATE":std::env::var("AGY_CLI_DISABLE_AUTO_UPDATE").ok(),
+            "CUSTOM_PROVIDER_ENV":std::env::var("CUSTOM_PROVIDER_ENV").ok(),
+            "cwd":std::env::current_dir().expect("cwd"),
+        }))
+        .expect("env JSON"),
+    )
+    .expect("capture env");
+    if arguments.iter().any(|argument| argument == "--version") {
+        println!("Antigravity CLI 1.2.1 (offline fixture)");
+        return;
+    }
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .expect("one native stdin message");
+    std::fs::write(capture.with_extension("stdin.jsonl"), &input).expect("capture input");
+    let message: Value = serde_json::from_str(&input).expect("native input JSON");
+    assert_eq!(message["event"], "user");
+    assert!(message["message"]["content"].is_string());
+    let mode = std::env::var("FAKE_AGY_MODE").unwrap_or_else(|_| "success".to_owned());
+    if mode == "timeout" {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    if mode == "invalid-utf8" {
+        std::io::stdout()
+            .write_all(&[0xff, b'\n'])
+            .expect("invalid bytes");
+        return;
+    }
+    if mode == "malformed" {
+        println!("not-json");
+        return;
+    }
+    if mode == "oversize-line" {
+        println!("{}", "x".repeat(4096));
+        return;
+    }
+    if mode != "early-error" && mode != "no-init" {
+        write_json(
+            &json!({"event":"init", "conversation_id":"agy-fixture-conversation", "init":{"cwd":"fixture", "tools":["secret_tool"], "permission_mode":"always-proceed", "auth":"private-auth"}}),
+        );
+    }
+    if mode == "stream" || mode == "missing" {
+        for step_type in ["user_input", "tool", "thinking"] {
+            write_json(
+                &json!({"event":"step_update", "step_update":{"conversation_id":"agy-fixture-conversation", "step_index":0, "state":"DONE", "step_type":step_type, "text_delta":"private-native-content", "tool_info":{"parameters":"private-tool-arguments"}}}),
+            );
+        }
+        write_json(
+            &json!({"event":"step_update", "step_update":{"conversation_id":"agy-fixture-conversation", "step_index":1, "state":"ACTIVE", "step_type":"agent_response", "text_delta":"live first 你好\n"}}),
+        );
+        if mode == "missing" {
+            return;
+        }
+        let release = capture.with_extension("release");
+        let started = Instant::now();
+        while !release.exists() && started.elapsed() < Duration::from_secs(4) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        write_json(
+            &json!({"event":"step_update", "step_update":{"conversation_id":"agy-fixture-conversation", "step_index":1, "state":"DONE", "step_type":"agent_response", "text_delta":"live last\n"}}),
+        );
+    }
+    let status = match mode.as_str() {
+        "error" | "early-error" => "ERROR",
+        "invalid" => "INVALID",
+        "canceled" => "CANCELED",
+        "interrupted" => "INTERRUPTED",
+        "waiting" => "WAITING",
+        "running" => "RUNNING",
+        "unknown-status" => "FUTURE",
+        _ => "SUCCESS",
+    };
+    let mut result = json!({"event":"result", "result":{"conversation_id":"agy-fixture-conversation", "status":status, "response":"authoritative answer 你好\n", "num_turns":1}});
+    if mode == "empty" {
+        result["result"]["response"] = json!("");
+    }
+    if mode == "early-error" {
+        result["result"]["conversation_id"] = json!("");
+    }
+    if mode == "mismatch" {
+        result["result"]["conversation_id"] = json!("other-conversation");
+    }
+    if mode == "bad-response" {
+        result["result"]["response"] = json!(["not a string"]);
+    }
+    if mode == "duplicate-keys" {
+        println!(
+            r#"{{"event":"result","result":{{"conversation_id":"agy-fixture-conversation","status":"ERROR","status":"SUCCESS","response":"forged"}}}}"#
+        );
+        return;
+    }
+    write_json(&result);
+    if mode == "duplicate-result" {
+        write_json(&result);
+    }
+    if mode == "post-terminal" {
+        write_json(&json!({"event":"step_update", "step_update":{}}));
+    }
+    if mode == "error" || mode == "early-error" || mode == "invalid" {
+        std::process::exit(1);
+    }
+    if mode == "nonzero" {
+        std::process::exit(7);
     }
 }
 

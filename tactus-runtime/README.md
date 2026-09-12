@@ -33,7 +33,7 @@ tactus --version
 ```
 
 Tactus itself has no Python runtime dependency. You also need Cabal/GHC to
-check or run Clef scripts. A native `codex`, `claude`, or `opencode` executable
+check or run Clef scripts. A native `codex`, `claude`, `opencode`, or `agy` executable
 is needed only when using that provider adapter.
 
 ## Initialize a workspace
@@ -160,6 +160,9 @@ command = ["tactus", "provider-host", "claude-code"]
 [providers.opencode]
 command = ["tactus", "provider-host", "opencode"]
 
+[providers.antigravity]
+command = ["tactus", "provider-host", "antigravity"]
+
 [effects."workspace.paths"]
 command = ["tactus", "effect-host", "workspace-paths"]
 observe_invocations = true
@@ -234,7 +237,9 @@ The Rust binary includes:
   `--dangerously-bypass-approvals-and-sandbox`;
 - Claude Code: print/stream mode with `--dangerously-skip-permissions`;
 - OpenCode: `opencode run --auto --format json` with an inline
-  `permission=allow` configuration; and
+  `permission=allow` configuration;
+- Google Antigravity CLI: paired stream-json input/output through `agy`,
+  one stdin message, automatic approval and a guarded native print deadline; and
 - `workspace.paths`: snapshot/diff/forget plus observer begin/end operations.
 
 Models, effort, OpenCode variants, extra argv, and environment additions are
@@ -245,6 +250,10 @@ billable.
 OpenCode's permission mode is weaker than the explicit Codex and Claude Code
 bypass flags: explicit deny and managed configuration can still take
 precedence. Tactus reports this caveat instead of claiming full equivalence.
+
+Antigravity's automatic approval mode also reports `full_bypass=false` because
+native policy and sandbox restrictions are not a verified universal bypass.
+Its stderr and tool events remain outside the live assistant-text projection.
 
 `workspace.paths` compares path type, size, and SHA-256 without retaining file
 content. It excludes `.git`, effect-internal state/run data, and common build

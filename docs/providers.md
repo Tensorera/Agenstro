@@ -9,7 +9,8 @@ platforms: [windows, ubuntu]
 
 # Configure coding-agent providers
 
-Tactus includes adapters for Codex CLI, Claude Code, and OpenCode. This guide
+Tactus includes adapters for Codex CLI, Claude Code, OpenCode, and Google
+Antigravity CLI. This guide
 explains executable discovery, authentication ownership, model and reasoning
 settings, permission behavior, and safe smoke testing.
 
@@ -24,6 +25,7 @@ native CLI using that provider's own supported mechanism.
 | `codex` | `codex` | `effort` becomes Codex `model_reasoning_effort` |
 | `claude-code` | `claude` | `effort` becomes Claude `--effort` |
 | `opencode` | `opencode` | `effort` becomes OpenCode `--variant` |
+| `antigravity` | `agy` | `effort` becomes Antigravity `--effort` |
 
 The accepted model and effort/variant strings are provider-specific and may
 change with the installed CLI. Tactus deliberately treats them as open strings.
@@ -33,10 +35,11 @@ change with the installed CLI. Tactus deliberately treats them as open strings.
 Run these in the same terminal or desktop environment that starts Tactus:
 
 ```powershell
-Get-Command codex,claude,opencode -All
+Get-Command codex,claude,opencode,agy -All
 codex --version
 claude --version
 opencode --version
+agy --version
 ```
 
 Only the configured provider must exist. On Windows, Tactus resolves native
@@ -69,6 +72,10 @@ effort = "high"
 command = ["tactus", "provider-host", "opencode"]
 model = "provider/model"
 effort = "high"
+
+[providers.antigravity]
+command = ["tactus", "provider-host", "antigravity"]
+# Optional model and effort use the installed agy CLI's supported values.
 ```
 
 `default_provider` affects:
@@ -92,6 +99,48 @@ invokeWith
   task
   input
 ```
+
+## Google Antigravity CLI
+
+The adapter targets Google's `agy` CLI. Its headless stream contract was checked
+against the [official documentation](https://antigravity.google/docs/cli/headless/)
+and local CLI 1.2.1 help/version. Native account/model calls are not part of the
+offline acceptance gate.
+
+New workspaces include `providers.antigravity`. In an existing workspace,
+add that provider table to `.tactus/tactus.toml`; `init` and `skills update`
+preserve existing provider configuration. If executable lookup is ambiguous,
+pin the native path under `[providers.antigravity.options]` with `executable`.
+Then select it as a business or independently configured daemon provider:
+
+```sh
+tactus smoke provider:antigravity
+tactus generate --provider antigravity "Create the requested Haskell workflow."
+tactus run --script .tactus/scripts/010_work.hs --daemon --daemon-provider antigravity
+```
+
+Each call sends one JSON `user` message through stdin and closes the pipe.
+Prompts are absent from argv. Antigravity `agent_response` deltas feed the live
+viewer; the final response replaces accumulated text in the returned value.
+A complete, correlated `SUCCESS` result is required. Partial text, missing or
+malformed terminal records, cancellation and interruption remain unknown.
+A native successful response still does not prove that all requested tools or
+business effects completed; inspect task evidence.
+
+The adapter disables native self-updating per process with
+`AGY_CLI_DISABLE_AUTO_UPDATE=true`. Authenticate through the native CLI before
+live work. Offline smoke checks only version; `auth_status=true` is unsupported
+because `agy` has no documented noninteractive auth-status command.
+
+Antigravity's own print timer can return partial output with a successful exit,
+as documented in its [CLI changelog](https://antigravity.google/changelog).
+Tactus therefore places that timer 60 seconds beyond its supervising deadline,
+so Tactus records deadline expiry as `OutcomeUnknown` first. Explicit positive
+`options.timeout_seconds` controls the host deadline; direct provider-host
+requests without one use a 300-second fallback. Ordinary registered calls keep
+the workspace-derived deadline. Use this option rather than overriding the
+native print timer through `extra_args`; the adapter rejects `--` and
+`--print-timeout` overrides there before starting the native process.
 
 ## Optional task daemon
 
@@ -233,6 +282,7 @@ prompt:
 tactus smoke provider:codex
 tactus smoke provider:claude-code
 tactus smoke provider:opencode
+tactus smoke provider:antigravity
 ```
 
 Live smoke sends a small request and can contact or bill the service:
@@ -249,7 +299,10 @@ directory, and native CLI policy.
 The reference adapters are intended for an already trusted local workflow:
 
 - Codex is invoked with its dangerous approval/sandbox bypass;
-- Claude Code is invoked with its dangerous permission bypass; and
+- Claude Code is invoked with its dangerous permission bypass;
+- Antigravity uses `--dangerously-skip-permissions` for automatic approval,
+  with `full_bypass = false` because unrestricted tool execution is not
+  established and native policy/sandbox settings remain relevant; and
 - OpenCode receives an allow-oriented permission override, but Tactus reports
   `full_bypass = false` because an explicit deny or managed policy can still
   win.

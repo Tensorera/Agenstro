@@ -48,7 +48,7 @@ user -> existing coding agent -> project Motivo / Tactus / Segno skills
                  +------------+-------------+----------------+
                  v                          v                v
           provider adapter            effect adapter    generic plugin
-       Codex / Claude / OpenCode      workspace.paths     any language
+     Codex / Claude / OpenCode / agy   workspace.paths     any language
                  |
                  v
           native agent CLI
@@ -502,13 +502,14 @@ responsibility.
 
 ## Provider adapters
 
-Tactus includes translations for three native agent CLIs:
+Tactus includes translations for four native agent CLIs:
 
 | Provider key | Native mode | Reasoning extension |
 | --- | --- | --- |
 | `codex` | `codex exec --dangerously-bypass-approvals-and-sandbox --json ...` | open `effort` |
 | `claude-code` | `claude -p --dangerously-skip-permissions --output-format stream-json ...` | open `effort` |
 | `opencode` | `opencode run --auto --format json ...` plus inline `permission=allow` | open `variant` (with effort fallback) |
+| `antigravity` | `agy --input-format stream-json --output-format stream-json --dangerously-skip-permissions ...` | open `effort` |
 
 Each adapter consumes the native stream to derive its live terminal value.
 When `tactus watch` is running, recognized assistant output is also sent to
@@ -523,6 +524,12 @@ OpenCode has a deliberate capability caveat: `--auto` approves ask decisions,
 but an explicit deny or managed policy may still win. Tactus reports
 `full_bypass=false` rather than claiming parity with the explicit Codex and
 Claude Code dangerous flags.
+
+Antigravity also reports `full_bypass=false`: its automatic approval flag does
+not establish unrestricted execution under every native policy or sandbox.
+One input message and a correlated terminal result define each invocation.
+Its native print deadline is kept beyond the supervising Tactus deadline,
+because native print expiry can return partial text with a successful exit.
 
 Provider login, credential storage, pricing, model availability, and
 organization policy belong to the native CLI. Tactus adds none of its own.

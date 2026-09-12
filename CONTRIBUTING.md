@@ -141,7 +141,7 @@ Keep the runtime separated into the existing concerns:
 - `process`: one-shot process-group supervision, deadlines, cancellation,
   bounded pipes, incremental frame validation;
 - `journal`: flushed JSONL events and atomic terminal summaries;
-- `adapters`: Codex, Claude Code, OpenCode, and `workspace.paths` translations;
+- `adapters`: Codex, Claude Code, OpenCode, Antigravity, and `workspace.paths` translations;
 - `protocol`: strict incremental `agenstro.plugin/v1` frame decoding;
 - `studio`: the versioned read-only Studio control projection;
 - `session`: validated durable decision-session storage and control commands;

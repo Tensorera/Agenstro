@@ -127,6 +127,9 @@ command = ["tactus", "provider-host", "claude-code"]
 [providers.opencode]
 command = ["tactus", "provider-host", "opencode"]
 
+[providers.antigravity]
+command = ["tactus", "provider-host", "antigravity"]
+
 [effects."workspace.paths"]
 command = ["tactus", "effect-host", "workspace-paths"]
 observe_invocations = true
@@ -1279,6 +1282,7 @@ fn builtin_native_executable(command: &[String]) -> Option<&'static str> {
         Some("codex") => Some("codex"),
         Some("claude" | "claude-code") => Some("claude"),
         Some("opencode") => Some("opencode"),
+        Some("antigravity" | "anti-gravity" | "agy") => Some("agy"),
         _ => None,
     }
 }
@@ -1336,7 +1340,7 @@ mod tests {
         let config: RuntimeConfig = toml::from_str(DEFAULT_CONFIG).expect("default config");
         config.validate().expect("valid config");
         assert!(config.plugins.is_empty());
-        assert_eq!(config.providers.len(), 3);
+        assert_eq!(config.providers.len(), 4);
     }
 
     #[test]
@@ -1344,35 +1348,41 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary workspace");
         let tools = temporary.path().join("中文 provider tools");
         fs::create_dir_all(&tools).expect("tools directory");
-        #[cfg(windows)]
-        let executable = tools.join("claude.cmd");
-        #[cfg(not(windows))]
-        let executable = tools.join("claude");
-        fs::write(&executable, b"fixture").expect("native provider fixture");
-        let relative = executable
-            .strip_prefix(temporary.path())
-            .expect("relative executable")
-            .to_string_lossy()
-            .into_owned();
-        let definition = ProviderDefinition {
-            command: vec![
-                "tactus".to_owned(),
-                "provider-host".to_owned(),
-                "claude-code".to_owned(),
-            ],
-            model: None,
-            effort: None,
-            options: BTreeMap::from([("executable".to_owned(), JsonValue::String(relative))]),
-        };
         let resolver = ExecutableResolver::new(std::ffi::OsString::new(), None, temporary.path());
-        let mut checks = Vec::new();
-
-        push_native_provider_check(&mut checks, "reviewer", &definition, &resolver);
-
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].name, "provider-native:reviewer");
-        assert!(checks[0].ok, "{}", checks[0].detail);
-        assert_eq!(PathBuf::from(&checks[0].detail), executable);
+        for (kind, native) in [
+            ("claude-code", "claude"),
+            ("antigravity", "agy"),
+            ("anti-gravity", "agy"),
+            ("agy", "agy"),
+        ] {
+            let executable = tools.join(if cfg!(windows) {
+                format!("{native}.cmd")
+            } else {
+                native.to_owned()
+            });
+            fs::write(&executable, b"fixture").expect("native provider fixture");
+            let relative = executable
+                .strip_prefix(temporary.path())
+                .expect("relative executable")
+                .to_string_lossy()
+                .into_owned();
+            let definition = ProviderDefinition {
+                command: vec![
+                    "tactus".to_owned(),
+                    "provider-host".to_owned(),
+                    kind.to_owned(),
+                ],
+                model: None,
+                effort: None,
+                options: BTreeMap::from([("executable".to_owned(), JsonValue::String(relative))]),
+            };
+            let mut checks = Vec::new();
+            push_native_provider_check(&mut checks, "reviewer", &definition, &resolver);
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].name, "provider-native:reviewer");
+            assert!(checks[0].ok, "{}", checks[0].detail);
+            assert_eq!(PathBuf::from(&checks[0].detail), executable);
+        }
     }
 
     #[test]

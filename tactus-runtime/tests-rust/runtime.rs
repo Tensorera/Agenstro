@@ -1412,6 +1412,7 @@ fn smoke_without_selectors_checks_every_registry() {
         "command = [\"tactus\", \"provider-host\", \"codex\"]",
         "command = [\"tactus\", \"provider-host\", \"claude-code\"]",
         "command = [\"tactus\", \"provider-host\", \"opencode\"]",
+        "command = [\"tactus\", \"provider-host\", \"antigravity\"]",
         "command = [\"motivo-test\"]",
     ] {
         set_command(&project, needle, "success");
@@ -1436,7 +1437,7 @@ fn smoke_without_selectors_checks_every_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let reports: serde_json::Value = serde_json::from_slice(&output.stdout).expect("reports");
-    assert_eq!(reports.as_array().expect("report array").len(), 6);
+    assert_eq!(reports.as_array().expect("report array").len(), 7);
 }
 
 #[test]

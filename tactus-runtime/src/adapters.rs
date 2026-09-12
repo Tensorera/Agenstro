@@ -33,6 +33,9 @@ use crate::{
 
 const IMPLEMENTATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENCODE_WARNING: &str = "OpenCode --auto only approves ask decisions and does not override explicit deny or managed configuration; full bypass cannot be guaranteed.";
+const ANTIGRAVITY_WARNING: &str = "Antigravity auto-approval is requested for this invocation; native policy or sandbox restrictions may still apply, and a successful response does not prove every requested tool action completed.";
+const ANTIGRAVITY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+const ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM: Duration = Duration::from_secs(60);
 const PATH_EFFECT_NAME: &str = "workspace.paths";
 const DEFAULT_SMOKE_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_POLL: Duration = Duration::from_millis(10);
@@ -61,7 +64,8 @@ pub(crate) const SUPERVISED_PROCESS_GROUP_ENV: &str = "TACTUS_SUPERVISED_PROCESS
 
 /// Execute the built-in provider host for one strict JSON request.
 ///
-/// `kind` accepts `codex`, `claude-code` (or `claude`), and `opencode`. Every
+/// `kind` accepts `codex`, `claude-code` (or `claude`), `opencode`, and
+/// `antigravity` (or `agy` / `anti-gravity`). Every
 /// emitted frame is UTF-8 JSON followed by LF and is flushed immediately.
 pub fn run_provider_host<R, W, E>(kind: &str, stdin: R, stdout: W, stderr: E) -> i32
 where
@@ -81,7 +85,7 @@ where
                     format!("unknown built-in provider {kind:?}"),
                 )
                 .with_details(json!({
-                    "providers": ["codex", "claude-code", "opencode"]
+                    "providers": ["codex", "claude-code", "opencode", "antigravity"]
                 })),
             );
         }
@@ -309,6 +313,7 @@ enum Provider {
     Codex,
     ClaudeCode,
     OpenCode,
+    Antigravity,
 }
 
 impl Provider {
@@ -317,6 +322,7 @@ impl Provider {
             "codex" => Some(Self::Codex),
             "claude-code" | "claude" => Some(Self::ClaudeCode),
             "opencode" => Some(Self::OpenCode),
+            "antigravity" | "agy" | "anti-gravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -326,6 +332,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
             Self::OpenCode => "opencode",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -334,16 +341,18 @@ impl Provider {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude",
             Self::OpenCode => "opencode",
+            Self::Antigravity => "agy",
         }
     }
 
     fn full_bypass(self) -> bool {
-        !matches!(self, Self::OpenCode)
+        !matches!(self, Self::OpenCode | Self::Antigravity)
     }
 
     fn warning(self) -> Option<&'static str> {
         match self {
             Self::OpenCode => Some(OPENCODE_WARNING),
+            Self::Antigravity => Some(ANTIGRAVITY_WARNING),
             Self::Codex | Self::ClaudeCode => None,
         }
     }
@@ -408,7 +417,7 @@ fn provider_description(provider: Provider) -> Value {
         "kind": "provider",
         "name": provider.name(),
         "implementation_version": IMPLEMENTATION_VERSION,
-        "aliases": if provider == Provider::ClaudeCode { json!(["claude"]) } else { json!([]) },
+        "aliases": match provider { Provider::ClaudeCode => json!(["claude"]), Provider::Antigravity => json!(["agy", "anti-gravity"]), _ => json!([]) },
         "executable": provider.executable(),
         "methods": ["describe", "smoke", "invoke"],
         "operations": ["describe", "smoke", "invoke"],
@@ -435,6 +444,12 @@ fn provider_description(provider: Provider) -> Value {
     if let Some(warning) = provider.warning() {
         value["warning"] = Value::String(warning.to_owned());
     }
+    if provider == Provider::Antigravity {
+        value["auth_status_supported"] = Value::Bool(false);
+        value["default_timeout_seconds"] = json!(ANTIGRAVITY_DEFAULT_TIMEOUT.as_secs());
+        value["native_timeout_headroom_seconds"] =
+            json!(ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM.as_secs());
+    }
     value
 }
 
@@ -445,6 +460,14 @@ fn provider_smoke<W: Write, E: Write>(
     diagnostics: &mut E,
 ) -> Result<Value, AdapterError> {
     let options = invocation_options(params, Some(DEFAULT_SMOKE_TIMEOUT))?;
+    if provider == Provider::Antigravity
+        && bool_option(params, &options.open, "auth_status", false)?
+    {
+        return Err(AdapterError::new(
+            "auth_status_unsupported",
+            "Antigravity CLI does not expose a non-interactive auth-status command; offline smoke checks only --version.",
+        ));
+    }
     let workspace = optional_workspace(params)?;
     let executable = resolved_executable(provider, &options, workspace.as_deref())?;
     let environment = provider_environment(provider, &options.extra_env)?;
@@ -462,7 +485,12 @@ fn provider_smoke<W: Write, E: Write>(
         diagnostics,
     )?;
     let auth_status = if bool_option(params, &options.open, "auth_status", false)? {
-        let arguments = auth_arguments(provider);
+        let arguments = auth_arguments(provider).ok_or_else(|| {
+            AdapterError::new(
+                "auth_status_unsupported",
+                "native provider has no auth-status command",
+            )
+        })?;
         let argv = command_with_prefix(&options.command_prefix, &executable, &arguments);
         Some(run_health_command(
             provider,
@@ -551,7 +579,21 @@ fn provider_invoke<W: Write, E: Write>(
 ) -> Result<Value, AdapterError> {
     let prompt = required_string(params, "prompt")?;
     let workspace = required_workspace(params)?;
-    let options = invocation_options(params, None)?;
+    let options = invocation_options(
+        params,
+        (provider == Provider::Antigravity).then_some(ANTIGRAVITY_DEFAULT_TIMEOUT),
+    )?;
+    if provider == Provider::Antigravity
+        && options.extra_args.iter().any(|argument| {
+            let flag = argument.trim_start_matches('-');
+            argument == "--" || flag == "print-timeout" || flag.starts_with("print-timeout=")
+        })
+    {
+        return Err(AdapterError::new(
+            "invalid_params",
+            "Antigravity extra_args cannot contain -- or --print-timeout; use options.timeout_seconds so the Tactus deadline precedes the native partial-success timer.",
+        ));
+    }
     let model = optional_string(params, "model")?.or(optional_string(&options.open, "model")?);
     let mut reasoning =
         optional_string(params, "effort")?.or(optional_string(&options.open, "effort")?);
@@ -570,7 +612,7 @@ fn provider_invoke<W: Write, E: Write>(
     let last_message = temporary
         .as_ref()
         .map(|directory| directory.path.join("last-message.txt"));
-    let native_arguments = provider_arguments(
+    let mut native_arguments = provider_arguments(
         provider,
         &workspace,
         model.as_deref(),
@@ -578,6 +620,28 @@ fn provider_invoke<W: Write, E: Write>(
         &options.extra_args,
         last_message.as_deref(),
     );
+    if provider == Provider::Antigravity {
+        // CLI 1.1.28+ treats its own print-timeout as partial SUCCESS. Keep
+        // that timer strictly beyond our deadline. Conflicting extra_args are
+        // rejected above. Never guess that zero is unlimited.
+        let timeout = options.timeout.expect("Antigravity has a bounded default");
+        let native_timeout = timeout
+            .checked_add(ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM)
+            .filter(|duration| duration.as_nanos() <= i64::MAX as u128)
+            .ok_or_else(|| {
+                AdapterError::new(
+                    "invalid_params",
+                    "Antigravity timeout exceeds its native duration range",
+                )
+            })?;
+        native_arguments.splice(
+            0..0,
+            [
+                "--print-timeout".to_owned(),
+                format!("{}ns", native_timeout.as_nanos()),
+            ],
+        );
+    }
     let argv = command_with_prefix(&options.command_prefix, &executable, &native_arguments);
     let completed = run_provider_command(
         ProviderRun {
@@ -692,6 +756,13 @@ fn provider_arguments(
             "--dir".to_owned(),
             workspace.to_string_lossy().into_owned(),
         ],
+        Provider::Antigravity => vec![
+            "--input-format".to_owned(),
+            "stream-json".to_owned(),
+            "--output-format".to_owned(),
+            "stream-json".to_owned(),
+            "--dangerously-skip-permissions".to_owned(),
+        ],
     };
     if let Some(model) = model {
         arguments.extend(["--model".to_owned(), model.to_owned()]);
@@ -705,7 +776,7 @@ fn provider_arguments(
                     serde_json::to_string(reasoning).expect("strings always encode")
                 ),
             ]),
-            Provider::ClaudeCode => {
+            Provider::ClaudeCode | Provider::Antigravity => {
                 arguments.extend(["--effort".to_owned(), reasoning.to_owned()]);
             }
             Provider::OpenCode => {
@@ -723,12 +794,13 @@ fn provider_arguments(
     arguments
 }
 
-fn auth_arguments(provider: Provider) -> Vec<String> {
-    match provider {
+fn auth_arguments(provider: Provider) -> Option<Vec<String>> {
+    Some(match provider {
         Provider::Codex => vec!["login".to_owned(), "status".to_owned()],
         Provider::ClaudeCode => vec!["auth".to_owned(), "status".to_owned(), "--json".to_owned()],
         Provider::OpenCode => vec!["auth".to_owned(), "list".to_owned()],
-    }
+        Provider::Antigravity => return None,
+    })
 }
 
 fn command_with_prefix(prefix: &[String], executable: &str, arguments: &[String]) -> Vec<String> {
@@ -953,6 +1025,11 @@ fn provider_environment(
     extra: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, AdapterError> {
     let mut result = extra.clone();
+    if provider == Provider::Antigravity {
+        result
+            .entry("AGY_CLI_DISABLE_AUTO_UPDATE".to_owned())
+            .or_insert_with(|| "true".to_owned());
+    }
     if provider != Provider::OpenCode {
         return Ok(result);
     }
@@ -1050,6 +1127,98 @@ struct ProviderCompletion {
     reported_failure: bool,
 }
 
+/// One stdin user message means one correlated turn and one terminal record.
+/// Early configuration errors may omit init and use an empty conversation ID.
+#[derive(Default)]
+struct AntigravityStream {
+    conversation_id: Option<String>,
+    terminal: bool,
+}
+
+impl AntigravityStream {
+    fn observe(&mut self, raw: &Value) -> Result<Option<bool>, AdapterError> {
+        let fault = |reason| {
+            dispatched_provider_failure(Provider::Antigravity, "native_stream_invalid", reason)
+        };
+        if self.terminal {
+            return Err(fault("Antigravity emitted data after its terminal result"));
+        }
+        match raw.get("event").and_then(Value::as_str) {
+            Some("init") => {
+                if self.conversation_id.is_some() || !raw["init"].is_object() {
+                    return Err(fault(
+                        "Antigravity emitted a duplicate or malformed init event",
+                    ));
+                }
+                let id = raw["conversation_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 512)
+                    .ok_or_else(|| fault("Antigravity init has no bounded conversation ID"))?;
+                self.conversation_id = Some(id.to_owned());
+                Ok(None)
+            }
+            Some("step_update") => {
+                let step = &raw["step_update"];
+                let id = self
+                    .conversation_id
+                    .as_deref()
+                    .ok_or_else(|| fault("Antigravity emitted a step before init"))?;
+                if step["conversation_id"].as_str() != Some(id)
+                    || step["step_index"].as_u64().is_none()
+                    || !matches!(step["state"].as_str(), Some("ACTIVE" | "DONE"))
+                    || step["step_type"].as_str().is_none_or(str::is_empty)
+                    || step.get("text_delta").is_some_and(|text| !text.is_string())
+                {
+                    return Err(fault(
+                        "Antigravity emitted a malformed or uncorrelated step",
+                    ));
+                }
+                Ok(None)
+            }
+            Some("result") => {
+                let result = &raw["result"];
+                let status = result["status"]
+                    .as_str()
+                    .ok_or_else(|| fault("Antigravity result has no status"))?;
+                let id = result["conversation_id"]
+                    .as_str()
+                    .filter(|id| id.len() <= 512)
+                    .ok_or_else(|| fault("Antigravity result has no bounded conversation ID"))?;
+                let failure = matches!(status, "ERROR" | "INVALID");
+                if !result["response"].is_string()
+                    || result
+                        .get("error")
+                        .is_some_and(|error| !error.is_null() && !error.is_string())
+                    || self
+                        .conversation_id
+                        .as_deref()
+                        .is_some_and(|expected| id != expected)
+                    || (self.conversation_id.is_none() && !failure)
+                    || (status == "SUCCESS"
+                        && result.get("error").is_some_and(|error| !error.is_null()))
+                {
+                    return Err(fault(
+                        "Antigravity emitted a malformed, contradictory, or uncorrelated result",
+                    ));
+                }
+                self.terminal = true;
+                match status {
+                    "SUCCESS" => Ok(Some(false)),
+                    "ERROR" | "INVALID" => Ok(Some(true)),
+                    _ => Err(dispatched_provider_failure(
+                        Provider::Antigravity,
+                        "native_terminal_unconfirmed",
+                        "Antigravity result did not prove a completed or known failed turn",
+                    )),
+                }
+            }
+            _ => Err(fault(
+                "Antigravity emitted an unrecognized native stream event",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProviderResultKind {
     Plain,
@@ -1076,6 +1245,7 @@ struct ProviderResultAccumulator {
     max_result_bytes: usize,
     overflow: Option<ProviderResultOverflow>,
     reported_failure: bool,
+    antigravity: AntigravityStream,
 }
 
 impl ProviderResultAccumulator {
@@ -1088,6 +1258,7 @@ impl ProviderResultAccumulator {
             max_result_bytes,
             overflow: None,
             reported_failure: false,
+            antigravity: AntigravityStream::default(),
         }
     }
 
@@ -1170,7 +1341,9 @@ impl ProviderResultAccumulator {
     fn has_authoritative_result(&self, provider: Provider) -> bool {
         self.items > 0
             && match provider {
-                Provider::Codex | Provider::ClaudeCode => self.kind == ProviderResultKind::Final,
+                Provider::Codex | Provider::ClaudeCode | Provider::Antigravity => {
+                    self.kind == ProviderResultKind::Final
+                }
                 // OpenCode's JSON stream currently exposes text records rather
                 // than a separate terminal result record; successful process
                 // exit completes the accumulated text sequence.
@@ -1345,6 +1518,31 @@ fn observe_provider_output(
         }))
     })?;
     if text.trim().is_empty() {
+        return Ok(());
+    }
+    if provider == Provider::Antigravity {
+        // Retain the older adapters' parsing behavior. This new protocol rejects
+        // duplicate keys, result records, and post-terminal data explicitly.
+        let raw = crate::protocol::decode_json(line).map_err(|_| {
+            dispatched_provider_failure(
+                provider,
+                "native_output_malformed_json",
+                "Antigravity emitted malformed or duplicate-key JSON",
+            )
+        })?;
+        diagnostics.observe_json(provider, &raw, line.len());
+        if let Some(failure) = result.antigravity.observe(&raw)? {
+            if failure {
+                result.observe_reported_failure();
+            } else {
+                result.observe_final(
+                    raw["result"]["response"]
+                        .as_str()
+                        .expect("validated response"),
+                );
+            }
+        }
+        // Partial text belongs only to the opt-in viewer, not a result fallback.
         return Ok(());
     }
     match serde_json::from_str::<Value>(text) {
@@ -1532,7 +1730,14 @@ fn run_provider_command<W: Write, E: Write>(
             "native provider started but its stderr pipe was unavailable",
         )
     })?;
-    let prompt = prompt.as_bytes().to_vec();
+    let prompt = if provider == Provider::Antigravity {
+        let mut input = serde_json::to_vec(&json!({"event":"user", "message":{"content":prompt}}))
+            .expect("string-only input message");
+        input.push(b'\n');
+        input
+    } else {
+        prompt.as_bytes().to_vec()
+    };
     let input_worker = thread::spawn(move || -> io::Result<()> {
         let mut stdin = stdin;
         stdin.write_all(&prompt)?;
@@ -1755,6 +1960,26 @@ impl NativeLiveOutput {
         let Some(publisher) = self.publisher.as_mut() else {
             return;
         };
+        if provider == Provider::Antigravity {
+            let step = &raw["step_update"];
+            if raw["event"] == "step_update"
+                && step["step_type"] == "agent_response"
+                && matches!(step["state"].as_str(), Some("ACTIVE" | "DONE"))
+                && let Some(text) = step["text_delta"].as_str()
+            {
+                publisher.emit("text.delta", text);
+                self.has_text |= !text.is_empty();
+            }
+            if raw["event"] == "result"
+                && raw["result"]["status"] == "SUCCESS"
+                && !self.has_text
+                && let Some(text) = raw["result"]["response"].as_str()
+            {
+                publisher.emit("text.final", text);
+                self.has_text = true;
+            }
+            return;
+        }
         if provider == Provider::ClaudeCode {
             if raw.get("type").and_then(Value::as_str) == Some("stream_event") {
                 let event = &raw["event"];
@@ -2152,7 +2377,9 @@ fn provider_event_text(provider: Provider, raw: &Value) -> (Vec<&str>, Option<&s
                 .or_else(|| event.get("text").and_then(Value::as_str));
             (text.into_iter().collect(), None)
         }
-        Provider::Codex | Provider::ClaudeCode | Provider::OpenCode => (Vec::new(), None),
+        Provider::Codex | Provider::ClaudeCode | Provider::OpenCode | Provider::Antigravity => {
+            (Vec::new(), None)
+        }
     }
 }
 

@@ -262,6 +262,342 @@ fn smoke_is_offline_unless_live_is_explicit() {
     }
 }
 
+fn antigravity_options(capture: &Path, mode: &str) -> Value {
+    json!({
+        "command_prefix":[env!("CARGO_BIN_EXE_tactus-plugin-fixture"), "native-antigravity"],
+        "timeout_seconds":5,
+        "extra_env":{"FAKE_AGY_CAPTURE":capture, "FAKE_AGY_MODE":mode}
+    })
+}
+
+#[test]
+fn antigravity_uses_one_ndjson_stdin_message_and_bounded_native_timeout() {
+    let workspace = tempdir().expect("workspace");
+    let capture = workspace.path().join("native");
+    let prompt =
+        "中文 first line\n\"quoted\" \\ path\r\n{\"event\":\"result\"}\n--prompt must stay private";
+    let mut options = antigravity_options(&capture, "success");
+    options["timeout_seconds"] = json!(900.125);
+    options["extra_args"] = json!(["--agent", "fixture-agent"]);
+    options["extra_env"]["CUSTOM_PROVIDER_ENV"] = json!("保留 custom env");
+    let (code, frames, diagnostics) = call_provider(
+        "antigravity",
+        "invoke",
+        json!({
+            "workspace":workspace.path(), "prompt":prompt, "model":"gemini-fixture", "effort":"high", "options":options
+        }),
+    );
+    assert_eq!(code, 0, "{frames:?}; {diagnostics}");
+    let terminal = frames.last().expect("terminal");
+    assert_eq!(terminal["value"]["provider"], "antigravity");
+    assert_eq!(terminal["value"]["text"], "authoritative answer 你好\n");
+    assert_eq!(terminal["value"]["full_bypass"], false);
+    let arguments: Vec<String> =
+        serde_json::from_slice(&fs::read(capture.with_extension("args.json")).expect("argv"))
+            .expect("argv JSON");
+    assert_eq!(
+        arguments,
+        [
+            "agy",
+            "--print-timeout",
+            "960125000000ns",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--dangerously-skip-permissions",
+            "--model",
+            "gemini-fixture",
+            "--effort",
+            "high",
+            "--agent",
+            "fixture-agent"
+        ]
+    );
+    assert!(
+        !arguments
+            .iter()
+            .any(|argument| argument == prompt || argument == "-p")
+    );
+    let input = fs::read_to_string(capture.with_extension("stdin.jsonl")).expect("stdin");
+    assert_eq!(input.lines().count(), 1, "one NDJSON input line");
+    assert!(input.ends_with('\n'));
+    let message: Value = serde_json::from_str(&input).expect("input JSON");
+    assert_eq!(
+        message,
+        json!({"event":"user", "message":{"content":prompt}})
+    );
+    let environment: Value =
+        serde_json::from_slice(&fs::read(capture.with_extension("env.json")).expect("env"))
+            .expect("env JSON");
+    assert_eq!(environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+    assert_eq!(environment["CUSTOM_PROVIDER_ENV"], "保留 custom env");
+    assert_eq!(
+        Path::new(environment["cwd"].as_str().expect("cwd")),
+        dunce::canonicalize(workspace.path()).expect("canonical cwd")
+    );
+    let event_output = serde_json::to_string(
+        &frames
+            .iter()
+            .filter(|frame| frame["type"] == "event")
+            .collect::<Vec<_>>(),
+    )
+    .expect("event JSON");
+    for hidden in [
+        prompt,
+        "private-auth",
+        "secret_tool",
+        "authoritative answer",
+    ] {
+        assert!(!event_output.contains(hidden), "event leakage: {hidden}");
+        assert!(
+            !diagnostics.contains(hidden),
+            "diagnostic leakage: {hidden}"
+        );
+    }
+}
+
+#[test]
+fn antigravity_aliases_empty_response_and_default_timeout_are_explicit() {
+    let workspace = tempdir().expect("workspace");
+    let capture = workspace.path().join("native");
+    for alias in ["antigravity", "agy", "anti-gravity"] {
+        let (code, frames, _) = call_provider(alias, "describe", json!({}));
+        assert_eq!(code, 0);
+        let description = &frames[0]["value"];
+        assert_eq!(description["name"], "antigravity");
+        assert_eq!(description["executable"], "agy");
+        assert_eq!(description["aliases"], json!(["agy", "anti-gravity"]));
+        assert_eq!(description["auth_status_supported"], false);
+        assert_eq!(description["default_timeout_seconds"], 300);
+        assert_eq!(description["native_timeout_headroom_seconds"], 60);
+        let mut options = antigravity_options(&capture, "empty");
+        options
+            .as_object_mut()
+            .expect("options")
+            .remove("timeout_seconds");
+        options["extra_env"]["AGY_CLI_DISABLE_AUTO_UPDATE"] = json!("false");
+        let (code, frames, diagnostics) = call_provider(
+            alias,
+            "invoke",
+            json!({"workspace":workspace.path(), "prompt":"fixture only", "options":options}),
+        );
+        assert_eq!(code, 0, "{frames:?}; {diagnostics}");
+        assert_eq!(frames.last().expect("terminal")["value"]["text"], "");
+        let arguments: Value =
+            serde_json::from_slice(&fs::read(capture.with_extension("args.json")).expect("argv"))
+                .expect("argv JSON");
+        assert_eq!(arguments[1], "--print-timeout");
+        assert_eq!(arguments[2], "360000000000ns");
+        let environment: Value =
+            serde_json::from_slice(&fs::read(capture.with_extension("env.json")).expect("env"))
+                .expect("env JSON");
+        assert_eq!(environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "false");
+    }
+}
+
+#[test]
+fn antigravity_smoke_checks_version_and_rejects_unsupported_auth_without_spawning() {
+    let workspace = tempdir().expect("workspace");
+    let capture = workspace.path().join("native");
+    let (code, frames, diagnostics) = call_provider(
+        "antigravity",
+        "smoke",
+        json!({"workspace":workspace.path(), "options":antigravity_options(&capture, "success")}),
+    );
+    assert_eq!(code, 0, "{frames:?}; {diagnostics}");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["value"]["live"], false);
+    assert_eq!(
+        frames[0]["value"]["version"],
+        "Antigravity CLI 1.2.1 (offline fixture)"
+    );
+    let arguments: Value =
+        serde_json::from_slice(&fs::read(capture.with_extension("args.json")).expect("argv"))
+            .expect("argv JSON");
+    assert_eq!(arguments, json!(["agy", "--version"]));
+    assert!(!capture.with_extension("stdin.jsonl").exists());
+    fs::remove_file(capture.with_extension("args.json")).expect("remove capture");
+    let (code, frames, _) = call_provider(
+        "antigravity",
+        "smoke",
+        json!({"workspace":workspace.path(), "auth_status":true, "live":true, "options":antigravity_options(&capture, "success")}),
+    );
+    assert_ne!(code, 0);
+    assert_eq!(frames[0]["error"]["code"], "auth_status_unsupported");
+    assert!(
+        !capture.with_extension("args.json").exists(),
+        "unsupported health check must not spawn auth or a live model"
+    );
+}
+
+#[test]
+fn antigravity_native_failures_and_ambiguous_results_remain_distinct() {
+    let workspace = tempdir().expect("workspace");
+    let capture = workspace.path().join("native");
+    for mode in [
+        "error",
+        "invalid",
+        "early-error",
+        "canceled",
+        "interrupted",
+        "waiting",
+        "running",
+        "unknown-status",
+        "missing",
+        "malformed",
+        "invalid-utf8",
+        "mismatch",
+        "bad-response",
+        "duplicate-keys",
+        "duplicate-result",
+        "post-terminal",
+        "no-init",
+        "nonzero",
+    ] {
+        let (code, frames, diagnostics) = call_provider(
+            "antigravity",
+            "invoke",
+            json!({"workspace":workspace.path(), "prompt":"fixture only", "options":antigravity_options(&capture, mode)}),
+        );
+        assert_ne!(code, 0, "{mode}: {frames:?}; {diagnostics}");
+        let expected = if matches!(mode, "error" | "invalid" | "early-error") {
+            "provider_reported_failure"
+        } else {
+            "outcome_unknown"
+        };
+        assert_eq!(
+            frames.last().expect("terminal")["error"]["code"],
+            expected,
+            "{mode}: {frames:?}"
+        );
+    }
+    for (mode, key, limit, cause) in [
+        (
+            "success",
+            "native_max_result_bytes",
+            json!(4),
+            "provider_result_limit",
+        ),
+        (
+            "oversize-line",
+            "native_max_line_bytes",
+            json!(256),
+            "native_output_limit",
+        ),
+        ("timeout", "timeout_seconds", json!(0.05), "timeout"),
+    ] {
+        let mut options = antigravity_options(&capture, mode);
+        options[key] = limit;
+        let started = std::time::Instant::now();
+        let (code, frames, _) = call_provider(
+            "antigravity",
+            "invoke",
+            json!({"workspace":workspace.path(), "prompt":"fixture only", "options":options}),
+        );
+        assert_ne!(code, 0);
+        let terminal = frames.last().expect("terminal");
+        assert_eq!(terminal["error"]["code"], "outcome_unknown");
+        assert_eq!(terminal["error"]["details"]["cause"], cause);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "deadline/limit must bound native process lifetime"
+        );
+    }
+}
+
+#[test]
+fn antigravity_rejects_native_timeout_overrides_before_dispatch() {
+    let workspace = tempdir().expect("workspace");
+    let capture = workspace.path().join("native");
+    for arguments in [
+        json!(["--print-timeout", "1ms"]),
+        json!(["--print-timeout=1ms"]),
+        json!(["-print-timeout=1ms"]),
+        json!(["--"]),
+    ] {
+        let mut options = antigravity_options(&capture, "success");
+        options["extra_args"] = arguments;
+        let (code, frames, _) = call_provider(
+            "antigravity",
+            "invoke",
+            json!({"workspace":workspace.path(), "prompt":"fixture only", "options":options}),
+        );
+        assert_ne!(code, 0);
+        assert_eq!(
+            frames.last().expect("terminal")["error"]["code"],
+            "invalid_params"
+        );
+        assert!(!capture.with_extension("args.json").exists());
+    }
+}
+
+#[test]
+fn antigravity_streams_only_agent_deltas_before_terminal_without_final_duplication() {
+    let workspace = tempdir().expect("workspace");
+    tactus_runtime::workspace::initialize_workspace(workspace.path(), None).expect("initialize");
+    let capture = workspace.path().join("native");
+    let socket =
+        std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("UDP receiver");
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .expect("receive timeout");
+    fs::write(workspace.path().join(".tactus/watch.json"), serde_json::to_vec(&json!({"api":"tactus.watch/v1", "port":socket.local_addr().expect("address").port(), "token":"watch-offline-test-012345678901234567890123456789"})).expect("descriptor JSON")).expect("descriptor");
+    let root = workspace.path().to_path_buf();
+    let options = antigravity_options(&capture, "stream");
+    let worker = thread::spawn(move || {
+        call_provider(
+            "antigravity",
+            "invoke",
+            json!({"workspace":root, "prompt":"private invocation prompt", "options":options}),
+        )
+    });
+    let mut bytes = [0_u8; 65536];
+    let receive = |buffer: &mut [u8]| {
+        let count = socket.recv(buffer).expect("native packet");
+        serde_json::from_slice::<Value>(&buffer[..count]).expect("packet JSON")
+    };
+    assert_eq!(receive(&mut bytes)["kind"], "started");
+    let first = receive(&mut bytes);
+    let running_before_terminal = !worker.is_finished();
+    fs::write(capture.with_extension("release"), "finish").expect("release native provider");
+    let (code, frames, diagnostics) = worker.join().expect("provider worker");
+    assert!(running_before_terminal);
+    assert_eq!(first["kind"], "text.delta");
+    assert_eq!(first["text"], "live first 你好\n");
+    let second = receive(&mut bytes);
+    assert_eq!(second["kind"], "text.delta");
+    assert_eq!(second["text"], "live last\n");
+    assert_eq!(
+        receive(&mut bytes)["kind"],
+        "finished",
+        "no repeated final response or private native records"
+    );
+    assert_eq!(code, 0, "{frames:?}; {diagnostics}");
+    assert_eq!(
+        frames.last().expect("terminal")["value"]["text"],
+        "authoritative answer 你好\n"
+    );
+    let events = serde_json::to_string(
+        &frames
+            .iter()
+            .filter(|frame| frame["type"] == "event")
+            .collect::<Vec<_>>(),
+    )
+    .expect("events JSON");
+    for hidden in [
+        "private invocation prompt",
+        "private-native-content",
+        "private-tool-arguments",
+        "private-auth",
+        "live first",
+        "live last",
+    ] {
+        assert!(!events.contains(hidden));
+        assert!(!diagnostics.contains(hidden));
+    }
+}
+
 #[test]
 fn path_effect_tracks_hash_deltas_without_obeying_gitignore() {
     let workspace = tempdir().expect("workspace");

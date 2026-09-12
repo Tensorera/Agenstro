@@ -25,12 +25,14 @@ tactus watch --root /path/to/project --port 47831
 Open the complete localhost URL printed by the command, including its
 `#token=...` fragment. In another terminal, start an ordinary `tactus run`,
 `generate` or provider invocation. The page shows recognized assistant output
-from the built-in Codex, Claude Code and OpenCode adapters as native events
+from the built-in Codex, Claude Code, OpenCode and Antigravity adapters as native events
 arrive. It also lists recent runs and their recorded state. Select a run to
 filter its live output and inspect its journal; use the follow control to keep
 new output in view.
 
-Claude partial messages and OpenCode text events can arrive incrementally.
+Claude partial messages, OpenCode text events and Antigravity `agent_response`
+text deltas can arrive incrementally. Antigravity tool and user-input steps
+are excluded, and its final response is not repeated after displayed deltas.
 Codex output follows the granularity of its native JSON message events; the
 viewer cannot manufacture token deltas that the CLI does not expose. Custom
 provider hosts retain their existing journal diagnostics but do not acquire

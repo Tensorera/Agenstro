@@ -6,6 +6,8 @@ do not imply a package-registry release or compatibility guarantee.
 
 ## Unreleased — daemon, Segno service and live output
 
+- Add the Google Antigravity CLI provider (`antigravity` / `agy`) with streamed
+  stdin, live response deltas, model/effort selection and supervised deadlines.
 - Add a dedicated Segno authoring/service skill and expand Tactus daemon/live
   output guidance, with focused routing from Motivo.
 - Distribute all three skills and add `tactus skills update` with preview,

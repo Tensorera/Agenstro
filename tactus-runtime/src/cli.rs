@@ -278,7 +278,7 @@ enum Command {
     /// Built-in adapter from plugin-v1 requests to a native agent CLI.
     #[command(hide = true)]
     ProviderHost {
-        /// `codex`, `claude-code`, or `opencode`.
+        /// `codex`, `claude-code`, `opencode`, or `antigravity`.
         kind: String,
     },
     /// Built-in observational effect host.
