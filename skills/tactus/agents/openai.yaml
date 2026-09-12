@@ -1,4 +1,4 @@
 interface:
-  display_name: "Tactus Authoring"
-  short_description: "Write and check Haskell workflows with Clef"
-  default_prompt: "Use $tactus to write or update the requested workflow and check its selected sources."
+  display_name: "Tactus Workflows"
+  short_description: "Write, supervise, and view live Haskell workflows"
+  default_prompt: "Use $tactus to author, run, or diagnose the requested workflow, including daemon supervision or live provider output when requested."

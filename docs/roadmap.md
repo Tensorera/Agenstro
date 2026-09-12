@@ -64,7 +64,9 @@ promotion of mined norms is not implied.
 ## Tactus direction
 
 Tactus includes opt-in provider daemon supervision and a localhost stream
-viewer. Persistent scheduling remains in Haskell Segno. Further work includes
+viewer. It distributes the Tactus, Motivo and Segno skills and supports
+`skills update` previews and updates that preserve local modifications.
+Persistent scheduling remains in Haskell Segno. Further work includes
 packaging, config migration tooling,
 bounded run inspection/retention, provider adapter acceptance, and stronger
 cross-platform descendant cleanup. Session planner registration and
@@ -74,7 +76,9 @@ runtime commands.
 ## Segno direction
 
 Segno now also offers a machine-local registry, standard timestamp-driven
-`.tactus/segno.hs` entry and a read-only dashboard. Further work is operational:
+`.tactus/segno.hs` entry and a read-only dashboard.
+The dedicated Segno skill includes organizer/business templates and service
+recovery guidance. Further work is operational:
 explicit
 reconciliation, configurable policies, lease renewal for very long tasks,
 additional trigger/state plugins, and better backup/inspection. Multi-node

@@ -35,9 +35,6 @@ pub const TACTUS_SKILL_DIRECTORY: &str = "tactus";
 const TACTUS_SKILL: &str = include_str!("../../skills/tactus/SKILL.md");
 const TACTUS_SKILL_COMMANDS: &str = include_str!("../../skills/tactus/references/commands.md");
 const TACTUS_SKILL_OUTCOMES: &str = include_str!("../../skills/tactus/references/outcomes.md");
-const MOTIVO_SKILL: &str = include_str!("../../skills/motivo/SKILL.md");
-const MOTIVO_METHODS: &str = include_str!("../../skills/motivo/references/methods.md");
-const MOTIVO_RUNS: &str = include_str!("../../skills/motivo/references/runs.md");
 const MOTIVO_REPORT_TEMPLATE: &str = include_str!("../../motivo-studio/report-template.html");
 const MOTIVO_EMPTY_REPORT: &str = r#"<header class="motivo-header"><p class="eyebrow">Motivo</p><h1>从你的 coding agent 开始</h1><p class="lede">在当前对话中让 agent 使用 Motivo 调查、分析或复盘。运行产生的样本和报告会保存在这里。</p></header><main><section><h2>还没有方法记录</h2><p>本页面只用于观察，任务始终在原来的 coding agent 中推进。</p></section></main>"#;
 const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
@@ -708,8 +705,10 @@ pub struct InitReport {
     pub created: Vec<String>,
     /// Relative files preserved without modification.
     pub preserved: Vec<String>,
-    /// Optional discovery entries not installed because their parent path is unsafe.
+    /// Skill or discovery entries not installed because their path is unsafe.
     pub skipped: Vec<String>,
+    /// Whether initialization created or changed the managed skill baseline.
+    pub skills_manifest_changed: bool,
 }
 
 /// Initialize `.tactus` without overwriting project-owned files.
@@ -721,43 +720,10 @@ pub fn initialize_workspace(
     let root = dunce::canonicalize(root.as_ref()).map_err(WorkspaceError::Io)?;
     let sdk = resolve_sdk(&root, supplied_sdk)?;
     let workspace = Workspace::at(&root);
-    let skill_root = workspace
-        .control
-        .join(SKILLS_DIRECTORY)
-        .join(TACTUS_SKILL_DIRECTORY);
-    let skill_references = skill_root.join("references");
+    let _skill_lock = crate::skills::acquire_lock(&root)?;
     let mut files = vec![
         (workspace.config_path.clone(), DEFAULT_CONFIG.to_owned()),
         (workspace.prompt_path.clone(), DEFAULT_PROMPT.to_owned()),
-        (skill_root.join("SKILL.md"), TACTUS_SKILL.to_owned()),
-        (
-            skill_references.join("commands.md"),
-            TACTUS_SKILL_COMMANDS.to_owned(),
-        ),
-        (
-            skill_references.join("outcomes.md"),
-            TACTUS_SKILL_OUTCOMES.to_owned(),
-        ),
-        (
-            workspace.control.join("skills/motivo/SKILL.md"),
-            MOTIVO_SKILL.to_owned(),
-        ),
-        (
-            workspace
-                .control
-                .join("skills/motivo/references/methods.md"),
-            MOTIVO_METHODS.to_owned(),
-        ),
-        (
-            workspace.control.join("skills/motivo/references/runs.md"),
-            MOTIVO_RUNS.to_owned(),
-        ),
-        (
-            workspace
-                .control
-                .join("skills/motivo/assets/report-template.html"),
-            MOTIVO_REPORT_TEMPLATE.to_owned(),
-        ),
         (
             workspace.control.join("motivo/index.html"),
             MOTIVO_REPORT_TEMPLATE.replace("<!-- MOTIVO_CONTENT -->", MOTIVO_EMPTY_REPORT),
@@ -788,6 +754,17 @@ pub fn initialize_workspace(
             .iter()
             .filter_map(|(path, _)| path.parent().map(Path::to_path_buf)),
     );
+    directories.extend(
+        crate::skills::bundled_files()
+            .iter()
+            .filter(|(path, _)| path.starts_with(".tactus/"))
+            .map(|(path, _)| {
+                root.join(path)
+                    .parent()
+                    .expect("bundled parent")
+                    .to_path_buf()
+            }),
+    );
     directories.sort();
     directories.dedup();
     // Check every existing parent before creating files in any scaffold tree.
@@ -801,27 +778,6 @@ pub fn initialize_workspace(
     let mut created = Vec::new();
     let mut preserved = Vec::new();
     let mut skipped = Vec::new();
-    for host in [".agents", ".claude", ".opencode"] {
-        for (name, description) in [
-            (
-                "tactus",
-                "Write, check, and execute project Haskell workflows with Clef and Tactus.",
-            ),
-            (
-                "motivo",
-                "Use Motivo to investigate, analyze, research, organize, experiment, review, and hand off a complex task from this coding agent.",
-            ),
-        ] {
-            let directory = root.join(host).join("skills").join(name);
-            let path = directory.join("SKILL.md");
-            if reject_linked_directories(&root, &directory).is_err() {
-                skipped.push(relative_display(&root, &path));
-                continue;
-            }
-            fs::create_dir_all(&directory).map_err(WorkspaceError::Io)?;
-            files.push((path, skill_discovery_entry(name, description)));
-        }
-    }
     for (path, content) in files {
         let relative = relative_display(&root, &path);
         match fs::OpenOptions::new()
@@ -841,6 +797,15 @@ pub fn initialize_workspace(
             Err(error) => return Err(WorkspaceError::Io(error)),
         }
     }
+    let skills_report =
+        crate::skills::reconcile(&root, crate::skills::InstallMode::Initialize, false)?;
+    for file in skills_report.files {
+        match file.action.as_str() {
+            "installed" => created.push(file.path),
+            "skipped" => skipped.push(file.path),
+            _ => preserved.push(file.path),
+        }
+    }
     workspace.require_layout()?;
     Ok(InitReport {
         workspace,
@@ -848,16 +813,11 @@ pub fn initialize_workspace(
         created,
         preserved,
         skipped,
+        skills_manifest_changed: skills_report.manifest_changed,
     })
 }
 
-fn skill_discovery_entry(name: &str, description: &str) -> String {
-    format!(
-        "---\nname: {name}\ndescription: {description}\n---\n\nRead the project-local canonical instructions in\n[.tactus/skills/{name}/SKILL.md](../../../.tactus/skills/{name}/SKILL.md)\nbefore using this skill. Resolve references from that canonical skill directory.\nThe project root is three directories above this skill directory.\nContinue the user's work in the current coding-agent conversation.\n"
-    )
-}
-
-fn reject_linked_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceError> {
+pub(crate) fn reject_linked_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceError> {
     let resolved_root = dunce::canonicalize(root).map_err(WorkspaceError::Io)?;
     let relative = leaf.strip_prefix(root).map_err(|_| {
         WorkspaceError::InvalidConfig("workspace path escaped the workspace".to_owned())
@@ -897,7 +857,7 @@ fn reject_linked_directories(root: &Path, leaf: &Path) -> Result<(), WorkspaceEr
 }
 
 #[cfg(windows)]
-fn directory_is_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn directory_is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -905,7 +865,7 @@ fn directory_is_reparse_point(metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn directory_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+pub(crate) fn directory_is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 

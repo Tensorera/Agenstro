@@ -2,7 +2,7 @@
 title: Start with your coding agent
 status: alpha
 owners: [documentation]
-last_verified: 2026-09-05
+last_verified: 2026-09-12
 applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -63,9 +63,13 @@ The relevant workspace layout is:
   runs/             Tactus diagnostic journals and summaries
   skills/tactus/    Haskell authoring and runtime rules
   skills/motivo/    method guidance and the offline HTML template
+  skills/segno/     persistent task authoring, service operations and templates
 ```
 
 `init` preserves existing files and installs short host-agent skill pointers.
+Use `tactus skills update --dry-run` to inspect skill updates for an existing
+project, then `tactus skills update` to apply unchanged bundled files and stage
+incoming versions beside customized ones for review.
 For setup failures, run `tactus doctor`; see
 [Tactus workspace and configuration](tactus-workspace.md) before modifying the
 layout or changing SDK references.

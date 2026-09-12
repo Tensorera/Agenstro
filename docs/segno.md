@@ -29,6 +29,14 @@ job.
 
 ## Install Segno
 
+The project-local Segno skill is installed by `tactus init` at
+`.tactus/skills/segno/SKILL.md`. It guides organizer authoring, timestamp/result
+handling and service recovery, with two offline Haskell templates in its
+`assets/` directory. Existing workspaces can receive it with
+`tactus skills update`. `segno init` separately initializes Segno's store,
+plugin registry and Cabal linkage; it does not launch a scheduler or install
+a second copy of the skill.
+
 Use the canonical [installation guide](install.md) to install or upgrade
 Tactus and the `segno` executable. This guide assumes both commands resolve and
 that `tactus check --help` contains the repeatable `--package` option.

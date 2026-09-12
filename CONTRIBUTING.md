@@ -35,6 +35,8 @@ network-fetched tool or package dependencies.
 | `examples/topology-holes/` | Current four-stage integration example |
 | `docs/` | Current documentation plus clearly marked migration history |
 | `skills/motivo/` | Method choice and evidence guidance for the existing coding agent |
+| `skills/tactus/` | Workflow authoring, daemon supervision and live-output guidance |
+| `skills/segno/` | Persistent organizer authoring, service recovery and offline templates |
 | `motivo/templates/` | Eight ordinary Haskell methods and shared record/report helpers |
 | `motivo/tests/` | Offline method and installed-asset acceptance tests |
 | `motivo-studio/` | Self-contained HTML template, reading controls, and static build/tests |
@@ -145,9 +147,10 @@ Keep the runtime separated into the existing concerns:
 - `session`: validated durable decision-session storage and control commands;
 - `daemon`: bounded provider supervision, repair proposals and escalation;
 - `watch`: ephemeral local provider streams and the read-only browser viewer;
+- `skills`: bundled guidance, installation baselines and conservative skill updates;
 - `cli`: the public command surface and error/exit-code mapping.
 
-The public CLI contract is `init`, `list`, `prompt`, `generate`, `check`,
+The public CLI contract is `init`, `skills update`, `list`, `prompt`, `generate`, `check`,
 `run` (including opt-in `--daemon`), `watch`, `doctor`, `smoke`, `plugin-call`,
 `runs`, `studio`, and `session`. `dispatch`, `provider-host`, and
 `effect-host` are internal subcommands used to keep all plugin calls under the
@@ -244,6 +247,12 @@ ships, rather than silently copying newer repository files into the workspace:
 cargo build --workspace --locked
 python3 motivo/tests/run.py --tactus Build/cargo/debug/tactus --installed-only
 ```
+
+Keep the embedded skill file list and host discovery descriptions aligned with
+all three skills. Skill-upgrade tests must preserve customized and unrecognized
+files, including across repeated initialization, and keep dry-run free of writes.
+The Segno service acceptance executes the organizer and business assets installed
+by Tactus, so missing or stale packaged templates fail the end-to-end check.
 
 On Windows use the available Python command and `Build/cargo/debug/tactus.exe`.
 For template-only iteration, omitting `--installed-only` lets the test runner

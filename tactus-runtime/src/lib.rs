@@ -14,6 +14,7 @@ pub mod process;
 pub mod protocol;
 pub mod runs;
 pub mod session;
+pub mod skills;
 pub mod studio;
 pub mod watch;
 pub mod workspace;

@@ -72,6 +72,56 @@ fn initialization_preserves_existing_agent_instructions_and_source_customization
     }
 }
 
+#[test]
+fn skills_update_cli_previews_then_preserves_local_guidance_with_an_incoming_copy() {
+    let (_temporary, project) = initialized_project();
+    let skill = project.join(".tactus/skills/segno/SKILL.md");
+    fs::write(&skill, "local organizer policy\n").expect("custom skill");
+    let discovery = project.join(".agents/skills/segno/SKILL.md");
+    fs::remove_file(&discovery).expect("remove discovery");
+    let invoke = |dry_run: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tactus"));
+        command
+            .args(["skills", "update", "--root"])
+            .arg(&project)
+            .arg("--json");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let output = command.output().expect("skills update");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).expect("one JSON report")
+    };
+    let preview = invoke(true);
+    assert_eq!(preview["api"], "tactus.skills-update/v1");
+    assert_eq!(preview["dry_run"], true);
+    let preserved = preview["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .find(|file| file["path"] == ".tactus/skills/segno/SKILL.md")
+        .expect("skill report");
+    assert_eq!(preserved["action"], "preserved");
+    let candidate = project.join(preserved["candidate"].as_str().expect("candidate path"));
+    assert!(!candidate.exists());
+    assert!(!discovery.exists());
+    let applied = invoke(false);
+    assert_eq!(applied["dry_run"], false);
+    assert_eq!(
+        fs::read_to_string(skill).expect("local skill"),
+        "local organizer policy\n"
+    );
+    assert_eq!(
+        fs::read(candidate).expect("incoming skill"),
+        include_bytes!("../../skills/segno/SKILL.md")
+    );
+    assert!(discovery.is_file());
+}
+
 #[cfg(unix)]
 #[test]
 fn initialization_skips_linked_agent_discovery_paths_without_writing_through_them() {
@@ -87,7 +137,7 @@ fn initialization_skips_linked_agent_discovery_paths_without_writing_through_the
     fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk manifest");
     symlink(&outside, project.join(".claude")).expect("external agent directory");
     let report = initialize_workspace(&project, Some(&sdk)).expect("core initialization");
-    assert_eq!(report.skipped.len(), 2);
+    assert_eq!(report.skipped.len(), 3);
     assert!(
         report
             .skipped

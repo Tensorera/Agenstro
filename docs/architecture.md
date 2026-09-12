@@ -33,7 +33,7 @@ The architectural split is:
 ## Component flow
 
 ```text
-user -> existing coding agent -> project Motivo / Tactus skills
+user -> existing coding agent -> project Motivo / Tactus / Segno skills
         |
         | tactus init/list/prompt/generate/check/run/doctor/smoke/plugin-call
         v
@@ -96,6 +96,14 @@ state, workflow, provider, and effect invocation is still a separately
 correlated process operation. `segno service start` adds a local scheduler and
 read-only web dashboard for registered `.tactus/segno.hs` tasks. It shares no
 business-state database with the Tactus daemon.
+
+Tactus distributes the three canonical skills and their host discovery entries.
+The Tactus skill owns execution, daemon and streaming guidance; the Segno skill
+owns persistent-task authoring and scheduler lifecycle; Motivo routes work to
+those skills when a selected task method needs execution or persistence.
+`tactus skills update` refreshes unchanged installed instructions and stages
+incoming versions for customized files. Skill updates do not change business
+sources, method templates, provider configuration or task state.
 
 ## Optional supervision and live observation
 

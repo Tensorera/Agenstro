@@ -30,7 +30,7 @@ marks persistent continuation. Plugins remain language-neutral through
 ## User entry point
 
 ```text
-User <--> existing coding agent <--- Motivo skill / Tactus skill
+User <--> existing coding agent <--- Motivo / Tactus / Segno skills
                     |
                     +--> .tactus/motivoscript: selected method templates
                     +--> .tactus/scripts: atomic business scripts
@@ -69,6 +69,12 @@ Then follow the three-step path:
 Initialization installs the canonical skills and supported project-local host
 pointers. Existing user files are preserved. If your host does not expose skills,
 ask it to read `.tactus/skills/motivo/SKILL.md` directly.
+
+The [Tactus skill](skills/tactus/SKILL.md) covers execution, daemon supervision
+and live output. The [Segno skill](skills/segno/SKILL.md) covers persistent
+organizers and scheduling. For existing projects, `tactus skills update --dry-run`
+previews changes; `tactus skills update` updates unchanged bundled copies and
+provides incoming versions for customized files without overwriting them.
 
 Open `.tactus/motivo/index.html` in a browser when you want to inspect progress.
 Refresh loads the latest generated snapshot. Keep instructions, model choices

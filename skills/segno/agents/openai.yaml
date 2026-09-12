@@ -1,0 +1,4 @@
+interface:
+  display_name: "Segno Persistent Tasks"
+  short_description: "Author and manage scheduled Tactus workflows"
+  default_prompt: "Use $segno to implement or manage the requested persistent Tactus task."

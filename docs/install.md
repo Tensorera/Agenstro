@@ -61,7 +61,7 @@ tactus list
 ```
 
 Start your chosen coding agent from this folder and ask it to use Motivo. The
-canonical skills are in `.tactus/skills/{motivo,tactus}`. Initialization installs
+canonical skills are in `.tactus/skills/{motivo,tactus,segno}`. Initialization installs
 project-local discovery pointers for supported hosts and preserves existing
 files. If your host does not expose skills, ask it to read the canonical skill
 path directly.
@@ -83,6 +83,28 @@ update that reference if it points at an older copied SDK.
 including user-edited templates, skills and `tactus.toml`. Inspect its created,
 preserved and skipped entries. It does not silently upgrade existing method
 code or overwrite a user's provider settings.
+
+To update only the bundled skills and their coding-agent discovery entries:
+
+```sh
+tactus skills update --root /path/to/project --dry-run
+tactus skills update --root /path/to/project
+```
+
+Missing files are installed. Files that still match a recorded installation
+or a recognized older bundle are updated; customized or unrecognized files
+are preserved. Their incoming versions are written beneath
+`.tactus/skill-updates/<bundle-id>/` for comparison and manual merging. The
+report identifies each file and candidate; `--json` provides the same decisions
+as structured data. Unsafe or oversized skill paths are skipped and reported.
+Dry-run writes nothing. Configuration, business scripts,
+Motivo method sources and generated reports are outside this update command.
+
+The updater records baselines in `.tactus/skills-manifest.json`. Repeating
+`init` preserves existing skills and never treats local modifications as a
+fresh installed baseline. A runtime upgrade alone does not refresh existing
+workspace skills. After updating, reload the coding agent's skill discovery
+if it has cached the old instructions.
 
 If an existing configuration lacks the new experiment effect, add only this
 entry while preserving other settings:

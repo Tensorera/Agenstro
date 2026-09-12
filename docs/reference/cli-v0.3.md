@@ -28,6 +28,7 @@ contains spaces.
 | Command | Purpose | Important options |
 | --- | --- | --- |
 | `tactus init [ROOT]` | Idempotently create `.tactus` | `--sdk PATH`, `--json` |
+| `tactus skills update` | Install missing skills and update unchanged bundled copies, preserving local edits | `--root`, `--dry-run`, `--json` |
 | `tactus list` | List ordered entries and helpers | `--root`, `--scripts-dir PATH`, `--json` |
 | `tactus prompt` | Print resolved generation instructions | `--root` |
 | `tactus doctor` | Validate config, GHC/Cabal, SDK, and plugin commands | `--root`, `--json` |
@@ -70,6 +71,13 @@ The standard Segno organizer can be explicitly selected with
 from default discovery and `run --all`; other unnumbered helpers cannot run.
 Daemon monitoring is opt-in per run. Automatic repairs also require an explicit
 retryable entry allowlist; see [provider setup](../providers.md#optional-task-daemon).
+
+`init` distributes Tactus, Motivo and Segno skills plus discovery entries for
+supported coding-agent hosts. It preserves existing files. `skills update`
+compares against known installation baselines; customized and unrecognized
+copies remain in place, with incoming files under `.tactus/skill-updates/`
+for manual comparison. Its `--dry-run` mode creates no files. See
+[installation and upgrades](../install.md#upgrade-an-existing-project).
 
 `check`/`run --timeout-seconds` applies separately to each Cabal/GHC/runghc
 process; zero disables this existing per-process timeout. It is not the total

@@ -61,6 +61,11 @@ pub struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Install or safely upgrade bundled project skills and agent discovery.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Initialize an idempotent `.tactus` workspace.
     Init {
         /// Project directory.
@@ -285,6 +290,22 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Upgrade only unmodified managed skills; retain local changes with incoming candidates.
+    Update {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Preview every action without creating or changing files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit one JSON report, including incoming candidate paths.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum StudioCommand {
     /// Inspect scripts, health, registries, and recent invocation traces.
     Inspect {
@@ -494,6 +515,13 @@ pub fn run() -> Result<i32, CliError> {
 /// Execute already parsed arguments. Kept separate for embedding and tests.
 pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
     match arguments.command {
+        Command::Skills { command } => match command {
+            SkillsCommand::Update {
+                root,
+                dry_run,
+                json,
+            } => update_skills(&root, dry_run, json),
+        },
         Command::Init { root, sdk, json } => initialize(&root, sdk.as_deref(), json),
         Command::List {
             root,
@@ -614,6 +642,49 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
     }
 }
 
+fn update_skills(root: &Path, dry_run: bool, json: bool) -> Result<i32, CliError> {
+    let report = crate::skills::update_skills(root, dry_run)?;
+    if json {
+        print_json(&report)?;
+    } else {
+        let prefix = if dry_run { "Preview" } else { "Skill update" };
+        render_presentation(&Presentation::new(
+            PresentationCategory::State,
+            format!("{prefix} for {}.", report.workspace.display()),
+        ));
+        for file in &report.files {
+            let candidate = file
+                .candidate
+                .as_ref()
+                .map_or_else(String::new, |path| format!(" Incoming: {path}."));
+            let category = if matches!(file.action.as_str(), "preserved" | "skipped") {
+                PresentationCategory::Warning
+            } else {
+                PresentationCategory::Info
+            };
+            render_presentation(&Presentation::new(
+                category,
+                format!("{} {}: {}.{candidate}", file.action, file.path, file.reason),
+            ));
+        }
+        if report.manifest_changed {
+            render_presentation(&Presentation::new(
+                PresentationCategory::Info,
+                format!(
+                    "{prefix}: baseline manifest {} is {}.",
+                    report.manifest,
+                    if dry_run {
+                        "scheduled to change"
+                    } else {
+                        "updated"
+                    }
+                ),
+            ));
+        }
+    }
+    Ok(0)
+}
+
 fn initialize(root: &Path, sdk: Option<&Path>, json: bool) -> Result<i32, CliError> {
     let report = initialize_workspace(root, sdk)?;
     if json {
@@ -623,6 +694,7 @@ fn initialize(root: &Path, sdk: Option<&Path>, json: bool) -> Result<i32, CliErr
             "created": report.created,
             "preserved": report.preserved,
             "skipped": report.skipped,
+            "skills_manifest_changed": report.skills_manifest_changed,
         }))?;
     } else {
         render_presentation(&Presentation::new(
@@ -647,9 +719,13 @@ fn initialize(root: &Path, sdk: Option<&Path>, json: bool) -> Result<i32, CliErr
         for path in report.skipped {
             render_presentation(&Presentation::new(
                 PresentationCategory::Warning,
-                format!(
-                    "Skipped skill discovery entry {path}; its parent is linked or not a directory. Read .tactus/skills directly."
-                ),
+                format!("Skipped skill entry {path}; its file or parent path is unsafe."),
+            ));
+        }
+        if report.skills_manifest_changed {
+            render_presentation(&Presentation::new(
+                PresentationCategory::Info,
+                "Updated managed skill baseline .tactus/skills-manifest.json.",
             ));
         }
     }

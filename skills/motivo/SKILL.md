@@ -32,6 +32,13 @@ experiments when relevant. Revisit the method only when new evidence changes wha
 to do. Do not add actors, nested task loops, or reusable plugins without a concrete
 repeated need.
 
+Route runtime execution, daemon supervision, and live provider output to the
+sibling [Tactus skill](../tactus/SKILL.md). Route recurring schedules, persistent
+workspaces, `.tactus/segno.hs` organizers, and invocation recovery to the sibling
+[Segno skill](../segno/SKILL.md). Use a Motivo method only when it helps resolve
+uncertainty in that work; a schedule or daemon does not require a new Motivo
+task loop or a separate model call.
+
 ## Minimal experiments
 
 Use `050_probe.hs` and the registered `motivo.test` effect for a local experiment.

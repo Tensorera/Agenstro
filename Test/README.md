@@ -19,6 +19,8 @@ the implementation under `plugins/latex-norm-check/fixtures/`; run them with
 `repository/test-segno-service.py --tactus PATH --segno PATH` initializes two
 temporary workspaces under `Build/`, runs their standard organizers, and checks
 durable results without duplicate execution. It is included in the Full gate.
+The organizer and business sources come from the Segno skill assets embedded
+in the selected Tactus binary, so this also verifies their installation.
 
 The canonical repository entrypoint composes these package and publication
 checks without contacting a live provider:

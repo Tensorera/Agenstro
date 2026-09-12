@@ -1,38 +1,5 @@
 # Command reference
 
-## Optional supervision and live output
-
-Start `tactus watch --root /path/to/project --port 47831` before provider work
-and open the complete printed URL to inspect live assistant output. Capture is
-transient; recorded run status remains available separately.
-
-`tactus run --daemon --daemon-provider NAME --script SCRIPT` enables periodic
-monitoring through an independently registered provider. Automatic repair also
-requires `--daemon-retry-script SCRIPT` or `[daemon].retry_scripts`; include
-only entries whose effects can safely be repeated. A retry preserves original
-arguments and reruns only the failed selected entry. `[daemon]` configures
-`provider`, `interval_seconds` (60), `timeout_seconds` (120), `max_retries` (1)
-and `retry_scripts` ([]). Unknown outcomes and exhausted budgets escalate to
-stderr and the task's `daemon.jsonl` instead of rerunning.
-
-For persistent scheduling, install the Haskell Segno package and initialize
-its SDK linkage with `segno init --root PROJECT --sdk /path/to/segno-flow`.
-Create `.tactus/segno.hs` using `Segno.Service.Protocol.serviceMain`, which
-receives a UTC timestamp and publishes `(status_code, JSON info)` through the
-service's result file. Let it organize work directories and call numbered
-business scripts with their directory argument. Propagate uncertain child
-outcomes as missing results rather than guessing a known business failure.
-
-```sh
-segno service register NAME --root PROJECT --every-seconds 3600
-segno service start --port 47832
-segno service status --json
-```
-
-The service registry spans workspaces. `segno service --registry PATH ...`
-selects a separate registry; pause/resume controls future invocations and never
-replays an unknown one. The status dashboard is read-only.
-
 ## Script and plugin commands
 
 Pass paths and goals as separate quoted arguments. Tactus searches `--root`
@@ -43,6 +10,14 @@ resolved workspace root. Initialize a new workspace with `tactus init <path>`.
 tactus list --root /path/to/project --json
 tactus doctor --root /path/to/project --json
 ```
+
+For skill upgrades, `tactus skills update --root /path/to/project --dry-run`
+previews the installed Tactus, Motivo and Segno files and host discovery entries.
+Omit `--dry-run` to apply updates: known unchanged copies are refreshed, while
+customized or unknown files remain in place with incoming versions under
+`.tactus/skill-updates/` for review. This command does not update business
+scripts, method templates or provider configuration; repeated `init` also
+preserves existing files.
 
 `check` takes positional sources, including helper modules. `run` takes
 repeatable `--script` arguments and preserves their order; `--all` and ranges
@@ -70,6 +45,18 @@ tactus run --root /path/to/project --scripts-dir .tactus/motivoscript --script .
 Both accept `--timeout-seconds N` and repeated `--package NAME`. A timeout of
 `0` disables the outer deadline. `--keep-going` continues after a failed entry;
 it does not retry it or undo previous effects.
+
+The standard `.tactus/segno.hs` organizer is an explicit source exception under
+the default source tree; it is not discovered by `--all`. Initialize the Segno
+SDK linkage, then expose its package when checking the organizer:
+
+```sh
+tactus check --root /path/to/project --package segno-flow .tactus/segno.hs
+```
+
+Use the sibling [Segno skill](../../segno/SKILL.md) for its timestamp/result
+protocol, execution environment, registration, and recovery. For per-run daemon
+supervision and live output, read [supervision.md](supervision.md).
 
 `tactus generate --root /path/to/project 'authoring goal'` invokes the configured
 generation provider. It can type-check while authoring; generation does not

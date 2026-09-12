@@ -15,6 +15,11 @@ configured provider. `tactus watch` serves a live local provider-output viewer.
 Persistent scheduling remains in Segno. Neither component adds workflow
 rollback or a provider credential broker.
 
+Initialization distributes the Tactus, Motivo and Segno skills. The
+`tactus skills update` command upgrades unchanged bundled skill files and host
+discovery entries; customized files remain intact, with incoming versions
+available for comparison. `--dry-run` previews these decisions without writes.
+
 Tactus is licensed with the rest of Agenstro under
 [GNU AGPL v3.0 only](../LICENSE).
 
@@ -50,6 +55,8 @@ Initialization creates only missing content:
   scripts/          ordinary Haskell entries and helper modules
   runs/             per-invocation trace directories
   sessions/         current human-decision state and answer evidence
+  skills/           Tactus, Motivo and Segno guidance and reusable assets
+  skills-manifest.json  managed skill baselines for later updates
 ```
 
 Runnable entries are named `NNN_slug.hs` or `NNN_slug.lhs`. Tactus orders them
@@ -60,6 +67,7 @@ helpers: `check` sees them, but `run` does not select them implicitly.
 
 ```powershell
 tactus init
+tactus skills update --dry-run
 tactus list
 tactus prompt
 tactus generate --provider codex "create a typed multi-step workflow"

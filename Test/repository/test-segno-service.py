@@ -49,9 +49,9 @@ def main():
             projects.append(project)
             run([tactus, "init", project, "--sdk", repository / "clef-sdk"])
             run([segno, "init", "--root", project, "--sdk", repository / "segno-flow"])
-            shutil.copyfile(repository / "segno-flow/examples/service/segno.hs",
+            shutil.copyfile(project / ".tactus/skills/segno/assets/segno.hs",
                             project / ".tactus/segno.hs")
-            shutil.copyfile(repository / "segno-flow/examples/service/010_business.hs",
+            shutil.copyfile(project / ".tactus/skills/segno/assets/010_business.hs",
                             project / ".tactus/scripts/010_business.hs")
             run([*service, "register", name, "--root", project,
                  "--every-seconds", "86400", "--task-timeout-seconds", "120"])

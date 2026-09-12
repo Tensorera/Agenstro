@@ -61,6 +61,10 @@ for reproducible setup and rerun `doctor` after moving either checkout.
     tactus/
       SKILL.md
       references/
+    motivo/
+    segno/
+  skills-manifest.json
+  skill-updates/
   path-effect/
   dist-newstyle/
   segno/
@@ -72,7 +76,9 @@ for reproducible setup and rerun `doctor` after moving either checkout.
 | `cabal.project` | Init-generated link to Clef; repair it after moving the SDK |
 | `PROMPT.md` | Project-owned instructions included in workflow-generation requests |
 | `scripts/` | Project-owned Haskell entries and helper modules |
-| `skills/tactus/` | Init-materialized agent guidance; missing files fall back to the embedded copy |
+| `skills/{tactus,motivo,segno}/` | Installed agent instructions, references and assets; preserve local customizations |
+| `skills-manifest.json` | Runtime-owned hashes used to recognize unchanged installed skill files |
+| `skill-updates/` | Incoming bundled skill versions preserved for comparison with local edits |
 | `runs/` | Runtime-owned bounded diagnostic journals; not replay state |
 | `sessions/` | Runtime-owned current elicitation state and append-only decision evidence |
 | `path-effect/` | Runtime-owned snapshot/observation tokens |
@@ -88,6 +94,16 @@ empty list when the directory has not been created yet, while a later
 idempotent `tactus init` creates it. Motivo and other clients use
 `tactus session list/show/answer`; they do not read or write this directory.
 See the [session control API](reference/session-control-v1.md).
+
+The three skills have separate responsibilities: Tactus covers workflow
+authoring, execution, daemon supervision and live output; Segno covers
+timestamp organizers, persistent scheduling and recovery; Motivo covers task
+methods and routes execution or scheduling work to the relevant sibling skill.
+`tactus init` installs all three and host discovery pointers while preserving
+existing files. Use `tactus skills update --dry-run` to inspect changes and
+`tactus skills update` to update known unchanged copies. Customized or unknown
+versions remain in place and receive review candidates under `skill-updates/`.
+Neither command automatically overwrites project-owned method or business code.
 
 ## Configuration schema
 
@@ -289,10 +305,13 @@ tactus run `
 
 - the natural-language goal;
 - `PROMPT.md`;
-- `.tactus/skills/tactus/SKILL.md` and its two references; and
+- `.tactus/skills/tactus/SKILL.md` and its command/outcome references; and
 - the selected provider configuration.
 
 The provider is instructed to make the smallest sufficient source change.
+Specialized supervision and Segno guidance is linked from the skills and read
+when relevant; it is not all inserted into every generation prompt. Missing
+Tactus generation guidance falls back to the binary's embedded copy.
 It may use `tactus check` with explicit source paths for compiler feedback,
 but must not execute the generated business workflow or its external effects.
 Changes to helper modules count as generation output; a new numbered entry is
