@@ -208,6 +208,20 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Allow Bubblewrap user namespaces on the test runner
+        run: |
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+          # Scope the permission to Bubblewrap on this disposable runner.
+          sudo tee /etc/apparmor.d/motivo-ci-bwrap > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile motivo-ci-bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/motivo-ci-bwrap
+          /usr/bin/bwrap --unshare-all --unshare-user --disable-userns --cap-drop ALL \
+            --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
       - name: Install Rust
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Test the real experiment boundary

@@ -215,7 +215,7 @@ impl ExecutableResolver {
                 );
             }
             let extensions = self.windows_extensions();
-            return normalize_candidates(
+            normalize_candidates(
                 directories
                     .flat_map(|directory| {
                         extensions.iter().map(move |extension| {
@@ -223,7 +223,7 @@ impl ExecutableResolver {
                         })
                     })
                     .filter(|path| is_executable(path)),
-            );
+            )
         }
         #[cfg(not(windows))]
         {
