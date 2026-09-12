@@ -183,7 +183,20 @@ pub fn update_skills(start: &Path, dry_run: bool) -> Result<SkillUpdateReport, W
 }
 
 /// Held across both ordinary initialization and skill distribution.
-pub(crate) fn acquire_lock(root: &Path) -> Result<File, WorkspaceError> {
+pub(crate) struct SkillLock {
+    file: File,
+}
+
+impl Drop for SkillLock {
+    fn drop(&mut self) {
+        // Closing this descriptor alone does not release a Unix flock while a
+        // concurrently forked child retains it before exec. End the lock's
+        // lifetime with the operation, independently of inherited descriptors.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
+pub(crate) fn acquire_lock(root: &Path) -> Result<SkillLock, WorkspaceError> {
     let control = root.join(".tactus");
     reject_linked_directories(root, &control)?;
     fs::create_dir_all(&control).map_err(WorkspaceError::Io)?;
@@ -196,7 +209,7 @@ pub(crate) fn acquire_lock(root: &Path) -> Result<File, WorkspaceError> {
     ensure_plain_metadata(&file.metadata().map_err(WorkspaceError::Io)?, &path)?;
     fs4::FileExt::try_lock(&file)
         .map_err(|_| invalid("another Tactus initialization or skill update is running"))?;
-    Ok(file)
+    Ok(SkillLock { file })
 }
 
 /// Caller holds the initialization/update lock unless this is a read-only preview.
@@ -785,6 +798,18 @@ mod tests {
                 .to_string()
                 .contains("another Tactus")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_duplicate_descriptor_remains_open() {
+        let (_temporary, root, _sdk) = project();
+        let lock = acquire_lock(&root).expect("hold lock");
+        // A forked child retains the same open file description until exec.
+        // Duplication reproduces that lifetime without a timing-dependent fork.
+        let _inherited_descriptor = lock.file.try_clone().expect("duplicate descriptor");
+        drop(lock);
+        let _next_lock = acquire_lock(&root).expect("previous operation released its lock");
     }
 
     #[cfg(unix)]
