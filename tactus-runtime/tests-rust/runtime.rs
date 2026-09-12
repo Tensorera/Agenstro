@@ -41,8 +41,8 @@ fn initialized_project() -> (tempfile::TempDir, std::path::PathBuf) {
     fs::create_dir(&sdk).expect("sdk dir");
     fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk cabal");
     let project = temporary.path().join("project");
-    initialize_workspace(&project, Some(&sdk)).expect("init");
-    (temporary, project)
+    let initialized = initialize_workspace(&project, Some(&sdk)).expect("init");
+    (temporary, initialized.workspace.root)
 }
 
 #[test]
@@ -1319,8 +1319,10 @@ fn haskell_generic_plugin_routes_through_absolute_tactus_dispatch() {
         .parent()
         .expect("repository");
     let sdk = repository.join("clef-sdk");
-    let project = temporary.path().join("haskell-e2e");
-    initialize_workspace(&project, Some(&sdk)).expect("init");
+    let project = initialize_workspace(temporary.path().join("haskell-e2e"), Some(&sdk))
+        .expect("init")
+        .workspace
+        .root;
     let config_path = project.join(".tactus/tactus.toml");
     let mut config = fs::read_to_string(&config_path).expect("config");
     let executable = serde_json::to_string(env!("CARGO_BIN_EXE_tactus-plugin-fixture"))

@@ -4923,7 +4923,8 @@ mod tests {
 
     fn selection_fixture() -> (tempfile::TempDir, Workspace) {
         let temporary = tempdir().expect("temporary directory");
-        let workspace = Workspace::at(temporary.path());
+        let root = dunce::canonicalize(temporary.path()).expect("canonical workspace root");
+        let workspace = Workspace::at(root);
         fs::create_dir_all(&workspace.scripts_path).expect("scripts directory");
         for (name, source) in [
             ("010_first.hs", "main = pure ()"),
