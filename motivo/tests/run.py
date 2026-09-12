@@ -21,7 +21,7 @@ METHODS = ["clarify", "investigate", "analyze", "research", "probe", "organize",
 
 
 def execute(argv: list[str], *, cwd: Path, success: bool = True) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+    completed = subprocess.run(argv, cwd=cwd, text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
     if (completed.returncode == 0) != success:
         raise AssertionError(f"Unexpected exit {completed.returncode}: {argv}\n{completed.stdout[-12000:]}")
     return completed
@@ -52,10 +52,10 @@ def main() -> None:
             shutil.copyfile(ROOT / "motivo-studio/report-template.html", asset)
         fixture = Path(temporary) / "plugin.py"
         fixture.write_text('''import json, pathlib, sys
-request=json.loads(sys.stdin.readline())
+request=json.loads(sys.stdin.buffer.readline().decode("utf-8"))
 params=request["params"]
 marker=pathlib.Path(__file__).with_name("calls.jsonl")
-with marker.open("a") as output:
+with marker.open("a", encoding="utf-8") as output:
     output.write(json.dumps({"mode":sys.argv[1], "params":params})+"\\n")
 if sys.argv[1]=="forbidden":
     raise SystemExit("The implicit default provider was invoked")
@@ -72,7 +72,7 @@ else:
            "stdout_path":"fixture-output.txt", "stderr_path":"fixture-error.txt",
            "stdout_truncated":False, "stderr_truncated":False, "logs_may_be_partial":False}
 print(json.dumps({"type":"result", "id":request["id"], "ok":True, "value":value}))
-''')
+''', encoding="utf-8")
         python = json.dumps(sys.executable)
         fixture_literal = json.dumps(str(fixture))
         (project / ".tactus/tactus.toml").write_text(f'''api = "clef.runtime/v1"
@@ -84,9 +84,9 @@ command = [{python}, {fixture_literal}, "forbidden"]
 command = [{python}, {fixture_literal}, "provider"]
 [effects."motivo.test"]
 command = [{python}, {fixture_literal}, "effect"]
-''')
+''', encoding="utf-8")
         note = project / "notes.md"
-        note.write_text("A concrete observation without fixed headings.\n<script>motivo_attack()</script>\n", encoding="utf-8")
+        note.write_text("A concrete observation without fixed headings. 中文证据 — “quoted evidence”.\n<script>motivo_attack()</script>\n", encoding="utf-8")
         marker = fixture.with_name("calls.jsonl")
         runs = project / ".tactus/motivo/runs"
 
@@ -105,27 +105,28 @@ command = [{python}, {fixture_literal}, "effect"]
             run_id = f"record-{method}"
             run_method(method, run_id)
             directory = runs / run_id
-            record = json.loads((directory / "run.json").read_text())
+            record = json.loads((directory / "run.json").read_text(encoding="utf-8"))
             assert record["method"] == method and record["status"] == "recorded"
             assert record["requested_provider"] is None
             assert record["model"] == "not reported"
             assert record["missing_sections"]
-            assert (directory / "request.md").read_text() == note.read_text()
-            assert (directory / "artifacts/submitted-notes.md").read_text() == note.read_text()
-            html = (directory / "report.html").read_text()
+            assert (directory / "request.md").read_text(encoding="utf-8") == note.read_text(encoding="utf-8")
+            assert (directory / "artifacts/submitted-notes.md").read_text(encoding="utf-8") == note.read_text(encoding="utf-8")
+            html = (directory / "report.html").read_text(encoding="utf-8")
+            assert "中文证据 — “quoted evidence”" in html
             assert "&lt;script&gt;motivo_attack()&lt;/script&gt;" in html
             assert "<script>motivo_attack()</script>" not in html
-            events = [json.loads(line) for line in (directory / "samples.jsonl").read_text().splitlines()]
+            events = [json.loads(line) for line in (directory / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
             assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
         assert not marker.exists(), "record-only methods must never call a provider/effect"
         print("PASS: all seven recording methods compile, accept ordinary prose, escape HTML and invoke no model")
 
         review = runs / "record-retrospect/artifacts"
-        assert (review / "retrospective.md").read_text() == note.read_text()
-        history = json.loads((review / "decision-history.json").read_text())
+        assert (review / "retrospective.md").read_text(encoding="utf-8") == note.read_text(encoding="utf-8")
+        history = json.loads((review / "decision-history.json").read_text(encoding="utf-8"))
         assert history["temporal_order_known"] is False
         assert all(row["decided_at"] is None for row in history["entries"])
-        assert "Unknown" in (review / "handoff.md").read_text()
+        assert "Unknown" in (review / "handoff.md").read_text(encoding="utf-8")
         print("PASS: retrospective publishes review/handoff/history without inventing missing facts or dates")
 
         before = digest_tree(runs / "record-investigate")
@@ -136,40 +137,41 @@ command = [{python}, {fixture_literal}, "effect"]
         print("PASS: existing runs are preserved and traversal identities are rejected")
 
         run_method("investigate", "explicit-provider", ["--provider", "independent", "--model", "requested-fixture-model"])
-        calls = [json.loads(line) for line in marker.read_text().splitlines()]
+        calls = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
         assert len(calls) == 1 and calls[0]["mode"] == "provider"
         assert calls[0]["params"]["model"] == "requested-fixture-model"
         assert "Motivo method: investigate" in calls[0]["params"]["prompt"]
-        returned = json.loads((runs / "explicit-provider/run.json").read_text())
+        assert "中文证据 — “quoted evidence”" in calls[0]["params"]["prompt"]
+        returned = json.loads((runs / "explicit-provider/run.json").read_text(encoding="utf-8"))
         assert returned["status"] == "responded"
         assert returned["requested_provider"] == "independent"
         assert returned["actual_provider_model"] is None
         assert (runs / "explicit-provider/artifacts/provider-response.md").is_file()
         assert "artifacts/provider-response.md" in returned["artifacts"]
-        assert "Independent evidence" in (runs / "explicit-provider/report.html").read_text()
+        assert "Independent evidence" in (runs / "explicit-provider/report.html").read_text(encoding="utf-8")
         print("PASS: independent investigation calls only the explicit provider once and distinguishes requested/unknown actual model")
 
         run_method("investigate", "unavailable-provider", ["--provider", "missing-provider"], success=False)
         unavailable = runs / "unavailable-provider"
-        unavailable_record = json.loads((unavailable / "run.json").read_text())
+        unavailable_record = json.loads((unavailable / "run.json").read_text(encoding="utf-8"))
         assert unavailable_record["status"] == "needs-check"
         assert "artifacts/provider-error.json" in unavailable_record["artifacts"]
         assert (unavailable / "artifacts/provider-error.json").is_file()
-        assert (unavailable / "artifacts/submitted-notes.md").read_text() == note.read_text()
-        assert len(marker.read_text().splitlines()) == 1
+        assert (unavailable / "artifacts/submitted-notes.md").read_text(encoding="utf-8") == note.read_text(encoding="utf-8")
+        assert len(marker.read_text(encoding="utf-8").splitlines()) == 1
         print("PASS: an unavailable explicit provider preserves the attempt and never falls back or retries")
 
         run_method("probe", "probe-case", ["--timeout-seconds", "7", "--", "fixture-command", "argument with spaces"])
-        probe = json.loads((runs / "probe-case/run.json").read_text())
+        probe = json.loads((runs / "probe-case/run.json").read_text(encoding="utf-8"))
         assert probe["status"] == "experiment-failed"
         assert probe["experiment"]["exit_code"] == 3
         assert "artifacts/experiment.json" in probe["artifacts"]
-        calls = [json.loads(line) for line in marker.read_text().splitlines()]
+        calls = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
         assert [call["mode"] for call in calls] == ["provider", "effect"]
         for timeout in ["0", "601"]:
             run_method("probe", f"invalid-timeout-{timeout}", ["--timeout-seconds", timeout, "--", "fixture-command"], success=False)
         run_method("probe", "invalid-provider", ["--provider", "independent", "--", "fixture-command"], success=False)
-        assert len(marker.read_text().splitlines()) == 2
+        assert len(marker.read_text(encoding="utf-8").splitlines()) == 2
         print("PASS: probe uses perform, preserves negative observations and rejects timeout/provider bypasses before dispatch")
 
         (project / "notes.md").write_text("", encoding="utf-8")
@@ -178,7 +180,7 @@ command = [{python}, {fixture_literal}, "effect"]
         run_method("analyze", "ambiguous-input", success=False)
         (project / "notes.md").write_text("x" * (512 * 1024 + 1), encoding="utf-8")
         run_method("analyze", "oversized-input", success=False)
-        index = (project / ".tactus/motivo/index.html").read_text()
+        index = (project / ".tactus/motivo/index.html").read_text(encoding="utf-8")
         assert "runs/probe-case/report.html" in index
         assert "runs/explicit-provider/report.html" in index
         print("PASS: invalid input does not create runs; generated offline index links actual records")
@@ -199,7 +201,7 @@ command = [{python}, {fixture_literal}, "effect"]
                 "run_id": old_id, "method": "investigate", "title": "Old observation",
                 "started_at": timestamp, "status": "recorded",
                 "agent": "fixture", "model": "not reported",
-            }))
+            }), encoding="utf-8")
         note.write_text("""## Question
 Does the report preserve wrapped reflection answers?
 ## Local reflection
@@ -209,14 +211,14 @@ Does the report preserve wrapped reflection answers?
 - Third answer must remain visible.
 """, encoding="utf-8")
         run_method("investigate", "aaa-current")
-        current_html = (runs / "aaa-current/report.html").read_text()
+        current_html = (runs / "aaa-current/report.html").read_text(encoding="utf-8")
         reflection = current_html.split('<section class="reflection">', 1)[1].split("</section>", 1)[0]
         markers = ["First answer keeps its context.", "Wrapped continuation belongs to that first answer.",
                    "Second answer remains the second observation.", "Third answer must remain visible."]
         positions = [reflection.index(marker) for marker in markers]
         assert positions == sorted(positions)
         assert all(position < reflection.index('class="reflection-prompts"') for position in positions)
-        current_index = (project / ".tactus/motivo/index.html").read_text()
+        current_index = (project / ".tactus/motivo/index.html").read_text(encoding="utf-8")
         assert 'runs/aaa-current/report.html' in current_index
         assert current_index.index('runs/zz-old-0001/report.html') < current_index.index('runs/zz-old-0002/report.html') < current_index.index('runs/zz-old-0000/report.html')
         assert 'runs/zz-old-0003/report.html' not in current_index
