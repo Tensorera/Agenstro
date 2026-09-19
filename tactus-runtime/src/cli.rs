@@ -5,7 +5,7 @@ use std::{
     env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, TryLockError, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -41,10 +41,14 @@ use crate::{
     session::SessionControlFailure,
     studio::{ControlFailure, ControlSuccess},
     workspace::{
-        PluginNamespace, ResolvedPlugin, ScriptInfo, Workspace, WorkspaceError, discover_scripts,
-        doctor, initialize_workspace,
+        PluginDefinition, PluginNamespace, ResolvedPlugin, ScriptInfo, Workspace, WorkspaceError,
+        discover_scripts, doctor, initialize_workspace,
     },
 };
+
+mod invocation;
+
+use invocation::{Invocation, InvocationOrigin, InvocationProcess};
 
 /// Parsed Tactus command line.
 #[derive(Debug, Parser)]
@@ -107,6 +111,13 @@ enum Command {
     },
     /// Print the normalized runtime JSON consumed by Clef.
     RuntimeJson {
+        /// Start path for upward workspace discovery.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Merge typed generic plugin definitions supplied by the persistent driver.
+    #[command(hide = true)]
+    RegisterPlugins {
         /// Start path for upward workspace discovery.
         #[arg(long, default_value = ".")]
         root: PathBuf,
@@ -531,6 +542,7 @@ pub fn run_with(arguments: Arguments) -> Result<i32, CliError> {
         Command::Prompt { root } => prompt(&root),
         Command::Doctor { root, json } => diagnose(&root, json),
         Command::RuntimeJson { root } => runtime_json(&root),
+        Command::RegisterPlugins { root } => register_plugins(&root),
         Command::Check {
             scripts,
             all,
@@ -1103,6 +1115,26 @@ fn session(command: SessionCommand) -> Result<i32, CliError> {
 fn runtime_json(start: &Path) -> Result<i32, CliError> {
     let workspace = Workspace::discover(start)?;
     print_json(&runtime_document(&workspace)?)?;
+    Ok(0)
+}
+
+fn register_plugins(start: &Path) -> Result<i32, CliError> {
+    const MAX_REGISTRATION_BYTES: u64 = 1024 * 1024;
+    let mut input = Vec::new();
+    io::stdin()
+        .lock()
+        .take(MAX_REGISTRATION_BYTES + 1)
+        .read_to_end(&mut input)?;
+    if input.len() as u64 > MAX_REGISTRATION_BYTES {
+        return Err(CliError::InvalidArguments(format!(
+            "plugin registration exceeds {MAX_REGISTRATION_BYTES} bytes"
+        )));
+    }
+    let value =
+        decode_json(&input).map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    let definitions: BTreeMap<String, PluginDefinition> = serde_json::from_value(value)
+        .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    Workspace::discover(start)?.register_plugins(definitions)?;
     Ok(0)
 }
 
@@ -3544,54 +3576,6 @@ struct InvocationControl<'a> {
     cancellation: &'a CancellationToken,
 }
 
-struct SharedJournal {
-    journal: Option<RunJournal>,
-    error: Option<JournalError>,
-}
-
-impl SharedJournal {
-    fn new(journal: RunJournal) -> Self {
-        Self {
-            journal: Some(journal),
-            error: None,
-        }
-    }
-
-    fn record_frame(&mut self, subject: &str, frame: &PluginFrame) {
-        if self.error.is_some() {
-            return;
-        }
-        let Some(journal) = self.journal.as_mut() else {
-            return;
-        };
-        let (kind, data) = diagnostic_frame(frame);
-        if let Err(error) =
-            journal.record_with_presentation(kind, data, presentation_for_frame(subject, frame))
-        {
-            self.error = Some(error);
-        }
-    }
-}
-
-fn take_shared_journal(
-    shared: &Arc<Mutex<SharedJournal>>,
-) -> Result<(RunJournal, Option<JournalError>), CliError> {
-    let mut state = match shared.try_lock() {
-        Ok(state) => state,
-        Err(TryLockError::Poisoned(error)) => error.into_inner(),
-        Err(TryLockError::WouldBlock) => {
-            return Err(CliError::EventSinkStalled(
-                "run journal writer did not return before supervision ended".to_owned(),
-            ));
-        }
-    };
-    let journal = state
-        .journal
-        .take()
-        .ok_or_else(|| CliError::EventSinkStalled("run journal was already taken".to_owned()))?;
-    Ok((journal, state.error.take()))
-}
-
 fn note_journal_degradation(slot: &mut Option<String>, error: impl ToString) {
     append_bounded_diagnostic(slot, &error.to_string());
 }
@@ -3740,125 +3724,37 @@ fn invoke_registered(
         ResolvedPlugin::Provider(_) => "provider",
         ResolvedPlugin::Effect(_) => "effect",
     };
-    let command = definition.command();
-    let executable = command
-        .first()
-        .and_then(|value| Path::new(value).file_name())
-        .map_or_else(|| "<unknown>".into(), |value| value.to_string_lossy());
-    let (mut journal, journal_create_error) = create_journal_preserving_execution(workspace);
-    let run_path = journal.run_path().to_path_buf();
-    let run_id = journal.run_id().to_owned();
-    let started_presentation = Presentation::new(
-        PresentationCategory::State,
-        format!(
-            "{} started.",
-            safe_invocation_subject(registry, name, method)
-        ),
+    let invocation = Invocation::start(
+        workspace,
+        name,
+        registry,
+        method,
+        definition.command(),
+        InvocationOrigin::Cli,
     );
-    let initial_journal_error = if let Some(error) = journal_create_error {
-        Some(error)
-    } else {
-        journal
-            .record_transition(
-                "ready",
-                TransitionTrigger::new(
-                    TriggerKind::Request,
-                    "tactus.cli",
-                    "plugin.invocation_requested",
-                )
-                .with_details(serde_json::json!({
-                    "plugin": name,
-                    "method": method,
-                    "namespace": registry,
-                    "executable": executable,
-                    "argument_count": command.len().saturating_sub(1),
-                })),
-                TransitionGuard::new(
-                    "plugin resolved and request validated",
-                    true,
-                    "The configured plugin and invocation request passed runtime validation.",
-                ),
-                "running",
-                started_presentation.clone(),
-            )
-            .err()
-    };
     if control.console_events {
-        render_presentation(&started_presentation);
+        render_presentation(&invocation.started_presentation);
     }
-    let request = PluginRequest::new(run_id.clone(), method, params)
+    let request = PluginRequest::new(invocation.run_id(), method, params)
         .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
-    let tool_runtime = ToolRuntime::create(workspace)?;
-    let mut spec = ProcessSpec::new(
-        resolve_builtin_command(definition.command())?,
-        &workspace.root,
-    );
-    apply_transport_limits(&mut spec, &config.limits);
-    spec.environment = tool_runtime.environment.clone();
-    spec.environment
-        .insert("TACTUS_WATCH_RUN_ID".to_owned(), run_id.clone());
-    attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
-    spec.limits.deadline =
-        (control.timeout_seconds != 0).then(|| Duration::from_secs(control.timeout_seconds));
-    let mut shared_journal_state = SharedJournal::new(journal);
-    shared_journal_state.error = initial_journal_error;
-    let shared_journal = Arc::new(Mutex::new(shared_journal_state));
-    let callback_journal = Arc::clone(&shared_journal);
     let display_name = name.to_owned();
     let console_events = control.console_events;
-    let invocation =
-        ProcessSupervisor.invoke(&spec, &request, control.cancellation, move |frame| {
-            callback_journal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_frame(&display_name, frame);
+    let completion = invocation.run(
+        InvocationProcess {
+            workspace,
+            definition,
+            limits: &config.limits,
+            timeout_seconds: control.timeout_seconds,
+            cancellation: control.cancellation,
+        },
+        &request,
+        move |frame| {
             if console_events {
                 render_frame(&display_name, frame);
             }
-        });
-    let (mut journal, mut journal_degradation) = match take_shared_journal(&shared_journal) {
-        Ok((journal, error)) => (Some(journal), error.map(|error| error.to_string())),
-        Err(error) => (None, Some(error.to_string())),
-    };
-    let outcome = invocation.unwrap_or_else(|error| process_error_outcome(&error));
-    if let Some(journal) = journal.as_mut()
-        && journal_degradation.is_none()
-    {
-        if let Err(error) = record_outcome_transition(journal, registry, name, method, &outcome) {
-            note_journal_degradation(&mut journal_degradation, error);
-        }
-        if journal_degradation.is_none() && outcome_is_unknown(&outcome) {
-            let warning_message = Presentation::new(
-                PresentationCategory::Warning,
-                format!(
-                    "{registry}:{name} may have completed externally; Tactus did not retry it automatically."
-                ),
-            );
-            if let Err(error) = journal.record_with_presentation(
-                "runtime.outcome_unknown",
-                outcome_unknown_diagnostic_value(registry, name, method, &outcome),
-                Some(warning_message),
-            ) {
-                note_journal_degradation(&mut journal_degradation, error);
-            }
-        }
-    }
-    let journal_was_durable = journal.as_ref().is_some_and(RunJournal::is_durable);
-    let (summary, final_degradation) = match journal.as_mut() {
-        Some(journal) => {
-            finish_journal_preserving_outcome(journal, outcome, journal_degradation.take())
-        }
-        None => {
-            let diagnostic = journal_degradation
-                .as_deref()
-                .unwrap_or("the journal writer was unavailable");
-            (
-                in_memory_degraded_summary(&run_id, outcome, diagnostic),
-                Some(diagnostic.to_owned()),
-            )
-        }
-    };
-    let outcome = &summary.outcome;
+        },
+    )?;
+    let outcome = &completion.report.summary.outcome;
     if control.console_events {
         render_presentation(&outcome_presentation(registry, name, method, outcome));
         if let Some(failure) = known_failure_presentation(registry, name, outcome) {
@@ -3891,15 +3787,10 @@ fn invoke_registered(
             "A diagnostic observer stopped responding; execution results were not changed.",
         ));
     }
-    if let Some(diagnostic) = final_degradation.as_deref() {
+    if let Some(diagnostic) = completion.journal_degradation.as_deref() {
         render_journal_degradation(diagnostic);
     }
-    Ok(InvocationReport {
-        name: name.to_owned(),
-        run_path,
-        summary,
-        persisted: journal_was_durable && final_degradation.is_none(),
-    })
+    Ok(completion.report)
 }
 
 fn inject_registered_params(
@@ -4093,84 +3984,42 @@ fn dispatch(
         &request.method,
         &mut request.params,
     )?;
-    let (mut journal, journal_create_error) = create_journal_preserving_execution(&workspace);
     let namespace_name = format!("{namespace:?}").to_lowercase();
-    let parent_run_id = env::var("TACTUS_RUN_ID").ok();
-    let initial_journal_error = if let Some(error) = journal_create_error {
-        Some(error)
-    } else {
-        journal
-            .record_transition(
-                "ready",
-                TransitionTrigger::new(
-                    TriggerKind::Request,
-                    "tactus.dispatch",
-                    "plugin.dispatch_requested",
-                )
-                .with_details(serde_json::json!({
-                    "plugin": name,
-                    "namespace": namespace_name,
-                    "method": request.method,
-                    "parent_run_id":parent_run_id,
-                })),
-                TransitionGuard::new(
-                    "dispatch request and plugin registry entry validated",
-                    true,
-                    "The request belongs to a configured plugin and passed protocol validation.",
-                ),
-                "running",
-                Presentation::new(
-                    PresentationCategory::State,
-                    format!(
-                        "{} started.",
-                        safe_invocation_subject(&namespace_name, name, &request.method)
-                    ),
-                ),
-            )
-            .err()
-    };
-    let tool_runtime = ToolRuntime::create(&workspace)?;
-    let mut spec = ProcessSpec::new(
-        resolve_builtin_command(definition.command())?,
-        &workspace.root,
+    let invocation = Invocation::start(
+        &workspace,
+        name,
+        &namespace_name,
+        &request.method,
+        definition.command(),
+        InvocationOrigin::Dispatch,
     );
-    apply_transport_limits(&mut spec, &config.limits);
-    spec.environment = tool_runtime.environment.clone();
-    spec.environment.insert(
-        "TACTUS_WATCH_RUN_ID".to_owned(),
-        journal.run_id().to_owned(),
-    );
-    attach_builtin_provider_to_supervised_group(&mut spec, definition.command());
-    spec.limits.deadline = (timeout_seconds != 0).then(|| Duration::from_secs(timeout_seconds));
-
     let cancel_on_write = cancellation.clone();
     let callback_error = Arc::new(Mutex::new(None::<String>));
     let callback_error_sink = Arc::clone(&callback_error);
-    let mut shared_journal_state = SharedJournal::new(journal);
-    shared_journal_state.error = initial_journal_error;
-    let shared_journal = Arc::new(Mutex::new(shared_journal_state));
-    let callback_journal = Arc::clone(&shared_journal);
-    let display_name = name.to_owned();
-    let invocation = ProcessSupervisor.invoke(&spec, &request, &cancellation, move |frame| {
-        {
-            let mut journal = callback_journal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            journal.record_frame(&display_name, frame);
-        }
-        if matches!(frame, PluginFrame::Event { .. }) {
-            let stdout = io::stdout();
-            let mut stdout = stdout.lock();
-            if let Err(error) = write_frame(&mut stdout, frame) {
-                *callback_error_sink
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(format!("cannot forward plugin event: {error}"));
-                cancel_on_write.cancel();
+    let completion = invocation.run(
+        InvocationProcess {
+            workspace: &workspace,
+            definition,
+            limits: &config.limits,
+            timeout_seconds,
+            cancellation: &cancellation,
+        },
+        &request,
+        move |frame| {
+            if matches!(frame, PluginFrame::Event { .. }) {
+                let stdout = io::stdout();
+                let mut stdout = stdout.lock();
+                if let Err(error) = write_frame(&mut stdout, frame) {
+                    *callback_error_sink
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(format!("cannot forward plugin event: {error}"));
+                    cancel_on_write.cancel();
+                }
             }
-        }
-    });
-    let outcome = invocation.unwrap_or_else(|error| process_error_outcome(&error));
+        },
+    )?;
+    let outcome = &completion.report.summary.outcome;
     if !outcome.stderr.is_empty() {
         render_presentation(&Presentation::new(
             PresentationCategory::Warning,
@@ -4185,47 +4034,7 @@ fn dispatch(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    let (mut journal, mut journal_degradation) = match take_shared_journal(&shared_journal) {
-        Ok((journal, error)) => (Some(journal), error.map(|error| error.to_string())),
-        Err(error) => (None, Some(error.to_string())),
-    };
-    if let Some(journal) = journal.as_mut()
-        && journal_degradation.is_none()
-    {
-        let transition_result =
-            record_outcome_transition(journal, &namespace_name, name, &request.method, &outcome);
-        if let Err(error) = transition_result {
-            note_journal_degradation(&mut journal_degradation, error);
-        }
-        if journal_degradation.is_none()
-            && outcome_is_unknown(&outcome)
-            && let Err(error) = journal.record_with_presentation(
-                "runtime.outcome_unknown",
-                outcome_unknown_diagnostic_value(&namespace_name, name, &request.method, &outcome),
-                Some(Presentation::new(
-                    PresentationCategory::Warning,
-                    format!(
-                        "{} may have completed externally; Tactus did not retry it automatically.",
-                        safe_presentation_identifier(name)
-                    ),
-                )),
-            )
-        {
-            note_journal_degradation(&mut journal_degradation, error);
-        }
-    }
-    let final_degradation = match journal.as_mut() {
-        Some(journal) => {
-            let (_, degradation) = finish_journal_preserving_outcome(
-                journal,
-                outcome.clone(),
-                journal_degradation.take(),
-            );
-            degradation
-        }
-        None => journal_degradation.take(),
-    };
-    if let Some(diagnostic) = final_degradation.as_deref() {
+    if let Some(diagnostic) = completion.journal_degradation.as_deref() {
         render_journal_degradation(diagnostic);
     }
     let dispatch_succeeded = callback_error.is_none() && outcome.kind == InvocationKind::Succeeded;
@@ -5344,97 +5153,6 @@ mod tests {
         );
         assert_eq!(validate_entry_order("999"), Ok(999));
         assert!(validate_entry_order("1000").is_err());
-    }
-
-    #[test]
-    fn journal_callback_failure_preserves_known_terminal_outcomes() {
-        let outcomes = [
-            ProcessOutcome {
-                kind: InvocationKind::Succeeded,
-                exit_code: Some(0),
-                terminal: Some(TerminalResult::Success {
-                    value: serde_json::json!({"result":"known success"}),
-                }),
-                frames_seen: 1,
-                events_dropped: 0,
-                observation_error: None,
-                stderr: String::new(),
-                stderr_truncated: false,
-                error: None,
-                elapsed_ms: 1,
-                progress: None,
-            },
-            ProcessOutcome {
-                kind: InvocationKind::PluginFailed,
-                exit_code: Some(1),
-                terminal: Some(TerminalResult::Failure {
-                    error: PluginFailure {
-                        code: "domain_failure".to_owned(),
-                        message: "known failure".to_owned(),
-                        details: Some(serde_json::json!({"stage":"fixture"})),
-                    },
-                }),
-                frames_seen: 1,
-                events_dropped: 0,
-                observation_error: None,
-                stderr: String::new(),
-                stderr_truncated: false,
-                error: None,
-                elapsed_ms: 1,
-                progress: None,
-            },
-        ];
-
-        for expected in outcomes {
-            let temporary = tempdir().expect("temporary directory");
-            let workspace = Workspace::at(temporary.path());
-            let journal = RunJournal::create(&workspace).expect("journal");
-            let mut shared_state = SharedJournal::new(journal);
-            shared_state.error = Some(JournalError::Io(io::Error::other(
-                "injected callback writer failure",
-            )));
-            let shared = Arc::new(Mutex::new(shared_state));
-            let (mut journal, callback_error) = take_shared_journal(&shared).expect("take journal");
-            let (summary, degradation) = finish_journal_preserving_outcome(
-                &mut journal,
-                expected.clone(),
-                callback_error.map(|error| error.to_string()),
-            );
-
-            assert_eq!(summary.outcome.kind, expected.kind);
-            assert_eq!(summary.outcome.terminal, expected.terminal);
-            assert!(
-                summary
-                    .outcome
-                    .observation_error
-                    .as_deref()
-                    .is_some_and(|message| message.contains("injected callback writer failure"))
-            );
-            assert!(
-                degradation
-                    .as_deref()
-                    .is_some_and(|message| message.contains("injected callback writer failure"))
-            );
-            let durable: RunSummary = serde_json::from_slice(
-                &fs::read(journal.summary_path()).expect("degraded summary"),
-            )
-            .expect("summary JSON");
-            assert_eq!(durable.outcome.kind, expected.kind);
-            assert_eq!(
-                durable
-                    .outcome
-                    .terminal
-                    .as_ref()
-                    .map(|terminal| match terminal {
-                        TerminalResult::Success { .. } => "success",
-                        TerminalResult::Failure { .. } => "failure",
-                    }),
-                expected.terminal.as_ref().map(|terminal| match terminal {
-                    TerminalResult::Success { .. } => "success",
-                    TerminalResult::Failure { .. } => "failure",
-                })
-            );
-        }
     }
 
     #[test]

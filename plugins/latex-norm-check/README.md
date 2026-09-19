@@ -23,7 +23,8 @@ a valid but unusually expensive pattern is conservatively reported as
 
 The checker accepts at most 512 KiB of UTF-8 source and 4 KiB per UTF-8
 pattern. A bound needs at least one non-null endpoint. Every `Consistency`
-group needs at least two distinct, non-empty patterns. The complete plugin
+group needs at least two distinct, non-empty patterns; repeated candidates are
+removed during validation so one spelling cannot count as multiple variants. The complete plugin
 request is capped at 1 MiB. These limits match Clef's norm-v1 validation and
 leave room for catalogue metadata inside the generic transport envelope.
 

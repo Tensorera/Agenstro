@@ -1,0 +1,26 @@
+{
+  "name": "360-consistency-partial-duplicate-is-normalized",
+  "request": {
+    "api": "agenstro.plugin/v1",
+    "id": "r36",
+    "method": "check",
+    "params": {
+      "artifact": "article.tex",
+      "source": "colour",
+      "norms": [
+        {
+          "id": "consistency-partial-duplicate",
+          "statement": "Use one spelling convention.",
+          "severity": "Style",
+          "spec": {"kind": "Consistency", "specGroups": [["colour", "colour", "color"]]}
+        }
+      ]
+    }
+  },
+  "expect": {
+    "ok": true,
+    "violationNorms": [],
+    "checked": ["consistency-partial-duplicate"],
+    "unchecked": []
+  }
+}

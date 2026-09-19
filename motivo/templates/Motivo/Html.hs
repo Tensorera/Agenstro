@@ -5,6 +5,7 @@ module Motivo.Html (escapeHtml, renderMarkdown, tag, renderPage) where
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Motivo.Markdown (MarkdownBlock (..), markdownBlocks)
 
 escapeHtml :: Text -> Text
 escapeHtml = Text.concatMap escape
@@ -22,13 +23,12 @@ tag name body = "<" <> name <> ">" <> body <> "</" <> name <> ">"
 -- | Do not turn arbitrary source text into URLs, attributes, HTML or scripts.
 -- Generated report/artifact links are constructed separately from safe tokens.
 renderMarkdown :: Text -> Text
-renderMarkdown = Text.concat . renderLines . Text.lines
+renderMarkdown = Text.concat . concatMap renderBlock . markdownBlocks
   where
+    renderBlock (OrdinaryLines lines') = renderLines lines'
+    renderBlock (FencedCode _ code _) = [tag "pre" (tag "code" (escapeHtml (Text.unlines code)))]
     renderLines [] = []
     renderLines (line : rest)
-      | "```" `Text.isPrefixOf` line =
-          let (code, remaining) = break (Text.isPrefixOf "```") rest
-          in tag "pre" (tag "code" (escapeHtml (Text.unlines code))) : renderLines (drop 1 remaining)
       | Text.null (Text.strip line) = renderLines rest
       | "### " `Text.isPrefixOf` line = tag "h3" (escapeHtml (Text.drop 4 line)) : renderLines rest
       | "## " `Text.isPrefixOf` line = tag "h2" (escapeHtml (Text.drop 3 line)) : renderLines rest

@@ -400,13 +400,15 @@ enum Decision {
 
 fn parse_decision(value: Value) -> Result<Decision, String> {
     let value = match value {
-        Value::String(text) => serde_json::from_str(&text).map_err(|error| error.to_string())?,
+        Value::String(text) => crate::protocol::decode_json(text.as_bytes())
+            .map_err(|error| format!("invalid daemon decision: {error}"))?,
         Value::Object(ref object) if !object.contains_key("action") => {
             let text = object
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or("provider response has no JSON decision or text")?;
-            serde_json::from_str(text).map_err(|error| error.to_string())?
+            crate::protocol::decode_json(text.as_bytes())
+                .map_err(|error| format!("invalid daemon decision: {error}"))?
         }
         value => value,
     };
@@ -679,6 +681,31 @@ mod tests {
                 &CancellationToken::new()
             ));
             assert_eq!(fs::read_to_string(script).unwrap(), "main = broken\n");
+        }
+    }
+
+    #[test]
+    fn duplicate_decision_fields_never_authorize_a_repair() {
+        for decision in [
+            r#"{"action":"escalate","action":"repair","summary":"fix name","old":"broken","new":"pure ()"}"#,
+            r#"{"action":"repair","summary":"fix name","old":"absent","old":"broken","new":"pure ()"}"#,
+            r#"{"action":"repair","summary":"fix name","old":"broken","new":"broken","new":"pure ()"}"#,
+        ] {
+            for response in [json!(decision), json!({"text":decision})] {
+                let call: ProviderCall = Arc::new(move |_, _| Ok(response.clone()));
+                let (_directory, script, daemon) =
+                    fixture(vec![PathBuf::from(".tactus/scripts/010_work.hs")], call);
+                assert!(!daemon.repair_after_failure(
+                    &script,
+                    Path::new("absent"),
+                    &failure(),
+                    false,
+                    0,
+                    "",
+                    &CancellationToken::new()
+                ));
+                assert_eq!(fs::read_to_string(script).unwrap(), "main = broken\n");
+            }
         }
     }
 

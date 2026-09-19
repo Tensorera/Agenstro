@@ -46,6 +46,53 @@ fn initialized_project() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn plugin_registration_cli_accepts_typed_json_and_rejects_ambiguous_input() {
+    let (_temporary, project) = initialized_project();
+    let config_path = project.join(".tactus/tactus.toml");
+    let invoke = |input: &[u8]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tactus"))
+            .args(["register-plugins", "--root"])
+            .arg(&project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("register-plugins CLI");
+        // An oversized request may be rejected before the entire input is read.
+        let result = command.stdin.take().unwrap().write_all(input);
+        if let Err(error) = result {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        command.wait_with_output().expect("registration result")
+    };
+    let output = invoke(br#"{"review.fixture":{"command":["fixture","argument with spaces"],"options":{"nested":{"enabled":true}}}}"#);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let config = Workspace::open(&project).unwrap().load_config().unwrap();
+    assert_eq!(
+        config.plugins["review.fixture"].command,
+        ["fixture", "argument with spaces"]
+    );
+    assert_eq!(
+        config.plugins["review.fixture"].options["nested"]["enabled"],
+        true
+    );
+    let expected = fs::read(&config_path).expect("registered config");
+    for invalid in [
+        br#"{"duplicate":{"command":["first"],"command":["second"]}}"#.to_vec(),
+        br#"{"duplicate":{"command":["first"]},"duplicate":{"command":["second"]}}"#.to_vec(),
+        br#"{"invalid":{"command":["fixture"],"unexpected":true}}"#.to_vec(),
+        b"[]".to_vec(),
+        vec![b' '; 1024 * 1024 + 1],
+    ] {
+        let output = invoke(&invalid);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(fs::read(&config_path).unwrap(), expected);
+    }
+}
+
+#[test]
 fn initialization_preserves_existing_agent_instructions_and_source_customizations() {
     let (temporary, project) = initialized_project();
     let personalized = [
@@ -1004,6 +1051,105 @@ fn dispatch_maps_generic_method_transport_failure_to_one_outcome_unknown() {
             );
         }
         frame => panic!("unexpected frame {frame:?}"),
+    }
+}
+
+#[test]
+fn plugin_call_and_dispatch_share_terminal_and_journal_semantics() {
+    for mode in ["success", "reported-failure"] {
+        for dispatch in [false, true] {
+            let (_temporary, project) = initialized_project();
+            let config_path = project.join(".tactus/tactus.toml");
+            let executable = serde_json::to_string(env!("CARGO_BIN_EXE_tactus-plugin-fixture"))
+                .expect("quote executable");
+            let config = fs::read_to_string(&config_path).expect("config");
+            fs::write(
+                &config_path,
+                format!("{config}\nshared = {{ command = [{executable}, {mode:?}] }}\n"),
+            )
+            .expect("fake plugin");
+            let mut command = Command::new(env!("CARGO_BIN_EXE_tactus"));
+            if dispatch {
+                command.args(["dispatch", "--name", "shared"]);
+            } else {
+                command.args(["plugin-call", "shared", "inspect", "--json"]);
+            }
+            let mut child = command
+                .args(["--namespace", "plugin", "--root"])
+                .arg(&project)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("invoke fake plugin");
+            if dispatch {
+                let request = PluginRequest::new("caller-id", "inspect", Map::new()).unwrap();
+                serde_json::to_writer(child.stdin.as_mut().unwrap(), &request).unwrap();
+            }
+            drop(child.stdin.take());
+            let output = child.wait_with_output().expect("invocation output");
+            let succeeded = mode == "success";
+            assert_eq!(output.status.success(), succeeded);
+            let run = fs::read_dir(project.join(".tactus/runs"))
+                .unwrap()
+                .next()
+                .expect("one invocation journal")
+                .unwrap()
+                .path();
+            let summary: Value =
+                serde_json::from_slice(&fs::read(run.join("summary.json")).unwrap()).unwrap();
+            assert_eq!(
+                summary["outcome"]["kind"],
+                if succeeded {
+                    "succeeded"
+                } else {
+                    "plugin_failed"
+                }
+            );
+            if dispatch {
+                let frames: Vec<Value> = output
+                    .stdout
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .map(|line| serde_json::from_slice(line).unwrap())
+                    .collect();
+                assert!(frames.iter().all(|frame| frame["id"] == "caller-id"));
+                assert_eq!(
+                    frames
+                        .iter()
+                        .filter(|frame| frame["type"] == "result")
+                        .count(),
+                    1
+                );
+                assert_eq!(frames.last().unwrap()["ok"], succeeded);
+            } else {
+                let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["persisted"], true);
+                assert_eq!(
+                    report["summary"]["outcome"]["kind"],
+                    summary["outcome"]["kind"]
+                );
+            }
+            let events = fs::read_to_string(run.join("events.jsonl")).unwrap();
+            let transitions: Vec<Value> = events
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|event| event["kind"] == "runtime.state_transition")
+                .collect();
+            assert_eq!(transitions.len(), 2);
+            assert_eq!(
+                transitions[0]["data"]["trigger"]["source"],
+                if dispatch {
+                    "tactus.dispatch"
+                } else {
+                    "tactus.cli"
+                }
+            );
+            assert_eq!(
+                transitions[1]["data"]["state_after"],
+                if succeeded { "succeeded" } else { "failed" }
+            );
+        }
     }
 }
 

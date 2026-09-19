@@ -241,7 +241,8 @@ def validate_bound(value: Any) -> dict[str, Any]:
     return value
 
 
-def validate_check_spec(spec: dict[str, Any], kind: str) -> None:
+def validate_check_spec(spec: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Return a validated spec with repeated consistency candidates removed."""
     if kind in ("Existence", "Absence", "Occurrence"):
         validate_pattern(spec.get("specPattern"))
     if kind in ("Existence", "Absence"):
@@ -256,18 +257,22 @@ def validate_check_spec(spec: dict[str, Any], kind: str) -> None:
         groups = spec.get("specGroups")
         if not isinstance(groups, list) or not groups:
             raise TypeError("specGroups must be an array of string arrays")
+        normalized_groups = []
         for index, group in enumerate(groups):
             if not isinstance(group, list) or len(group) < 2:
                 raise TypeError(f"specGroups[{index}] must contain at least two distinct patterns")
-            patterns = [validate_pattern(item) for item in group]
-            if len(set(patterns)) < 2:
+            patterns = list(dict.fromkeys(validate_pattern(item) for item in group))
+            if len(patterns) < 2:
                 raise TypeError(f"specGroups[{index}] must contain at least two distinct patterns")
+            normalized_groups.append(patterns)
+        spec = {**spec, "specGroups": normalized_groups}
     elif kind == "Metric":
         if not isinstance(spec.get("specMetric"), str):
             raise TypeError("specMetric must be a string")
         if "specBound" not in spec:
             raise TypeError("Metric requires specBound")
         validate_bound(spec["specBound"])
+    return spec
 
 
 def check_absence(
@@ -506,8 +511,8 @@ def method_check(request_id: str | int, params: dict[str, Any]) -> None:
             unchecked.append(identity)
             continue
         try:
-            validate_check_spec(spec, kind)
-            found = list(checker(norm, spec, text, artifact))
+            validated_spec = validate_check_spec(spec, kind)
+            found = list(checker(norm, validated_spec, text, artifact))
         except (KeyError, TypeError, re.error, UnsupportedCheck) as error:
             unchecked.append(identity)
             event(

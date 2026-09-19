@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -82,6 +82,10 @@ const MOTIVO_TEMPLATES: &[(&str, &str)] = &[
     (
         "Motivo/Html.hs",
         include_str!("../../motivo/templates/Motivo/Html.hs"),
+    ),
+    (
+        "Motivo/Markdown.hs",
+        include_str!("../../motivo/templates/Motivo/Markdown.hs"),
     ),
 ];
 
@@ -399,6 +403,72 @@ impl Workspace {
         let config: RuntimeConfig = raw.try_into().map_err(WorkspaceError::Toml)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Install missing generic plugins without replacing any existing entry.
+    /// Ordinary table configurations keep their comments and formatting. Inline
+    /// tables cannot be extended by TOML headers, so those are reserialized.
+    pub fn register_plugins(
+        &self,
+        definitions: BTreeMap<String, PluginDefinition>,
+    ) -> Result<(), WorkspaceError> {
+        let existing = fs::read_to_string(&self.config_path).map_err(WorkspaceError::Io)?;
+        let mut document: toml::Table = toml::from_str(&existing).map_err(WorkspaceError::Toml)?;
+        let mut config: RuntimeConfig = toml::from_str(&existing).map_err(WorkspaceError::Toml)?;
+        validate_json_domain(&toml::Value::Table(document.clone()), "config")?;
+        config.validate()?;
+        let missing: BTreeMap<_, _> = definitions
+            .into_iter()
+            .filter(|(name, _)| !config.plugins.contains_key(name))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        config.plugins.extend(missing.clone());
+        config.validate()?;
+
+        let additions = toml::Table::from_iter([(
+            "plugins".to_owned(),
+            toml::Value::try_from(&missing).map_err(WorkspaceError::TomlEncode)?,
+        )]);
+        let appended = format!(
+            "{existing}\n{}",
+            toml::to_string(&additions).map_err(WorkspaceError::TomlEncode)?
+        );
+        let plugins = document
+            .entry("plugins")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| WorkspaceError::InvalidConfig("plugins must be a table".to_owned()))?;
+        for (name, definition) in missing {
+            plugins.insert(
+                name,
+                toml::Value::try_from(definition).map_err(WorkspaceError::TomlEncode)?,
+            );
+        }
+        let updated = match toml::from_str::<toml::Table>(&appended) {
+            Ok(parsed) if parsed == document => appended,
+            _ => toml::to_string(&document).map_err(WorkspaceError::TomlEncode)?,
+        };
+        validate_json_domain(&toml::Value::Table(document), "config")?;
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(&self.control).map_err(WorkspaceError::Io)?;
+        temporary
+            .write_all(updated.as_bytes())
+            .map_err(WorkspaceError::Io)?;
+        temporary
+            .as_file()
+            .set_permissions(
+                fs::metadata(&self.config_path)
+                    .map_err(WorkspaceError::Io)?
+                    .permissions(),
+            )
+            .map_err(WorkspaceError::Io)?;
+        temporary.as_file().sync_all().map_err(WorkspaceError::Io)?;
+        temporary
+            .persist(&self.config_path)
+            .map_err(|error| WorkspaceError::Io(error.error))?;
+        Ok(())
     }
 
     /// Resolve and read the UTF-8 generation prompt.
@@ -1311,6 +1381,9 @@ pub enum WorkspaceError {
     /// TOML syntax or shape was invalid.
     #[error("invalid Tactus TOML: {0}")]
     Toml(#[source] toml::de::Error),
+    /// A validated configuration could not be encoded for atomic publication.
+    #[error("cannot encode Tactus TOML: {0}")]
+    TomlEncode(#[source] toml::ser::Error),
     /// A validated config value could not be normalized into runtime JSON.
     #[error("cannot encode runtime JSON: {0}")]
     Json(#[source] serde_json::Error),
@@ -1341,6 +1414,100 @@ mod tests {
         config.validate().expect("valid config");
         assert!(config.plugins.is_empty());
         assert_eq!(config.providers.len(), 4);
+    }
+
+    #[test]
+    fn plugin_registration_uses_toml_keys_and_preserves_existing_definitions() {
+        for custom in [
+            "# Example: \"time.interval\"\n",
+            "[plugins]\n# Example: \"time.interval\"\n",
+            "[plugins.'time.interval']\ncommand = ['custom', 'interval']\noptions = { token = 'keep-me' }\n",
+            "[plugins]\n\"time.interval\" = { command = ['custom', 'interval'], options = { token = 'keep-me' } }\n",
+        ] {
+            let temporary = tempfile::tempdir().expect("workspace");
+            let workspace = Workspace::at(temporary.path());
+            fs::create_dir_all(&workspace.control).expect("control directory");
+            let original = format!("{}\n{custom}", DEFAULT_CONFIG.replace("[plugins]\n", ""));
+            fs::write(&workspace.config_path, &original).expect("config");
+            let definitions = BTreeMap::from([
+                (
+                    "time.interval".to_owned(),
+                    PluginDefinition {
+                        command: vec!["segno".to_owned(), "interval".to_owned()],
+                        options: BTreeMap::new(),
+                    },
+                ),
+                (
+                    "time.cron".to_owned(),
+                    PluginDefinition {
+                        command: vec!["segno".to_owned(), "cron".to_owned()],
+                        options: BTreeMap::new(),
+                    },
+                ),
+            ]);
+            workspace
+                .register_plugins(definitions.clone())
+                .expect("register plugins");
+            let config = workspace.load_config().expect("valid merged config");
+            assert_eq!(config.plugins.len(), 2);
+            if custom.contains("custom") {
+                assert_eq!(
+                    config.plugins["time.interval"].command,
+                    ["custom", "interval"]
+                );
+                assert_eq!(config.plugins["time.interval"].options["token"], "keep-me");
+            }
+            let updated = fs::read_to_string(&workspace.config_path).expect("updated config");
+            assert!(
+                updated.starts_with(&original),
+                "ordinary TOML must retain its original text"
+            );
+            workspace
+                .register_plugins(definitions)
+                .expect("idempotent registration");
+            assert_eq!(fs::read_to_string(&workspace.config_path).unwrap(), updated);
+        }
+    }
+
+    #[test]
+    fn plugin_registration_supports_inline_registries_and_rejects_invalid_additions() {
+        let temporary = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::at(temporary.path());
+        fs::create_dir_all(&workspace.control).expect("control directory");
+        let original = format!(
+            "plugins = {{ 'custom.plugin' = {{ command = ['custom'], options = {{ nested = {{ answer = 42 }} }} }} }}\n{}",
+            DEFAULT_CONFIG.replace("[plugins]\n", "")
+        );
+        fs::write(&workspace.config_path, &original).expect("config");
+        let before = workspace.load_config().expect("initial config");
+        workspace
+            .register_plugins(BTreeMap::from([(
+                "time.interval".to_owned(),
+                PluginDefinition {
+                    command: vec!["segno".to_owned(), "interval".to_owned()],
+                    options: BTreeMap::new(),
+                },
+            )]))
+            .expect("inline registry merge");
+        let after = workspace.load_config().expect("merged config");
+        assert_eq!(
+            after.plugins["custom.plugin"],
+            before.plugins["custom.plugin"]
+        );
+        assert_eq!(after.providers, before.providers);
+        let updated = fs::read_to_string(&workspace.config_path).unwrap();
+        assert!(
+            workspace
+                .register_plugins(BTreeMap::from([(
+                    "invalid".to_owned(),
+                    PluginDefinition {
+                        command: Vec::new(),
+                        options: BTreeMap::new(),
+                    }
+                )]))
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&workspace.config_path).unwrap(), updated);
     }
 
     #[test]

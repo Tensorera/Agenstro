@@ -40,7 +40,7 @@ import Control.Exception
     throwIO,
     try,
   )
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -76,6 +76,7 @@ import Data.Time
   )
 import qualified Clef.Plugin.Protocol as ClefProtocol
 import qualified Crypto.Hash.SHA256 as SHA256
+import Segno.Internal.Exception (trySynchronous)
 import Segno.Lifecycle
   ( ClaimedOccurrence (..)
   )
@@ -88,6 +89,13 @@ import Segno.Protocol
     PollResult (..),
     SourceManifest (..),
     StateCasResult (..),
+    StateCasRequest (..),
+    stateCasParams,
+    OperationId (..),
+    OccurrenceId (..),
+    FencingContext (..),
+    FencingToken (..),
+    FencingEpoch (..),
     StateManifest (..),
     StateSnapshot (..),
     TaskManifest (..),
@@ -369,7 +377,7 @@ pollJob environment paths now job = mconcat <$> mapM pollIsolated (manifestSourc
     taskIdentity = manifestTask manifest
 
     pollIsolated source = do
-      outcome <- try (pollSource source)
+      outcome <- trySynchronous (pollSource source)
       case outcome of
         Left (exception :: SomeException) -> do
           hPutStrLn stderr ("segno: trigger " <> Text.unpack taskIdentity <> "/" <> Text.unpack (sourceId source) <> " failed: " <> displayException exception)
@@ -462,7 +470,26 @@ drainRunnable environment paths jobs = go mempty
           go (summary <> result)
 
 executeClaimed :: DriverEnvironment -> SegnoPaths -> InstalledJob -> ClaimedOccurrence -> IO RunSummary
-executeClaimed environment paths job claimed = do
+executeClaimed environment paths job claimed =
+  executeClaimedAction environment paths job claimed `onException` do
+    -- Preserve cancellation after recording the ambiguous attempt; it must not
+    -- be turned into a normal summary that allows the driver to keep draining.
+    -- Cleanup is best effort: a failed clock/store cannot replace the original
+    -- exception. Lease recovery will mark any still-running attempt unknown.
+    cleanup <- trySynchronous $ do
+      now <- clockNow (driverClock environment)
+      void $ markOccurrenceUnknown paths
+        (occurrenceId (claimedOccurrence claimed))
+        (claimedFencingToken claimed)
+        "task execution interrupted; inspect external effects before retrying"
+        now
+    case cleanup of
+      Right () -> pure ()
+      Left exception -> void . trySynchronous $
+        hPutStrLn stderr ("segno: interrupted task cleanup failed: " <> displayException exception)
+
+executeClaimedAction :: DriverEnvironment -> SegnoPaths -> InstalledJob -> ClaimedOccurrence -> IO RunSummary
+executeClaimedAction environment paths job claimed = do
   startedAt <- clockNow (driverClock environment)
   snapshotResult <- loadState environment paths (manifestState manifest)
   case snapshotResult of
@@ -480,7 +507,7 @@ executeClaimed environment paths job claimed = do
               }
       atomicWriteJson invocationPath invocation
       outcome <-
-        try $
+        trySynchronous $
           runnerTask
             (driverRunner environment)
             (pathsRoot paths)
@@ -505,7 +532,7 @@ executeClaimed environment paths job claimed = do
           if not resultExists
             then unknown "workflow exited successfully without atomically publishing SEGNO_RESULT_PATH" finishedAt
             else do
-              decoded <- try (readJsonFile resultPath)
+              decoded <- trySynchronous (readJsonFile resultPath)
               case decoded of
                 Left (exception :: SomeException) -> unknown (Text.pack (displayException exception)) finishedAt
                 Right taskResult
@@ -591,20 +618,21 @@ applyTransition environment paths manifest claimed label (SetTransition expected
           <> Text.pack (show (claimedAttempt claimed))
           <> ":"
           <> label
-      params =
-        KeyMap.fromList
-          [ "workspace" .= pathsRoot paths,
-            "state_key" .= stateKey (manifestState manifest),
-            "expected_revision" .= expected,
-            "schema_version" .= schemaVersion,
-            "value" .= value,
-            "conflict" .= ("compare-and-set" :: Text),
-            "operation_id" .= operationIdentity,
-            "occurrence_id" .= occurrenceId (claimedOccurrence claimed),
-            "fencing_token" .= claimedFencingToken claimed,
-            "fencing_epoch" .= claimedAttempt claimed
-          ]
-  responseResult <- try (runnerPlugin (driverRunner environment) (pathsRoot paths) backend "compare-and-set" params)
+      request =
+        StateCasRequest
+          { casStateKey = stateKey (manifestState manifest),
+            casExpectedRevision = expected,
+            casSchemaVersion = schemaVersion,
+            casValue = value,
+            casOperationId = OperationId operationIdentity,
+            casFencing = FencingContext
+              { fenceOccurrenceId = OccurrenceId (occurrenceId (claimedOccurrence claimed)),
+                fenceToken = FencingToken (claimedFencingToken claimed),
+                fenceEpoch = FencingEpoch (claimedAttempt claimed)
+              }
+          }
+      params = KeyMap.insert "workspace" (toJSON (pathsRoot paths)) (stateCasParams request)
+  responseResult <- trySynchronous (runnerPlugin (driverRunner environment) (pathsRoot paths) backend "compare-and-set" params)
   pure $ case responseResult of
     Left (exception :: SomeException) -> TransitionUncertain ("state transition transport outcome is unknown: " <> Text.pack (displayException exception))
     Right (Left failure) -> TransitionUncertain ("state transition outcome is unknown: " <> pluginFailureCode failure <> ": " <> pluginFailureMessage failure)
@@ -622,7 +650,7 @@ loadState environment paths manifest = do
             "schema_version" .= stateSchemaVersion manifest,
             "initial" .= stateInitial manifest
           ]
-  responseResult <- try (runnerPlugin (driverRunner environment) (pathsRoot paths) (stateBackend manifest) "load" params)
+  responseResult <- trySynchronous (runnerPlugin (driverRunner environment) (pathsRoot paths) (stateBackend manifest) "load" params)
   pure $ case responseResult of
     Left (exception :: SomeException) -> Left (PluginFailure "state_transport_failed" (Text.pack (displayException exception)) Nothing)
     Right response -> response >>= \responseValue -> case parseEither parseJSON responseValue of
@@ -633,7 +661,7 @@ loadState environment paths manifest = do
 
 callPluginOrThrow :: DriverEnvironment -> SegnoPaths -> Text -> Text -> Object -> IO Value
 callPluginOrThrow environment paths pluginName method params = do
-  responseResult <- try (runnerPlugin (driverRunner environment) (pathsRoot paths) pluginName method params)
+  responseResult <- trySynchronous (runnerPlugin (driverRunner environment) (pathsRoot paths) pluginName method params)
   case responseResult of
     Left (exception :: SomeException) -> throwIO (DriverProtocolError (pluginName <> "/" <> method <> " transport failed: " <> Text.pack (displayException exception)))
     Right (Left failure) -> throwIO (DriverProtocolError (pluginName <> "/" <> method <> ": " <> pluginFailureMessage failure))
@@ -788,23 +816,19 @@ hexDigest = Text.pack . concatMap encodeByte . ByteString.unpack
 
 registerBuiltinPlugins :: FilePath -> IO ()
 registerBuiltinPlugins root = do
-  let configPath = root </> ".tactus" </> "tactus.toml"
-  existing <- TextIO.readFile configPath
   executable <- canonicalizePath =<< getExecutablePath
-  let definition name arguments =
-        "[plugins.\""
-          <> name
-          <> "\"]\ncommand = "
-          <> encodeCompactStringArray (Text.pack executable : arguments)
-          <> "\n"
-      definitions =
-        [ ("time.interval", definition "time.interval" ["time-plugin", "interval"]),
-          ("time.cron", definition "time.cron" ["time-plugin", "cron"]),
-          ("segno.state", definition "segno.state" ["state-plugin"]),
-          ("system.active-window", definition "system.active-window" ["active-window-plugin"])
+  let definition arguments = object ["command" .= (Text.pack executable : arguments)]
+      definitions = object
+        [ "time.interval" .= definition ["time-plugin", "interval"],
+          "time.cron" .= definition ["time-plugin", "cron"],
+          "segno.state" .= definition ["state-plugin"],
+          "system.active-window" .= definition ["active-window-plugin"]
         ]
-      missing = [configuredDefinition | (name, configuredDefinition) <- definitions, not (Text.isInfixOf ("\"" <> name <> "\"") existing)]
-  unless (null missing) $ TextIO.appendFile configPath ("\n" <> Text.intercalate "\n" missing)
+  -- Tactus owns the TOML schema and parser. Registration handles quoted/dotted
+  -- keys and inline tables, preserving every already configured plugin.
+  outcome <- runProcessBytes (proc "tactus" ["register-plugins", "--root", root]) (LazyByteString.toStrict (encode definitions))
+  unless (processExitCode outcome == ExitSuccess && not (processOutputTruncated outcome)) $
+    throwIO (ExternalCommandFailed (renderProcessFailure "tactus register-plugins" outcome))
 
 registerSegnoPackage :: FilePath -> Maybe FilePath -> IO ()
 registerSegnoPackage root configuredSdk = do
@@ -885,9 +909,6 @@ stripPathQuotes path = case (decodeJsonText (Text.pack path) :: Either String Te
 
 quoteCabalPath :: Text -> Text
 quoteCabalPath = decodeUtf8With lenientDecode . LazyByteString.toStrict . encode
-
-encodeCompactStringArray :: [Text] -> Text
-encodeCompactStringArray = decodeUtf8With lenientDecode . LazyByteString.toStrict . encode
 
 firstExistingPackage :: [FilePath] -> IO (Maybe FilePath)
 firstExistingPackage [] = pure Nothing

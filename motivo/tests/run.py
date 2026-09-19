@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from html import unescape
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -63,6 +65,10 @@ if sys.argv[1]=="provider":
     value={"text":"Independent evidence was returned without mandatory headings. <script>motivo_attack()</script>"}
 else:
     assert request["method"]=="run"
+    if params["run_id"]=="probe-error":
+        print(json.dumps({"type":"result", "id":request["id"], "ok":False,
+                          "error":{"code":"fixture_interruption", "message":"Experiment interrupted"}}))
+        raise SystemExit(0)
     assert params["run_id"]=="probe-case"
     assert params["sample_id"]=="sample-001"
     assert params["argv"]==["fixture-command", "argument with spaces"]
@@ -157,6 +163,12 @@ command = [{python}, {fixture_literal}, "effect"]
         assert unavailable_record["status"] == "needs-check"
         assert "artifacts/provider-error.json" in unavailable_record["artifacts"]
         assert (unavailable / "artifacts/provider-error.json").is_file()
+        assert unavailable_record["experiment"] is None
+        assert unavailable_record["provider_error"] == json.loads((unavailable / "artifacts/provider-error.json").read_text(encoding="utf-8"))
+        unavailable_markdown = (unavailable / "report.md").read_text(encoding="utf-8")
+        unavailable_html = (unavailable / "report.html").read_text(encoding="utf-8")
+        assert "## Provider failure" in unavailable_markdown and "Experiment observation" not in unavailable_markdown
+        assert "<h2>Provider failure</h2>" in unavailable_html and "<h2>Experiment observation</h2>" not in unavailable_html
         assert (unavailable / "artifacts/submitted-notes.md").read_text(encoding="utf-8") == note.read_text(encoding="utf-8")
         assert len(marker.read_text(encoding="utf-8").splitlines()) == 1
         print("PASS: an unavailable explicit provider preserves the attempt and never falls back or retries")
@@ -165,6 +177,9 @@ command = [{python}, {fixture_literal}, "effect"]
         probe = json.loads((runs / "probe-case/run.json").read_text(encoding="utf-8"))
         assert probe["status"] == "experiment-failed"
         assert probe["experiment"]["exit_code"] == 3
+        assert probe["provider_error"] is None
+        assert "## Experiment observation" in (runs / "probe-case/report.md").read_text(encoding="utf-8")
+        assert "<h2>Experiment observation</h2>" in (runs / "probe-case/report.html").read_text(encoding="utf-8")
         assert "artifacts/experiment.json" in probe["artifacts"]
         calls = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
         assert [call["mode"] for call in calls] == ["provider", "effect"]
@@ -173,6 +188,17 @@ command = [{python}, {fixture_literal}, "effect"]
         run_method("probe", "invalid-provider", ["--provider", "independent", "--", "fixture-command"], success=False)
         assert len(marker.read_text(encoding="utf-8").splitlines()) == 2
         print("PASS: probe uses perform, preserves negative observations and rejects timeout/provider bypasses before dispatch")
+
+        run_method("probe", "probe-error", ["--", "fixture-command"], success=False)
+        interrupted = runs / "probe-error"
+        interrupted_record = json.loads((interrupted / "run.json").read_text(encoding="utf-8"))
+        assert interrupted_record["status"] == "needs-check"
+        assert interrupted_record["provider_error"] is None
+        assert interrupted_record["experiment"] == json.loads((interrupted / "artifacts/experiment-error.json").read_text(encoding="utf-8"))
+        assert "## Experiment observation" in (interrupted / "report.md").read_text(encoding="utf-8")
+        assert "<h2>Experiment observation</h2>" in (interrupted / "report.html").read_text(encoding="utf-8")
+        assert len(marker.read_text(encoding="utf-8").splitlines()) == 3
+        print("PASS: provider failures and experiment failures retain distinct JSON, Markdown and HTML observations")
 
         (project / "notes.md").write_text("", encoding="utf-8")
         run_method("analyze", "empty-input", success=False)
@@ -184,6 +210,52 @@ command = [{python}, {fixture_literal}, "effect"]
         assert "runs/probe-case/report.html" in index
         assert "runs/explicit-provider/report.html" in index
         print("PASS: invalid input does not create runs; generated offline index links actual records")
+
+        fenced_note = """## Evidence
+Real evidence before quoted headings.
+~~~markdown
+## Evidence
+Tilde-fenced example.
+~~~
+````markdown
+## Evidence
+```
+~~~
+Neither a shorter delimiter nor another character closes this block.
+````
+   ```markdown
+## Evidence
+Indented example.
+ `````
+~~~markdown
+## Evidence
+~~~not-a-closing-fence
+The language suffix keeps this line inside the code block.
+~~~
+## Local reflection
+This is a real section outside the fences.
+```markdown
+## Evidence
+An unclosed block keeps the remaining headings as code.
+"""
+        note.write_text(fenced_note, encoding="utf-8")
+        run_method("analyze", "fenced-headings")
+        fenced = runs / "fenced-headings"
+        fenced_record = json.loads((fenced / "run.json").read_text(encoding="utf-8"))
+        assert "Evidence" not in fenced_record["missing_sections"]
+        assert "Local reflection" not in fenced_record["missing_sections"]
+        assert (fenced / "artifacts/submitted-notes.md").read_text(encoding="utf-8") == fenced_note
+        fenced_html = (fenced / "report.html").read_text(encoding="utf-8")
+        submitted_html = fenced_html.split('<section class="submitted-material">', 1)[1].split("</section>", 1)[0]
+        code_blocks = [unescape(code) for code in re.findall(r"<pre><code>(.*?)</code></pre>", submitted_html, re.S)]
+        assert len(code_blocks) == 5, code_blocks
+        assert all(block.startswith("## Evidence\n") for block in code_blocks)
+        assert "```\n~~~\n" in code_blocks[1]
+        assert "~~~not-a-closing-fence\n" in code_blocks[3]
+        assert code_blocks[4].endswith("An unclosed block keeps the remaining headings as code.\n")
+        assert "<h2>Local reflection</h2>" in submitted_html
+        assert submitted_html.count("<h2>Evidence</h2>") == 1
+        print("PASS: section extraction and HTML share tilde, indented, variable-length and unclosed code fence boundaries")
 
         # Custom IDs have no temporal meaning. More than 2,000 lexically later
         # old directories must not hide the fresh aaa-current method run.

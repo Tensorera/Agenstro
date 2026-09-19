@@ -1767,7 +1767,16 @@ fn run_provider_command<W: Write, E: Write>(
         || !input_worker.is_finished()
         || !diagnostics_worker.is_finished()
     {
-        match receiver.recv_timeout(PROCESS_POLL) {
+        // Once stdout reaches EOF its channel is permanently disconnected.
+        // recv_timeout would then return immediately, so retain the polling
+        // interval while waiting for the process and its remaining I/O workers.
+        let output = if output_done {
+            thread::sleep(PROCESS_POLL);
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            receiver.recv_timeout(PROCESS_POLL)
+        };
+        match output {
             Ok(OutputMessage::Line(line)) => {
                 native_lines_seen = native_lines_seen.saturating_add(1);
                 if native_lines_seen >= next_progress_milestone {

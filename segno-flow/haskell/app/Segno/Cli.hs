@@ -3,7 +3,8 @@
 
 module Segno.Cli (main) where
 
-import Control.Exception (SomeException, displayException, try)
+import Control.Exception (SomeException, displayException)
+import Segno.Internal.Exception (trySynchronous)
 import Control.Monad (forM_, when)
 import Data.Aeson (ToJSON, Value, encode, object, withObject, (.:), (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -107,7 +108,7 @@ data ServiceCommand
 main :: IO ()
 main = do
   selected <- execParser options
-  outcome <- try (execute selected)
+  outcome <- trySynchronous (execute selected)
   case outcome of
     Left (exception :: SomeException) -> do
       hPutStrLn stderr ("segno: " <> displayException exception)

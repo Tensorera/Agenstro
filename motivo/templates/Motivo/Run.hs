@@ -27,6 +27,7 @@ import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.IO as TextIO
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
 import Motivo.Html (escapeHtml, renderMarkdown, renderPage)
+import Motivo.Markdown (MarkdownBlock (..), blockLines, markdownBlocks)
 import Motivo.Method
 import System.Directory
   ( canonicalizePath, createDirectory, createDirectoryIfMissing,
@@ -54,6 +55,11 @@ data Recorder = Recorder
     recordStartedAt :: Text, recordTactusRunId :: Maybe String,
     recordTemplate :: Text, recordSamples :: MVar (Int, [Value])
   }
+
+-- Keep provider failures distinct from experiment observations in every format.
+data Observation = NoObservation | ExperimentObservation Value | ProviderFailure Value
+
+data Invocation = ExperimentInvocation | ProviderInvocation
 
 -- | Method entrypoints accept data authored in the user's existing agent session.
 -- Probe invokes only an effect. Other methods call a provider only if --provider is explicit.
@@ -91,7 +97,7 @@ runMethod method = do
     atomicWriteText (directory </> "samples.jsonl") ""
     writeMethodArtifacts recorder
     appendSample recorder "method.started" "The calling agent's method notes were recorded; this is not a claim that the user's task is complete." Nothing
-    publishReport recorder (if method == Probe || selectedProvider options /= Nothing then "running" else "recorded") Nothing
+    publishReport recorder (if method == Probe || selectedProvider options /= Nothing then "running" else "recorded") NoObservation
     if method == Probe then do
       appendSample recorder "experiment.started" "Starting one bounded experiment through motivo.test." (Just (probeParams recorder))
       outcome <- try (runProbe recorder) :: IO (Either SomeException Value)
@@ -100,12 +106,12 @@ runMethod method = do
           atomicWriteJson (directory </> "artifacts/experiment.json") result
           let status = probeStatus result
           appendSample recorder "experiment.finished" ("Experiment state: " <> status <> ". A nonzero exit is an observation, not an automatic retry request.") (Just result)
-          publishReport recorder status (Just result)
-        Left exception -> failedInvocation recorder "experiment" exception
+          publishReport recorder status (ExperimentObservation result)
+        Left exception -> failedInvocation recorder ExperimentInvocation exception
     else case selectedProvider options of
       Nothing -> do
         appendSample recorder "method.recorded" "Method notes were recorded without calling a model. Missing sections remain unknown." Nothing
-        publishReport recorder "recorded" Nothing
+        publishReport recorder "recorded" NoObservation
       Just provider -> do
         appendSample recorder "provider.started" ("A separate context was explicitly requested from provider " <> provider <> ".") Nothing
         outcome <- try (runProvider recorder provider) :: IO (Either SomeException Text)
@@ -116,8 +122,8 @@ runMethod method = do
                 completed = recorder {recordNotes = displayed}
             writeMethodArtifacts completed
             appendSample completed "provider.responded" "The explicitly selected provider returned. Its response is preserved without an automatic formatting retry." Nothing
-            publishReport completed "responded" Nothing
-          Left exception -> failedInvocation recorder "provider" exception
+            publishReport completed "responded" NoObservation
+          Left exception -> failedInvocation recorder ProviderInvocation exception
     TextIO.putStrLn ("Motivo report: " <> Text.pack (directory </> "report.html"))
     TextIO.putStrLn ("Workspace overview: " <> Text.pack (root </> ".tactus/motivo/index.html"))
 
@@ -164,16 +170,17 @@ validToken value = not (Text.null value) && Text.length value <= 80 && Text.all 
 
 -- | Markdown H2 fields. Duplicate headings are rejected by validateNotes.
 parseSections :: Text -> [(Text, Text)]
-parseSections = finish . foldl step (Nothing, [], [], False) . Text.lines
+parseSections = finish . foldl step (Nothing, [], []) . markdownBlocks
   where
-    step (current, body, finished, inCode) line
-      | "```" `Text.isPrefixOf` Text.stripStart line = (current, line : body, finished, not inCode)
-      | not inCode && "## " `Text.isPrefixOf` line =
-          (Just (Text.strip (Text.drop 3 line)), [], flush current body finished, inCode)
-      | otherwise = (current, line : body, finished, inCode)
+    step state (OrdinaryLines lines') = foldl ordinaryLine state lines'
+    step (current, body, finished) block = (current, reverse (blockLines block) ++ body, finished)
+    ordinaryLine (current, body, finished) line
+      | "## " `Text.isPrefixOf` line =
+          (Just (Text.strip (Text.drop 3 line)), [], flush current body finished)
+      | otherwise = (current, line : body, finished)
     flush Nothing _ finished = finished
     flush (Just heading) body finished = finished ++ [(heading, Text.strip (Text.unlines (reverse body)))]
-    finish (current, body, finished, _) = flush current body finished
+    finish (current, body, finished) = flush current body finished
 
 lookupSection :: Text -> [(Text, Text)] -> Maybe Text
 lookupSection heading = lookup (Text.toCaseFold heading) . map (\(name, value) -> (Text.toCaseFold name, value))
@@ -208,12 +215,15 @@ writeMethodArtifacts recorder = when (recordMethod recorder == Retrospect) $ do
       "temporal_order_known" .= False,
       "entries" .= [object ["source_heading" .= heading, "text" .= section heading, "decided_at" .= Null] | heading <- headings]])
 
-failedInvocation :: Recorder -> Text -> SomeException -> IO ()
-failedInvocation recorder kind exception = do
+failedInvocation :: Recorder -> Invocation -> SomeException -> IO ()
+failedInvocation recorder invocation exception = do
   let failure = object ["error" .= Text.take 4000 (Text.pack (displayException exception)), "result_known" .= False]
+      (kind, observation) = case invocation of
+        ExperimentInvocation -> ("experiment", ExperimentObservation failure)
+        ProviderInvocation -> ("provider", ProviderFailure failure)
   atomicWriteJson (recordDirectory recorder </> "artifacts" </> Text.unpack kind ++ "-error.json") failure
   appendSample recorder (kind <> ".interrupted") "Execution did not produce a usable terminal result. Inspect recorded and external outcomes before deciding whether anything can be retried." (Just failure)
-  publishReport recorder "needs-check" (Just failure)
+  publishReport recorder "needs-check" observation
   throwIO exception
 
 runProvider :: Recorder -> Text -> IO Text
@@ -249,7 +259,7 @@ progressSink recorder = EventSink $ \record -> do
     Just line -> do
       writeRuntimePresentation line
       appendSample recorder "runtime.progress" (Text.take 4000 line) Nothing
-      publishReport recorder "running" Nothing
+      publishReport recorder "running" NoObservation
 
 probeParams :: Recorder -> Value
 probeParams recorder = object
@@ -291,8 +301,8 @@ appendSample recorder kind summary details = modifyMVar (recordSamples recorder)
     hFlush handle
   pure ((count + 1, next), ())
 
-publishReport :: Recorder -> Text -> Maybe Value -> IO ()
-publishReport recorder status result = do
+publishReport :: Recorder -> Text -> Observation -> IO ()
+publishReport recorder status observation = do
   generated <- nowText
   (count, samples) <- readMVar (recordSamples recorder)
   artifacts <- filterM (doesFileExist . (recordDirectory recorder </>) . Text.unpack)
@@ -313,30 +323,34 @@ publishReport recorder status result = do
           "tactus_run_id" .= recordTactusRunId recorder, "sample_count" .= count,
           "input_path" .= inputPath options, "request_path" .= requestPath options,
           "artifacts" .= artifacts,
-          "experiment" .= result
+          "experiment" .= (case observation of ExperimentObservation value -> value; _ -> Null),
+          "provider_error" .= (case observation of ProviderFailure value -> value; _ -> Null)
         ]
-      report = reportMarkdown recorder status generated result
-      body = reportHtml recorder status generated count samples result
+      report = reportMarkdown recorder status generated observation
+      body = reportHtml recorder status generated count samples observation
   page <- either fail pure (renderPage (recordTemplate recorder) body)
   atomicWriteText (recordDirectory recorder </> "report.md") report
   atomicWriteText (recordDirectory recorder </> "report.html") page
   atomicWriteJson (recordDirectory recorder </> "run.json") metadata
   refreshIndex recorder generated
 
-reportMarkdown :: Recorder -> Text -> Text -> Maybe Value -> Text
-reportMarkdown recorder status generated result = Text.unlines
+reportMarkdown :: Recorder -> Text -> Text -> Observation -> Text
+reportMarkdown recorder status generated observation = Text.unlines
   [ "# " <> methodTitle (recordMethod recorder),
     "Run: " <> recordRunId recorder <> " · State: " <> status,
     "Agent: " <> agentName options <> " · Model: " <> displayedModel options <> " (caller-reported/requested; actual remote model is not inferred)",
     "Snapshot generated: " <> generated,
     "This is a record of one method invocation. It does not certify completion of the user's task.",
     recordNotes recorder,
-    maybe "" (\value -> "\n## Experiment observation\n\n```json\n" <> jsonText value <> "\n```\n\nInterpret the observation in the calling agent before changing the next step. The submitted reflection is preserved.") result
+    case observation of
+      NoObservation -> ""
+      ExperimentObservation value -> "\n## Experiment observation\n\n```json\n" <> jsonText value <> "\n```\n\nInterpret the observation in the calling agent before changing the next step. The submitted reflection is preserved."
+      ProviderFailure value -> "\n## Provider failure\n\n```json\n" <> jsonText value <> "\n```\n\nThe requested provider did not produce a usable terminal result. The submitted material is preserved."
   ]
   where options = recordOptions recorder
 
-reportHtml :: Recorder -> Text -> Text -> Int -> [Value] -> Maybe Value -> Text
-reportHtml recorder status generated count samples result =
+reportHtml :: Recorder -> Text -> Text -> Int -> [Value] -> Observation -> Text
+reportHtml recorder status generated count samples observation =
   "<header class=\"motivo-header\"><a href=\"../../index.html\">← All method runs</a>"
   <> "<p class=\"eyebrow\">MOTIVO · METHOD RECORD</p><h1>" <> escapeHtml (methodTitle method) <> "</h1>"
   <> "<p class=\"lede\">" <> escapeHtml (methodPurpose method) <> "</p>"
@@ -351,7 +365,7 @@ reportHtml recorder status generated count samples result =
   <> "<div class=\"section-grid\">" <> Text.concat (map artifactSection [heading | heading <- methodSections method, lookupSection heading sections /= Nothing]) <> "</div>"
   <> specificArtifacts
   <> reflectionSection
-  <> maybe "" experimentSection result
+  <> observationSection
   <> "<section class=\"samples\"><h2>Observed sequence</h2><p>" <> Text.pack (show count) <> " records; at most the latest 200 are shown. Sequence expresses append order, not causality across parallel work.</p>"
   <> "<ol class=\"timeline\">" <> Text.concat (map sampleHtml samples) <> "</ol></section></main>"
   where
@@ -373,6 +387,11 @@ reportHtml recorder status generated count samples result =
     experimentSection value = "<section class=\"experiment\"><h2>Experiment observation</h2><p>Interpret this observation in the calling agent. The submitted hypothesis and reflection remain as written before the run.</p>"
       <> "<nav class=\"report-links\">" <> logLink "stdout_path" "Standard output" value <> logLink "stderr_path" "Standard error" value <> "</nav>"
       <> "<details open><summary>Structured result</summary><pre>" <> escapeHtml (jsonText value) <> "</pre></details></section>"
+    observationSection = case observation of
+      NoObservation -> ""
+      ExperimentObservation value -> experimentSection value
+      ProviderFailure value -> "<section class=\"provider-failure\"><h2>Provider failure</h2><p>The requested provider did not produce a usable terminal result. The submitted material is preserved.</p>"
+        <> "<details open><summary>Structured error</summary><pre>" <> escapeHtml (jsonText value) <> "</pre></details></section>"
     logLink field label value =
       let path = valueText field value
           prefix = ".tactus/motivotest/" <> recordRunId recorder <> "/" <> sampleId options <> "/"

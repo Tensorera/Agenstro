@@ -57,6 +57,7 @@ library
       Segno
       Segno.ActiveWindow
       Segno.Driver
+      Segno.Internal.Exception
       Segno.Lifecycle
       Segno.Plugin
       Segno.Protocol

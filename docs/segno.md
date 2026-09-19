@@ -173,9 +173,11 @@ tactus doctor --root $projectRoot
 segno init --root $projectRoot --sdk (Join-Path $repoRoot "segno-flow")
 ```
 
-`segno init` is idempotent. It adds the built-in trigger/state/domain plugin
-registrations to `.tactus/tactus.toml`, links `segno-flow` from
-`.tactus/cabal.project`, and creates:
+`segno init` is idempotent. Tactus parses `.tactus/tactus.toml` and adds only
+missing built-in trigger/state/domain plugin keys, preserving existing custom
+plugin definitions. Quoted keys, dotted keys, and inline plugin tables are
+supported; comments and string values do not count as registrations. Segno
+also links `segno-flow` from `.tactus/cabal.project` and creates:
 
 ```text
 .tactus/
@@ -248,6 +250,12 @@ so increasing the task budget does not create an earlier lease handoff. A
 timeout can still be ambiguous: if the driver cannot validate the task's
 atomic result, it records `OutcomeUnknown` and does not retry that occurrence
 automatically.
+
+Cancellation propagates out of the driver and plugin hosts. It is never
+converted into an ordinary trigger failure or an automatic retry. A running
+attempt becomes `OutcomeUnknown` during cancellation cleanup; if that write
+fails, lease recovery records the unknown outcome later. Cleanup failures do
+not replace the cancellation or make the attempt eligible for an automatic retry.
 
 Real active-window capture currently supports Windows. Its title can include
 private document, URL, or account text. The task checkpoints the business value
@@ -379,18 +387,21 @@ segno history --root $projectRoot --limit 100 --json
 ```
 
 From the Agenstro checkout, the default suite uses a virtual clock and fake
-process boundaries. It neither waits for a wall-clock minute nor contacts a
-model; CI separately type-checks the active-window task without capturing the
-desktop:
+task/plugin runners. Initialization tests use the local Tactus executable to
+exercise real TOML registration. The suite neither waits for a wall-clock
+minute nor contacts a model; CI separately type-checks the active-window task
+without capturing the desktop:
 
 ```powershell
+cargo build --workspace --locked
 cabal build --builddir=Build/cabal all --enable-tests
 cabal test --builddir=Build/cabal segno-flow:test:segno-flow-tests --test-show-details=direct
 ```
 
 The suite covers strict plugin request identities, pure interval catch-up,
 cross-job occurrence identity, occurrence-scoped checkpoint operations, stale
-fencing tokens, package discovery, trigger-failure isolation,
+fencing tokens, package discovery, TOML registration, cancellation propagation,
+trigger-failure isolation,
 `OutcomeUnknown` non-retry, and a virtual 0/60/120-second active-window task
 that checkpoints three revisions and survives a simulated driver restart.
 

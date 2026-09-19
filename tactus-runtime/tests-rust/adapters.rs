@@ -1040,6 +1040,83 @@ fn provider_deadline_kills_pipe_holding_descendant_after_leader_exit() {
     assert!(!marker.with_extension("survived").exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn provider_waits_without_spinning_after_stdout_closes() {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    let workspace = tempdir().expect("workspace");
+    let script = workspace.path().join("close-stdout.sh");
+    let ready = workspace.path().join("ready");
+    let release = workspace.path().join("release");
+    fs::write(
+        &script,
+        "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"TACTUS_OK\"}'\nexec 1>&-\nprintf ready > \"$FAKE_READY\"\nwhile [ ! -f \"$FAKE_RELEASE\" ]; do sleep 0.01; done\n",
+    )
+    .expect("fake provider");
+    let request = json!({
+        "api":"agenstro.plugin/v1","id":"early-eof","method":"invoke",
+        "params":{
+            "prompt":"offline test","workspace":workspace.path(),
+            "options":{
+                "command_prefix":["/bin/sh",script],"timeout_seconds":10,
+                "extra_env":{"FAKE_READY":ready,"FAKE_RELEASE":release}
+            }
+        }
+    });
+    let ticks = Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .expect("Linux process clock frequency");
+    assert!(ticks.status.success());
+    let ticks_per_second: u64 = String::from_utf8(ticks.stdout)
+        .expect("clock frequency")
+        .trim()
+        .parse()
+        .expect("integer clock frequency");
+    let mut host = Command::new(env!("CARGO_BIN_EXE_tactus"))
+        .args(["provider-host", "claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("provider host");
+    host.stdin
+        .take()
+        .expect("host stdin")
+        .write_all(&serde_json::to_vec(&request).expect("request JSON"))
+        .expect("write request");
+    let started = Instant::now();
+    while !ready.exists() && started.elapsed() < Duration::from_secs(5) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let read_cpu_ticks = || {
+        let stat = fs::read_to_string(format!("/proc/{}/stat", host.id())).expect("host stat");
+        // comm may contain spaces or parentheses; fields after its final ')' start at state.
+        let fields: Vec<_> = stat[stat.rfind(')').expect("comm field") + 1..]
+            .split_whitespace()
+            .collect();
+        fields[11].parse::<u64>().expect("utime") + fields[12].parse::<u64>().expect("stime")
+    };
+    let was_ready = ready.exists();
+    let before = read_cpu_ticks();
+    thread::sleep(Duration::from_millis(350));
+    let consumed = read_cpu_ticks().saturating_sub(before);
+    fs::write(release, b"release").expect("release fake provider");
+    let output = host.wait_with_output().expect("host completion");
+    assert!(was_ready, "fake provider did not close stdout in time");
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(frames(&output.stdout).last().expect("terminal")["ok"], true);
+    assert!(
+        consumed <= ticks_per_second / 8,
+        "provider host used {consumed} CPU ticks while waiting on closed stdout"
+    );
+}
+
 #[test]
 fn health_deadline_kills_pipe_holding_descendant_after_leader_exit() {
     let workspace = tempdir().expect("workspace");

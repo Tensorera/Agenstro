@@ -8,6 +8,7 @@ pub mod cli;
 pub mod daemon;
 mod executable;
 pub mod journal;
+mod journal_reader;
 pub mod limits;
 pub mod outcome;
 pub mod process;

@@ -19,6 +19,13 @@ module Segno.Protocol
     TaskManifest (..),
     InstalledJob (..),
     StateSnapshot (..),
+    StateCasRequest (..),
+    stateCasParams,
+    OperationId (..),
+    OccurrenceId (..),
+    FencingToken (..),
+    FencingEpoch (..),
+    FencingContext (..),
     StateCasResult (..),
     TriggerOccurrence (..),
     Invocation (..),
@@ -301,6 +308,70 @@ instance ToJSON StateCasResult where
   toJSON result = case result of
     StateCasApplied revision -> object ["applied" .= True, "revision" .= revision]
     StateCasConflict current -> object ["applied" .= False, "current_revision" .= current]
+
+-- | Operation identity and lease identity share a wire representation but are
+-- not interchangeable in a compare-and-set request.
+newtype OperationId = OperationId {unOperationId :: Text}
+  deriving (Eq, Show)
+
+newtype OccurrenceId = OccurrenceId {unOccurrenceId :: Text}
+  deriving (Eq, Show)
+
+newtype FencingToken = FencingToken {unFencingToken :: Text}
+  deriving (Eq, Show)
+
+newtype FencingEpoch = FencingEpoch {unFencingEpoch :: Word32}
+  deriving (Eq, Show)
+
+data FencingContext = FencingContext
+  { fenceOccurrenceId :: OccurrenceId,
+    fenceToken :: FencingToken,
+    fenceEpoch :: FencingEpoch
+  }
+  deriving (Eq, Show)
+
+data StateCasRequest = StateCasRequest
+  { casStateKey :: Text,
+    casExpectedRevision :: Maybe Text,
+    casSchemaVersion :: Word32,
+    casValue :: Value,
+    casOperationId :: OperationId,
+    casFencing :: FencingContext
+  }
+  deriving (Eq, Show)
+
+instance FromJSON StateCasRequest where
+  parseJSON = withObject "state compare-and-set request" $ \fields -> do
+    conflict <- fields .: "conflict"
+    unless (conflict == ("compare-and-set" :: Text)) (fail "unsupported conflict policy")
+    StateCasRequest
+      <$> fields .: "state_key"
+      <*> fields .:? "expected_revision"
+      <*> fields .: "schema_version"
+      <*> fields .: "value"
+      <*> (OperationId <$> fields .: "operation_id")
+      <*> ( FencingContext
+              <$> (OccurrenceId <$> fields .: "occurrence_id")
+              <*> (FencingToken <$> fields .: "fencing_token")
+              <*> (FencingEpoch <$> fields .: "fencing_epoch")
+          )
+
+instance ToJSON StateCasRequest where
+  toJSON = Object . stateCasParams
+
+stateCasParams :: StateCasRequest -> Object
+stateCasParams request =
+    KeyMap.fromList
+      [ "state_key" .= casStateKey request,
+        "expected_revision" .= casExpectedRevision request,
+        "schema_version" .= casSchemaVersion request,
+        "value" .= casValue request,
+        "conflict" .= ("compare-and-set" :: Text),
+        "operation_id" .= unOperationId (casOperationId request),
+        "occurrence_id" .= unOccurrenceId (fenceOccurrenceId (casFencing request)),
+        "fencing_token" .= unFencingToken (fenceToken (casFencing request)),
+        "fencing_epoch" .= unFencingEpoch (fenceEpoch (casFencing request))
+      ]
 
 data TriggerOccurrence = TriggerOccurrence
   { occurrenceTriggerId :: Text,

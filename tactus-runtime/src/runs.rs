@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -12,9 +12,11 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    journal::{RunSummary, TRACE_API, TraceEvent},
-    limits::MAX_FRAME_BYTES_CEILING,
-    outcome::{classify_outcome, validate_outcome_consistency},
+    journal::{RunSummary, TraceEvent},
+    journal_reader::{
+        self, EventRead, EventReader, MAX_EVENT_LINE_BYTES, MAX_SUMMARY_BYTES, ReadError,
+    },
+    outcome::classify_outcome,
     process::{InvocationKind, ProcessOutcome},
     protocol::TerminalResult,
     workspace::{Workspace, WorkspaceError},
@@ -24,9 +26,6 @@ use crate::{
 pub const RUNS_API: &str = "tactus.runs/v1";
 
 const ARCHIVE_DIRECTORY: &str = "archive";
-const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_EVENT_LINE_BYTES: usize = MAX_FRAME_BYTES_CEILING + 4 * 1024 * 1024;
-const MAX_EVENT_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIST_LIMIT: usize = 10_000;
 const MAX_SHOW_EVENT_LIMIT: usize = 1_000;
 const MAX_SHOW_EVENT_BYTES: usize = MAX_EVENT_LINE_BYTES;
@@ -275,7 +274,14 @@ pub fn show(
     let workspace = Workspace::discover(start)?;
     let root = resolve_active_root(&workspace)?;
     let run = inspect_run(&root, run_id)?;
-    let page = read_event_page(&run.path, run_id, after, limit, max_bytes)?;
+    let page = read_event_page(
+        &run.path,
+        run_id,
+        after,
+        limit,
+        max_bytes,
+        run.record.finished_unix_ms.is_some(),
+    )?;
     Ok(RunShow {
         api: RUNS_API,
         run: run.record,
@@ -510,7 +516,7 @@ fn inspect_run(root: &Path, run_id: &str) -> Result<ScannedRun, RunsError> {
         return Err(RunsError::UnsafePath);
     }
     let summary = read_summary(&canonical, run_id)?;
-    let facts = scan_events(&canonical, run_id, summary.is_some())?;
+    let facts = scan_events(&canonical, run_id, summary.as_ref())?;
     let record = match summary {
         None => RunRecord {
             run_id: run_id.to_owned(),
@@ -526,11 +532,6 @@ fn inspect_run(root: &Path, run_id: &str) -> Result<ScannedRun, RunsError> {
             protection_reasons: vec!["open".to_owned()],
         },
         Some(summary) => {
-            if facts.complete && summary.events_recorded != facts.count {
-                return Err(RunsError::Corrupt(
-                    "summary event count does not match events.jsonl".to_owned(),
-                ));
-            }
             let mut state = classify_outcome(&summary.outcome).as_str().to_owned();
             let mut reasons = Vec::new();
             if state == "outcome_unknown" || facts.outcome_unknown {
@@ -590,51 +591,54 @@ fn read_summary(path: &Path, run_id: &str) -> Result<Option<RunSummary>, RunsErr
             "summary exceeds its read budget".to_owned(),
         ));
     }
-    let summary: RunSummary = serde_json::from_slice(&bytes).map_err(RunsError::Json)?;
-    if summary.api != TRACE_API || summary.run_id != run_id {
-        return Err(RunsError::Corrupt(
-            "summary identity does not match its run directory".to_owned(),
-        ));
-    }
-    validate_outcome_consistency(&summary.outcome)
-        .map_err(|reason| RunsError::Corrupt(reason.to_owned()))?;
-    Ok(Some(summary))
+    journal_reader::decode_summary(&bytes, run_id)
+        .map(Some)
+        .map_err(map_read_error)
 }
 
-fn scan_events(path: &Path, run_id: &str, closed: bool) -> Result<EventFacts, RunsError> {
+fn map_read_error(error: ReadError) -> RunsError {
+    match error {
+        ReadError::Io(error) => RunsError::Io(error),
+        ReadError::Json(error) => RunsError::Json(error),
+        ReadError::Corrupt(reason) => RunsError::Corrupt(reason.to_owned()),
+        ReadError::LineTooLarge => {
+            RunsError::Corrupt("event line exceeds its read budget".to_owned())
+        }
+        ReadError::ScanBudgetExceeded => RunsError::ReadBudgetExceeded,
+    }
+}
+
+fn scan_events(
+    path: &Path,
+    run_id: &str,
+    summary: Option<&RunSummary>,
+) -> Result<EventFacts, RunsError> {
     let event_path = path.join("events.jsonl");
     require_plain_file(&event_path)?;
-    let mut reader = BufReader::new(File::open(event_path).map_err(RunsError::Io)?);
-    let mut total_bytes = 0_u64;
-    let mut expected_seq = 1_u64;
+    let file = File::open(event_path).map_err(RunsError::Io)?;
+    let mut reader = EventReader::new(BufReader::new(file), run_id, summary.is_some());
     let mut last_event_unix_ms = None;
     let mut outcome_unknown = false;
-    let mut complete = true;
-    while let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? {
-        let read = line.bytes.len();
-        total_bytes = total_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        if total_bytes > MAX_EVENT_SCAN_BYTES {
-            complete = false;
-            break;
+    let complete = loop {
+        match reader.next() {
+            Ok(EventRead::Event { event, .. }) => {
+                last_event_unix_ms = Some(event.at_unix_ms);
+                outcome_unknown |= event_is_outcome_unknown(&event);
+            }
+            Ok(EventRead::End) => {
+                if let Some(summary) = summary {
+                    reader
+                        .validate_summary_count(summary)
+                        .map_err(map_read_error)?;
+                }
+                break true;
+            }
+            Ok(EventRead::Partial) | Err(ReadError::ScanBudgetExceeded) => break false,
+            Err(error) => return Err(map_read_error(error)),
         }
-        if !line.terminated && !closed {
-            complete = false;
-            break;
-        }
-        if !line.terminated {
-            return Err(RunsError::Corrupt(
-                "closed event stream ends with an incomplete record".to_owned(),
-            ));
-        }
-        let event: TraceEvent =
-            serde_json::from_slice(strip_newline(&line.bytes)).map_err(RunsError::Json)?;
-        validate_event(&event, run_id, expected_seq)?;
-        expected_seq += 1;
-        last_event_unix_ms = Some(event.at_unix_ms);
-        outcome_unknown |= event_is_outcome_unknown(&event);
-    }
+    };
     Ok(EventFacts {
-        count: expected_seq - 1,
+        count: reader.count(),
         last_event_unix_ms,
         outcome_unknown,
         complete,
@@ -647,35 +651,25 @@ fn read_event_page(
     after: u64,
     limit: usize,
     max_bytes: usize,
+    closed: bool,
 ) -> Result<RunEventPage, RunsError> {
     let event_path = path.join("events.jsonl");
     require_plain_file(&event_path)?;
-    let mut reader = BufReader::new(File::open(event_path).map_err(RunsError::Io)?);
-    let mut expected_seq = 1_u64;
-    let mut scanned_bytes = 0_u64;
+    let file = File::open(event_path).map_err(RunsError::Io)?;
+    let mut reader = EventReader::new(BufReader::new(file), run_id, closed);
     let mut retained_bytes = 0_usize;
     let mut events = Vec::new();
-    let mut complete = true;
-    while let Some(line) = read_bounded_event_line(&mut reader, MAX_EVENT_LINE_BYTES)? {
-        let read = line.bytes.len();
-        scanned_bytes = scanned_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        if scanned_bytes > MAX_EVENT_SCAN_BYTES {
-            return Err(RunsError::ReadBudgetExceeded);
-        }
-        if !line.terminated {
-            complete = false;
-            break;
-        }
-        let event: TraceEvent =
-            serde_json::from_slice(strip_newline(&line.bytes)).map_err(RunsError::Json)?;
-        validate_event(&event, run_id, expected_seq)?;
-        expected_seq += 1;
+    let complete = loop {
+        let (event, read) = match reader.next().map_err(map_read_error)? {
+            EventRead::End => break true,
+            EventRead::Partial => break false,
+            EventRead::Event { event, bytes } => (event, bytes),
+        };
         if event.seq <= after {
             continue;
         }
         if events.len() >= limit {
-            complete = false;
-            break;
+            break false;
         }
         if retained_bytes.saturating_add(read) > max_bytes {
             if events.is_empty() {
@@ -683,66 +677,17 @@ fn read_event_page(
                     "the next event exceeds --max-bytes; increase the page byte limit".to_owned(),
                 ));
             }
-            complete = false;
-            break;
+            break false;
         }
         retained_bytes += read;
         events.push(event);
-    }
+    };
     let next_after = events.last().map_or(after, |event| event.seq);
     Ok(RunEventPage {
         events,
         next_after,
         complete,
     })
-}
-
-struct BoundedEventLine {
-    bytes: Vec<u8>,
-    terminated: bool,
-}
-
-fn read_bounded_event_line(
-    reader: &mut impl BufRead,
-    max_bytes: usize,
-) -> Result<Option<BoundedEventLine>, RunsError> {
-    let mut output = Vec::new();
-    loop {
-        let available = reader.fill_buf().map_err(RunsError::Io)?;
-        if available.is_empty() {
-            return Ok((!output.is_empty()).then_some(BoundedEventLine {
-                bytes: output,
-                terminated: false,
-            }));
-        }
-        let take = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index + 1);
-        if output.len().saturating_add(take) > max_bytes {
-            return Err(RunsError::Corrupt(
-                "event line exceeds its read budget".to_owned(),
-            ));
-        }
-        let terminated = available.get(take.saturating_sub(1)) == Some(&b'\n');
-        output.extend_from_slice(&available[..take]);
-        reader.consume(take);
-        if terminated {
-            return Ok(Some(BoundedEventLine {
-                bytes: output,
-                terminated: true,
-            }));
-        }
-    }
-}
-
-fn validate_event(event: &TraceEvent, run_id: &str, expected_seq: u64) -> Result<(), RunsError> {
-    if event.api != TRACE_API || event.run_id != run_id || event.seq != expected_seq {
-        return Err(RunsError::Corrupt(
-            "event identity or sequence is inconsistent".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn event_is_outcome_unknown(event: &TraceEvent) -> bool {
@@ -1028,11 +973,6 @@ fn run_id_timestamp(run_id: &str) -> Option<u64> {
     run_id.strip_prefix("run-")?.split('-').next()?.parse().ok()
 }
 
-fn strip_newline(bytes: &[u8]) -> &[u8] {
-    let without_lf = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    without_lf.strip_suffix(b"\r").unwrap_or(without_lf)
-}
-
 fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1109,8 +1049,6 @@ impl RunsError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use super::*;
     use crate::{
         journal::RunJournal,
@@ -1223,15 +1161,6 @@ mod tests {
         let run_id = completed_run(&workspace, outcome(InvocationKind::Succeeded, None));
         let error = show(&workspace.root, &run_id, 0, 10, 1).expect_err("page error");
         assert!(matches!(error, RunsError::InvalidArgument(_)));
-    }
-
-    #[test]
-    fn bounded_event_reader_rejects_an_oversized_unterminated_record() {
-        let mut input = Cursor::new(vec![b'x'; 65]);
-        assert!(matches!(
-            read_bounded_event_line(&mut input, 32),
-            Err(RunsError::Corrupt(_))
-        ));
     }
 
     #[test]

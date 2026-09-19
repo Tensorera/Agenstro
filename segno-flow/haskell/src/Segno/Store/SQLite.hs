@@ -48,7 +48,6 @@ import Data.Time
     formatTime,
     parseTimeM,
   )
-import Data.Word (Word32)
 import Database.SQLite.Simple
   ( Connection,
     FromRow (fromRow),
@@ -71,6 +70,12 @@ import Segno.Lifecycle
   )
 import Segno.Protocol
   ( StateManifest (..),
+    StateCasRequest (..),
+    FencingContext (..),
+    OperationId (..),
+    OccurrenceId (..),
+    FencingToken (..),
+    FencingEpoch (..),
     StateSnapshot (..),
     TriggerOccurrence (..),
     decodeJsonText,
@@ -171,12 +176,21 @@ loadBusinessState paths manifest now = withDatabase (pathsBusinessDatabase paths
           }
     _ -> ioError (userError "business state disappeared after initialization")
 
-compareAndSetBusinessState :: SegnoPaths -> Text -> Maybe Text -> Word32 -> Value -> Text -> Text -> Text -> Word32 -> UTCTime -> IO CasResult
-compareAndSetBusinessState paths key expectedRevision schemaVersion value operationId occurrenceId fencingToken fencingEpoch now =
+compareAndSetBusinessState :: SegnoPaths -> StateCasRequest -> UTCTime -> IO CasResult
+compareAndSetBusinessState paths request now =
   withDatabase (pathsBusinessDatabase paths) $ \connection -> do
     execute connection "ATTACH DATABASE ? AS lifecycle_store" (Only (pathsLifecycleDatabase paths))
     withImmediateTransaction connection (performCas connection)
   where
+    key = casStateKey request
+    expectedRevision = casExpectedRevision request
+    schemaVersion = casSchemaVersion request
+    value = casValue request
+    operationId = unOperationId (casOperationId request)
+    occurrenceId = unOccurrenceId (fenceOccurrenceId (casFencing request))
+    fencingToken = unFencingToken (fenceToken (casFencing request))
+    fencingEpoch = unFencingEpoch (fenceEpoch (casFencing request))
+
     performCas connection = do
       fenceRows <-
         query

@@ -10,10 +10,10 @@ module Segno.Plugin
   )
 where
 
-import Control.Exception (SomeException, displayException, try)
-import Control.Monad (unless, when)
+import Control.Exception (SomeException, displayException)
+import Control.Monad (when)
 import Data.Aeson
-  ( FromJSON,
+  ( FromJSON (parseJSON),
     Object,
     ToJSON (toJSON),
     Value (..),
@@ -32,8 +32,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8')
 import Data.Time (UTCTime, getCurrentTime)
-import Data.Word (Word32)
 import Segno.ActiveWindow (captureActiveWindow)
+import Segno.Internal.Exception (trySynchronous)
 import Segno.Protocol
   ( PluginFailure (..),
     PluginRequest (..),
@@ -93,7 +93,7 @@ runPluginHost handler = do
         hPutStrLn stderr ("invalid plugin request: " <> message)
         exitFailure
       Right value -> pure value
-  outcome <- try (handler request)
+  outcome <- trySynchronous (handler request)
   let response = case outcome of
         Left (exception :: SomeException) ->
           pluginFailure
@@ -170,11 +170,11 @@ stateHandler request = case pluginRequestMethod request of
     Right manifest -> do
       now <- getCurrentTime
       Right . toJSON <$> loadBusinessState paths manifest now
-  "compare-and-set" -> withWorkspace $ \paths -> case parseEither parseCas (pluginRequestParams request) of
+  "compare-and-set" -> withWorkspace $ \paths -> case parseEither parseJSON (Object (pluginRequestParams request)) of
     Left message -> pure (Left (invalidRequest message))
-    Right (key, expected, schemaVersion, value, operationId, occurrenceId, fence, fenceEpoch) -> do
+    Right casRequest -> do
       now <- getCurrentTime
-      result <- compareAndSetBusinessState paths key expected schemaVersion value operationId occurrenceId fence fenceEpoch now
+      result <- compareAndSetBusinessState paths casRequest now
       pure . Right $ case result of
         CasApplied revision -> object ["applied" .= True, "revision" .= revision]
         CasConflict current -> object ["applied" .= False, "current_revision" .= current]
@@ -206,20 +206,6 @@ parseLoad fields =
     <*> pure "segno.state"
     <*> pure "compare-and-set"
     <*> required "initial" fields
-
-parseCas :: Object -> Parser (Text, Maybe Text, Word32, Value, Text, Text, Text, Word32)
-parseCas fields = do
-  conflict <- required "conflict" fields
-  unless (conflict == ("compare-and-set" :: Text)) (fail "unsupported conflict policy")
-  (,,,,,,,)
-    <$> required "state_key" fields
-    <*> optional "expected_revision" fields
-    <*> required "schema_version" fields
-    <*> required "value" fields
-    <*> required "operation_id" fields
-    <*> required "occurrence_id" fields
-    <*> required "fencing_token" fields
-    <*> required "fencing_epoch" fields
 
 parseAppend :: Object -> Parser (Text, Text, Value, Maybe Text)
 parseAppend fields =

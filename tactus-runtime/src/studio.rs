@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,9 +17,11 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    journal::{Presentation, RunSummary, TRACE_API, TraceEvent},
-    limits::MAX_FRAME_BYTES_CEILING,
-    outcome::{classify_outcome, validate_outcome_consistency},
+    journal::{Presentation, RunSummary},
+    journal_reader::{
+        self, EventRead, EventReader, MAX_EVENT_LINE_BYTES, MAX_SUMMARY_BYTES, ReadError,
+    },
+    outcome::classify_outcome,
     process::{InvocationKind, ProcessOutcome},
     workspace::{RuntimeConfig, Workspace, WorkspaceError, discover_scripts, doctor},
 };
@@ -31,10 +33,7 @@ pub const STUDIO_API: &str = "agenstro.studio/v1";
 
 const MAX_RUN_LIMIT: usize = 200;
 const MAX_EVENT_LIMIT: usize = 1_000;
-const MAX_EVENT_LINE_BYTES: usize = MAX_FRAME_BYTES_CEILING + 4 * 1024 * 1024;
 const MAX_EVENT_PAGE_BYTES: usize = MAX_EVENT_LINE_BYTES;
-const MAX_EVENT_SCAN_BYTES: usize = 128 * 1024 * 1024;
-const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_DIRECTORIES_SCANNED: usize = 2_000;
 const MAX_RUN_DIRECTORY_ENTRIES_VISITED: usize = 100_000;
 const MAX_DIAGNOSTIC_CHARACTERS: usize = 4_096;
@@ -414,52 +413,43 @@ pub fn events(
         return Err(StudioError::RunNotFound(run_id.to_owned()));
     }
     let summary = read_summary(&run_path, run_id)?;
-    let run = project_run(&run_path, run_id, summary.as_ref());
+    let mut run = project_run(&run_path, run_id, summary.as_ref());
     let event_path = run_path.join("events.jsonl");
     require_plain_file(&event_path)?;
     let file = File::open(&event_path).map_err(StudioError::Io)?;
-    let mut reader = BufReader::new(file);
-    let mut scanned_bytes = 0usize;
+    let mut reader = EventReader::new(BufReader::new(file), run_id, summary.is_some());
     let mut retained_bytes = 0usize;
-    let mut expected = 1u64;
     let mut page = Vec::new();
     let mut next_after = after;
     let mut reached_eof = false;
     let mut integrity = StudioIntegrity::Ok;
 
-    loop {
-        if page.len() == limit {
-            break;
-        }
-        let line = read_bounded_line(&mut reader, MAX_EVENT_LINE_BYTES)?;
-        let Some(line) = line else {
-            reached_eof = true;
-            break;
-        };
-        scanned_bytes = scanned_bytes.saturating_add(line.bytes.len());
-        if scanned_bytes > MAX_EVENT_SCAN_BYTES {
-            return Err(StudioError::BudgetExceeded(event_path));
-        }
-        if !line.terminated {
-            integrity = StudioIntegrity::Partial;
-            break;
-        }
-        let trace: TraceEvent = match serde_json::from_slice(strip_newline(&line.bytes)) {
-            Ok(trace) => trace,
-            Err(_) => {
+    while page.len() < limit {
+        let (trace, bytes) = match reader.next() {
+            Ok(EventRead::Event { event, bytes }) => (event, bytes),
+            Ok(EventRead::End) => {
+                reached_eof = true;
+                if let Some(summary) = summary.as_ref()
+                    && reader.validate_summary_count(summary).is_err()
+                {
+                    integrity = StudioIntegrity::Corrupt;
+                }
+                break;
+            }
+            Ok(EventRead::Partial) => {
+                integrity = StudioIntegrity::Partial;
+                break;
+            }
+            Err(ReadError::Json(_) | ReadError::Corrupt(_)) => {
                 integrity = StudioIntegrity::Corrupt;
                 break;
             }
+            Err(error) => return Err(map_read_error(error, &event_path, run_id)),
         };
-        if trace.api != TRACE_API || trace.run_id != run_id || trace.seq != expected {
-            integrity = StudioIntegrity::Corrupt;
-            break;
-        }
-        expected = expected.saturating_add(1);
         if trace.seq <= after {
             continue;
         }
-        if retained_bytes.saturating_add(line.bytes.len()) > max_bytes {
+        if retained_bytes.saturating_add(bytes) > max_bytes {
             if page.is_empty() {
                 return Err(StudioError::InvalidLimit(
                     "the next event exceeds maxBytes; increase the event byte limit".to_owned(),
@@ -468,7 +458,7 @@ pub fn events(
             integrity = StudioIntegrity::Partial;
             break;
         }
-        retained_bytes = retained_bytes.saturating_add(line.bytes.len());
+        retained_bytes = retained_bytes.saturating_add(bytes);
         next_after = trace.seq;
         page.push(StudioEvent {
             seq: trace.seq.to_string(),
@@ -479,18 +469,11 @@ pub fn events(
         });
     }
 
-    if let Some(summary) = summary.as_ref()
-        && reached_eof
-        && summary.events_recorded.saturating_add(1) != expected
-    {
-        integrity = StudioIntegrity::Corrupt;
+    if matches!(integrity, StudioIntegrity::Corrupt) {
+        run.state = "corrupt".to_owned();
+        run.integrity = StudioIntegrity::Corrupt;
     }
-    let complete = reached_eof
-        && summary.is_some()
-        && matches!(integrity, StudioIntegrity::Ok)
-        && summary
-            .as_ref()
-            .is_some_and(|summary| summary.events_recorded < expected);
+    let complete = reached_eof && summary.is_some() && matches!(integrity, StudioIntegrity::Ok);
     Ok(StudioEventPage {
         api: STUDIO_API,
         run,
@@ -641,7 +624,7 @@ fn project_unsafe_run(run_id: &str) -> StudioRun {
 }
 
 fn project_run(path: &Path, run_id: &str, summary: Option<&RunSummary>) -> StudioRun {
-    let context = first_event_context(path, run_id);
+    let context = first_event_context(path, run_id, summary.is_some());
     let summary_integrity = summary.map_or(StudioIntegrity::Partial, |_| StudioIntegrity::Ok);
     let (state, started, finished, events_recorded, outcome) = summary.map_or_else(
         || {
@@ -665,7 +648,11 @@ fn project_run(path: &Path, run_id: &str, summary: Option<&RunSummary>) -> Studi
     );
     StudioRun {
         run_id: run_id.to_owned(),
-        state,
+        state: if context.corrupt {
+            "corrupt".to_owned()
+        } else {
+            state
+        },
         integrity: if context.corrupt {
             StudioIntegrity::Corrupt
         } else {
@@ -724,7 +711,7 @@ struct RunContext {
     corrupt: bool,
 }
 
-fn first_event_context(path: &Path, run_id: &str) -> RunContext {
+fn first_event_context(path: &Path, run_id: &str, closed: bool) -> RunContext {
     let event_path = path.join("events.jsonl");
     if require_plain_file(&event_path).is_err() {
         return RunContext {
@@ -738,10 +725,10 @@ fn first_event_context(path: &Path, run_id: &str) -> RunContext {
             ..RunContext::default()
         };
     };
-    let mut reader = BufReader::new(file);
-    let line = match read_bounded_line(&mut reader, MAX_EVENT_LINE_BYTES) {
-        Ok(Some(line)) => line,
-        Ok(None) => return RunContext::default(),
+    let mut reader = EventReader::new(BufReader::new(file), run_id, closed);
+    let event = match reader.next() {
+        Ok(EventRead::Event { event, .. }) => event,
+        Ok(EventRead::End | EventRead::Partial) => return RunContext::default(),
         Err(_) => {
             return RunContext {
                 corrupt: true,
@@ -749,24 +736,6 @@ fn first_event_context(path: &Path, run_id: &str) -> RunContext {
             };
         }
     };
-    if !line.terminated {
-        return RunContext {
-            corrupt: false,
-            ..RunContext::default()
-        };
-    }
-    let Ok(event) = serde_json::from_slice::<TraceEvent>(strip_newline(&line.bytes)) else {
-        return RunContext {
-            corrupt: true,
-            ..RunContext::default()
-        };
-    };
-    if event.api != TRACE_API || event.run_id != run_id || event.seq != 1 {
-        return RunContext {
-            corrupt: true,
-            ..RunContext::default()
-        };
-    }
     let object = event.data.as_object();
     let value = |name: &str| {
         object
@@ -869,13 +838,19 @@ fn read_summary(path: &Path, run_id: &str) -> Result<Option<RunSummary>, StudioE
         Err(error) => return Err(StudioError::Io(error)),
     }
     let bytes = read_bounded_file(&summary_path, MAX_SUMMARY_BYTES)?;
-    let summary: RunSummary = serde_json::from_slice(&bytes).map_err(StudioError::Json)?;
-    if summary.api != TRACE_API || summary.run_id != run_id {
-        return Err(StudioError::CorruptTrace(run_id.to_owned()));
+    journal_reader::decode_summary(&bytes, run_id)
+        .map(Some)
+        .map_err(|error| map_read_error(error, &summary_path, run_id))
+}
+
+fn map_read_error(error: ReadError, path: &Path, run_id: &str) -> StudioError {
+    match error {
+        ReadError::Io(error) => StudioError::Io(error),
+        ReadError::Json(error) => StudioError::Json(error),
+        ReadError::Corrupt(_) => StudioError::CorruptTrace(run_id.to_owned()),
+        ReadError::LineTooLarge => StudioError::EventLineTooLarge,
+        ReadError::ScanBudgetExceeded => StudioError::BudgetExceeded(path.to_path_buf()),
     }
-    validate_outcome_consistency(&summary.outcome)
-        .map_err(|_| StudioError::CorruptTrace(run_id.to_owned()))?;
-    Ok(Some(summary))
 }
 
 fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, StudioError> {
@@ -943,48 +918,6 @@ fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
-}
-
-struct BoundedLine {
-    bytes: Vec<u8>,
-    terminated: bool,
-}
-
-fn read_bounded_line(
-    reader: &mut impl BufRead,
-    max_bytes: usize,
-) -> Result<Option<BoundedLine>, StudioError> {
-    let mut output = Vec::new();
-    loop {
-        let available = reader.fill_buf().map_err(StudioError::Io)?;
-        if available.is_empty() {
-            return Ok((!output.is_empty()).then_some(BoundedLine {
-                bytes: output,
-                terminated: false,
-            }));
-        }
-        let take = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index + 1);
-        if output.len().saturating_add(take) > max_bytes {
-            return Err(StudioError::EventLineTooLarge);
-        }
-        let terminated = available.get(take.saturating_sub(1)) == Some(&b'\n');
-        output.extend_from_slice(&available[..take]);
-        reader.consume(take);
-        if terminated {
-            return Ok(Some(BoundedLine {
-                bytes: output,
-                terminated: true,
-            }));
-        }
-    }
-}
-
-fn strip_newline(bytes: &[u8]) -> &[u8] {
-    let without_lf = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    without_lf.strip_suffix(b"\r").unwrap_or(without_lf)
 }
 
 fn validate_run_id(run_id: &str) -> Result<(), StudioError> {
@@ -1108,8 +1041,7 @@ impl StudioError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
+    use crate::journal::{TRACE_API, TraceEvent};
     use tempfile::tempdir;
 
     use super::*;
@@ -1131,21 +1063,6 @@ mod tests {
             elapsed_ms: 3,
             progress: None,
         }
-    }
-
-    #[test]
-    fn bounded_line_preserves_unicode_and_partial_tail() {
-        let mut input = Cursor::new("你好\u{2028}world\npartial".as_bytes());
-        let first = read_bounded_line(&mut input, 128)
-            .expect("line")
-            .expect("first");
-        assert!(first.terminated);
-        assert_eq!(strip_newline(&first.bytes), "你好\u{2028}world".as_bytes());
-        let second = read_bounded_line(&mut input, 128)
-            .expect("tail")
-            .expect("partial");
-        assert!(!second.terminated);
-        assert_eq!(second.bytes, b"partial");
     }
 
     #[test]
@@ -1265,6 +1182,88 @@ mod tests {
         assert_eq!(page.events[0].kind, "fixture.after_cursor");
         assert_eq!(page.next_after, "2");
         assert!(page.complete);
+    }
+
+    #[test]
+    fn run_queries_agree_on_open_tails_and_closed_trace_corruption() {
+        for (case, closed, expected) in [
+            ("complete", true, "ok"),
+            ("partial_tail", false, "partial"),
+            ("partial_tail", true, "corrupt"),
+            ("malformed", true, "corrupt"),
+            ("sequence_gap", true, "corrupt"),
+            ("summary_count", true, "corrupt"),
+        ] {
+            let temporary = tempdir().expect("workspace");
+            let workspace = Workspace::at(temporary.path());
+            fs::create_dir_all(&workspace.runs_path).expect("runs directory");
+            fs::create_dir_all(&workspace.scripts_path).expect("scripts directory");
+            fs::write(&workspace.config_path, "placeholder").expect("config");
+            fs::write(&workspace.prompt_path, "placeholder").expect("prompt");
+            let mut journal = RunJournal::create(&workspace).expect("journal");
+            journal
+                .record("fixture.first", Value::Null)
+                .expect("first event");
+            journal
+                .record("fixture.second", Value::Null)
+                .expect("second event");
+            let run_id = journal.run_id().to_owned();
+            let event_path = journal.event_path().to_path_buf();
+            let summary_path = journal.summary_path().to_path_buf();
+            if closed {
+                journal.finish(outcome()).expect("summary");
+            }
+            drop(journal);
+            let original = fs::read_to_string(&event_path).expect("events");
+            match case {
+                "partial_tail" => fs::write(&event_path, original.trim_end()).expect("tail"),
+                "malformed" => fs::write(
+                    &event_path,
+                    format!("{}\nnot-json\n", original.lines().next().unwrap()),
+                )
+                .expect("malformed line"),
+                "sequence_gap" => {
+                    let mut lines: Vec<TraceEvent> = original
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect();
+                    lines[1].seq = 3;
+                    let encoded: String = lines
+                        .iter()
+                        .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+                        .collect();
+                    fs::write(&event_path, encoded).expect("sequence gap");
+                }
+                "summary_count" => {
+                    let mut summary: RunSummary =
+                        serde_json::from_slice(&fs::read(&summary_path).unwrap()).unwrap();
+                    summary.events_recorded = 3;
+                    fs::write(&summary_path, serde_json::to_vec(&summary).unwrap())
+                        .expect("wrong count");
+                }
+                _ => {}
+            }
+            let page = events(&workspace.root, &run_id, 0, 10, 1024 * 1024).expect("studio page");
+            let listed = crate::runs::list(&workspace.root, None, None, 10).expect("run list");
+            assert_eq!(
+                serde_json::to_value(page.integrity).unwrap(),
+                expected,
+                "{case}, closed={closed}"
+            );
+            assert_eq!(
+                serde_json::to_value(listed.runs[0].integrity).unwrap(),
+                expected,
+                "{case}, closed={closed}"
+            );
+            if expected == "corrupt" {
+                assert_eq!(page.run.state, "corrupt");
+                assert!(matches!(page.run.integrity, StudioIntegrity::Corrupt));
+                assert!(listed.runs[0].protected);
+                assert!(!page.complete);
+            } else {
+                assert_eq!(page.complete, closed);
+            }
+        }
     }
 
     #[test]

@@ -133,6 +133,11 @@ samples and artifacts are local business content. Runtime-generated times and
 execution results are distinct from agent-authored judgments. Parent references
 express known dependencies; timestamps alone do not establish causality.
 
+Provider failures are recorded under `provider_error` in `run.json` and shown
+as “Provider failure” in both report formats. The `experiment` field and
+“Experiment observation” section are reserved for probe results and failures;
+the unused observation field is `null`.
+
 The report records the caller's agent/model labels and any explicit provider
 selection. A caller-supplied or requested model is not proof of the model that
 actually ran. Missing identity remains “not reported”; Motivo does not guess it
@@ -148,6 +153,11 @@ Reports embed their core content and styles. They need no port, server, CDN,
 login, browser directory permission, or adjacent JSON fetch. Evidence can be
 expanded, and the browser can reload the current file after a new snapshot is
 published. Core content is readable with JavaScript disabled.
+
+Section extraction and HTML rendering share code-fence boundaries. Backtick
+and tilde fences may have up to three leading spaces; a closing fence must use
+the same character at least as many times and contain no trailing text. Headings
+inside these blocks remain quoted material rather than report sections.
 
 The page is a snapshot. Its generation time and last observation time describe
 what has been recorded; it is not a live connection or proof that an old

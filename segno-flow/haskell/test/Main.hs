@@ -3,7 +3,9 @@
 
 module Main (main) where
 
-import Control.Exception (IOException, bracket, catch)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (AsyncCancelled (..))
+import Control.Exception (AsyncException (ThreadKilled), IOException, SomeAsyncException, SomeException, bracket, catch, fromException, throwIO, toException, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
@@ -43,6 +45,7 @@ import Segno.Lifecycle
     Lifecycle (..),
     OccurrenceRecord (..),
   )
+import Segno.Internal.Exception (trySynchronous)
 import Segno.Protocol
   ( InstalledJob (..),
     PluginFailure (..),
@@ -51,6 +54,12 @@ import Segno.Protocol
     PlannedOccurrence (..),
     SourceManifest (..),
     StateCasResult (..),
+    StateCasRequest (..),
+    OperationId (..),
+    OccurrenceId (..),
+    FencingToken (..),
+    FencingEpoch (..),
+    FencingContext (..),
     StateManifest (..),
     StateSnapshot (..),
     TaskManifest (..),
@@ -82,17 +91,23 @@ import System.Directory
     createDirectory,
     createDirectoryIfMissing,
     doesFileExist,
+    findExecutable,
     getCurrentDirectory,
     getTemporaryDirectory,
     listDirectory,
     removeDirectoryRecursive,
   )
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
-import System.FilePath (makeRelative, takeDirectory, (</>))
+import System.Environment (getEnv, setEnv)
+import System.Timeout (timeout)
+import System.FilePath (makeRelative, searchPathSeparator, takeDirectory, (</>))
+import System.Info (os)
+import System.Process (readProcessWithExitCode)
 import ServiceTests (runServiceTests)
 
 main :: IO ()
 main = do
+  useRepositoryTactus
   run "strict plugin request ids" testStrictRequestIds
   run "strict trigger and state plugin payloads" testStrictPluginPayloads
   run "pure interval planning" testIntervalPlanning
@@ -101,8 +116,11 @@ main = do
   run "stale fencing token cannot checkpoint after reclaim" testStaleFence
   run "expired running work becomes outcome unknown" testRunningLeaseExpiryUnknown
   run "relative Clef SDK discovers sibling Segno package" testRelativeSdkDiscovery
+  run "plugin registration parses TOML and preserves custom commands" testPluginRegistration
   run "bad trigger does not starve a ready occurrence" testBadTriggerIsolation
   run "outcome unknown is not automatically retried" testOutcomeUnknownStops
+  run "synchronous handlers preserve cancellation and timeout" testSynchronousBoundary
+  run "driver cancellation propagates through every execution phase" testDriverCancellation
   run "virtual clock and fake runner execute one persistent occurrence" testVirtualDriver
   run "virtual minute task checkpoints three windows and survives restart" testVirtualWindowPersistence
   runServiceTests
@@ -116,6 +134,130 @@ run label test = do
 
 assert :: Bool -> String -> IO ()
 assert condition message = unless condition (ioError (userError message))
+
+-- Initialization crosses the same local Tactus configuration boundary as the
+-- installed executable. Prefer this checkout's build over an older PATH copy.
+useRepositoryTactus :: IO ()
+useRepositoryTactus = do
+  sdk <- locateSegnoSource
+  let directory = takeDirectory sdk </> "Build" </> "cargo" </> "debug"
+      executable = directory </> if os == "mingw32" then "tactus.exe" else "tactus"
+  built <- doesFileExist executable
+  if built
+    then do
+      inherited <- getEnv "PATH"
+      setEnv "PATH" (directory <> [searchPathSeparator] <> inherited)
+    else do
+      installed <- findExecutable "tactus"
+      when (installed == Nothing) (fail "Segno tests require current Tactus; run cargo build --workspace --locked first")
+
+testPluginRegistration :: IO ()
+testPluginRegistration = forM_ cases $ \(label, pluginConfig, custom) ->
+  withTemporaryWorkspace ("registration-" <> label) $ \root -> do
+    sdk <- locateSegnoSource
+    createTactusWorkspace root sdk
+    let configPath = root </> ".tactus" </> "tactus.toml"
+    TextIO.writeFile configPath (testWorkspaceConfig pluginConfig)
+    _ <- initialiseWorkspaceWithSdk root (Just sdk)
+    configured <- TextIO.readFile configPath
+    _ <- initialiseWorkspaceWithSdk root (Just sdk)
+    repeated <- TextIO.readFile configPath
+    assert (configured == repeated) "repeat registration rewrote the configuration"
+    when custom $ assert (Text.isInfixOf "custom-command" configured) "custom plugin command was replaced"
+    (status, output, errors) <- readProcessWithExitCode "tactus" ["runtime-json", "--root", root] ""
+    assert (status == ExitSuccess) ("registered TOML was invalid: " <> errors)
+    document <- either fail pure (decodeJsonText (Text.pack output) :: Either String Value)
+    plugins <- either fail pure (parseEither (withObject "runtime" (.: "plugins")) document :: Either String Object)
+    assert (all (`KeyMap.member` plugins) ["time.interval", "time.cron", "segno.state", "system.active-window"])
+      "a comment, string, or alternate TOML key syntax hid a missing plugin"
+  where
+    cases =
+      [ ("comment", "# Example: \"time.interval\"\n[plugins]\n", False),
+        ("literal", "[plugins.'time.interval']\ncommand = ['custom-command']\n", True),
+        ("dotted", "[plugins]\n\"time.interval\".command = ['custom-command']\n", True),
+        ("escaped", "[plugins.\"time\\u002einterval\"]\ncommand = ['custom-command']\n", True),
+        ("inline", "plugins = { 'time.interval' = { command = ['custom-command'] } }\n", True),
+        ("string", "[plugins.extra]\ncommand = ['unused']\n[plugins.extra.options]\nnote = '''\"time.interval\"'''\n", False)
+      ]
+
+testSynchronousBoundary :: IO ()
+testSynchronousBoundary = do
+  ordinary <- trySynchronous (ioError (userError "ordinary failure")) :: IO (Either SomeException ())
+  assert (isLeft ordinary) "synchronous failure was not captured"
+  forM_ [toException ThreadKilled, toException AsyncCancelled] $ \cancellation -> do
+    outcome <- try (trySynchronous (throwIO cancellation)) :: IO (Either SomeException (Either SomeException ()))
+    case outcome of
+      Left exception -> assert (isAsync exception) "cancellation changed exception type"
+      Right _ -> fail "asynchronous cancellation was captured as a normal failure"
+  timed <- timeout 1000 (trySynchronous (threadDelay 1000000))
+  case timed of
+    Nothing -> pure ()
+    Just _ -> fail "System.Timeout cancellation was captured as a normal failure"
+  where
+    isAsync exception = case fromException exception :: Maybe SomeAsyncException of
+      Just _ -> True
+      Nothing -> False
+
+testDriverCancellation :: IO ()
+testDriverCancellation = forM_ ["poll", "load", "task", "compare-and-set", "cleanup-failure"] $ \phase ->
+  withTemporaryWorkspace ("cancel-" <> Text.unpack phase) $ \root -> do
+    sdk <- locateSegnoSource
+    createTactusWorkspace root sdk
+    paths <- initialiseWorkspaceWithSdk root (Just sdk)
+    cleanupClockFailed <- newIORef False
+    let now = read "2026-08-16 12:00:00 UTC" :: UTCTime
+        manifest = TaskManifest "cancelled-task" [SourceManifest "quiet" "quiet.trigger" (object [])]
+          (StateManifest "cancelled-state" 1 "segno.state" "compare-and-set" (object []))
+        baseRunner = fakeRunner now
+        runTask workspace script mode invocationPath resultPath context deadline
+          | phase == "task" = throwIO ThreadKilled
+          | phase == "cleanup-failure" = writeIORef cleanupClockFailed True >> throwIO ThreadKilled
+          | otherwise = do
+              outcome <- runnerTask baseRunner workspace script mode invocationPath resultPath context deadline
+              path <- maybe (fail "missing invocation") pure invocationPath
+              invocation <- readJsonValue path
+              (task, identity) <- either fail pure (parseEither parseInvocationIdentity invocation)
+              writeJson resultPath (object
+                [ "api" .= resultApi, "task" .= task, "occurrence_id" .= identity,
+                  "decision" .= object
+                    [ "kind" .= ("complete" :: Text), "output" .= Null,
+                      "state" .= object
+                        [ "kind" .= ("set" :: Text), "expected_revision" .= ("0" :: Text),
+                          "schema_version" .= (1 :: Int), "value" .= object []
+                        ]
+                    ]
+                ])
+              pure outcome
+        callPlugin workspace plugin method params
+          | method == phase = throwIO ThreadKilled
+          | method == "poll" = pure (Right (toJSON (PollResult [] (Just (addUTCTime 60 now)))))
+          | otherwise = runnerPlugin baseRunner workspace plugin method params
+        environment = defaultDriverEnvironment
+          { driverClock = Clock
+              (do
+                failed <- readIORef cleanupClockFailed
+                if failed then ioError (userError "cleanup clock unavailable") else pure now)
+              (\_ -> pure ()),
+            driverRunner = Runner runTask callPlugin
+          }
+    writeJson (pathsJobs paths </> "cancelled-task.json") (InstalledJob "unused.hs" manifest)
+    _ <- insertOccurrence paths "cancelled-task" (occurrence "cancelled-occurrence" "cancelled-key" now) now
+    result <- try (runOnceWith environment root) :: IO (Either SomeException RunSummary)
+    case result of
+      Left exception -> case fromException exception of
+        Just ThreadKilled -> pure ()
+        _ -> fail ("driver changed cancellation into " <> show exception)
+      Right _ -> fail ("driver swallowed cancellation during " <> Text.unpack phase)
+    records <- lifecycleStatus paths (Just "cancelled-task")
+    let expected = case phase of
+          "poll" -> Ready
+          "cleanup-failure" -> Running
+          _ -> OutcomeUnknown
+    assert (map recordLifecycle records == [expected]) "interrupted occurrence became retryable"
+    when (phase == "cleanup-failure") $ do
+      _ <- recoverExpiredLeases paths (addUTCTime 100000 now)
+      recovered <- lifecycleStatus paths (Just "cancelled-task")
+      assert (map recordLifecycle recovered == [OutcomeUnknown]) "failed cancellation cleanup was not recovered as unknown"
 
 testStrictRequestIds :: IO ()
 testStrictRequestIds = do
@@ -205,12 +347,31 @@ testStaleFence = withTemporaryWorkspace "stale-fence" $ \root -> do
   secondClaim <- claimNextOccurrence paths later (addUTCTime 300 later) >>= maybe (fail "reclaim missing") pure
   _ <- markOccurrenceRunning paths "fenced-occurrence" (claimedFencingToken secondClaim) (addUTCTime 300 later) later
   snapshot <- loadBusinessState paths manifest later
+  let request owner claimed = StateCasRequest
+        { casStateKey = "fenced-state",
+          casExpectedRevision = snapshotRevision snapshot,
+          casSchemaVersion = 1,
+          casValue = object ["owner" .= (owner :: Text)],
+          casOperationId = OperationId "checkpoint",
+          casFencing = FencingContext
+            { fenceOccurrenceId = OccurrenceId "fenced-occurrence",
+              fenceToken = FencingToken (claimedFencingToken claimed),
+              fenceEpoch = FencingEpoch (claimedAttempt claimed)
+            }
+        }
   stale <-
-    compareAndSetBusinessState paths "fenced-state" (snapshotRevision snapshot) 1 (object ["owner" .= ("stale" :: Text)]) "checkpoint" "fenced-occurrence" (claimedFencingToken firstClaim) (claimedAttempt firstClaim) later
+    compareAndSetBusinessState paths (request "stale" firstClaim) later
   assert (isConflict stale) "expired fencing token changed business state"
   current <-
-    compareAndSetBusinessState paths "fenced-state" (snapshotRevision snapshot) 1 (object ["owner" .= ("current" :: Text)]) "checkpoint" "fenced-occurrence" (claimedFencingToken secondClaim) (claimedAttempt secondClaim) later
+    compareAndSetBusinessState paths (request "current" secondClaim) later
   assert (current == CasApplied "1") "current fencing token could not checkpoint"
+  decodedRequest <- either fail pure (parseEither parseJSON (toJSON (request "current" secondClaim)))
+  replayed <- compareAndSetBusinessState paths decodedRequest later
+  assert (replayed == current) "a serialized request lost its idempotent operation identity"
+  changed <- compareAndSetBusinessState paths (decodedRequest {casValue = object ["owner" .= ("different" :: Text)]}) later
+  assert (isConflict changed) "reused operation identity accepted a different state write"
+  history <- businessHistory paths (Just "fenced-state") 10
+  assert (length history == 1) "replayed or conflicting CAS added business history"
 
 testRunningLeaseExpiryUnknown :: IO ()
 testRunningLeaseExpiryUnknown = withTemporaryWorkspace "running-lease" $ \root -> do
@@ -245,14 +406,18 @@ checkpointOccurrence paths manifest now occurrenceIdentity idempotency expected 
   result <-
     compareAndSetBusinessState
       paths
-      "window-log"
-      (snapshotRevision snapshot)
-      1
-      (object ["count" .= count])
-      "record-window"
-      occurrenceIdentity
-      (claimedFencingToken selected)
-      (claimedAttempt selected)
+      StateCasRequest
+        { casStateKey = "window-log",
+          casExpectedRevision = snapshotRevision snapshot,
+          casSchemaVersion = 1,
+          casValue = object ["count" .= count],
+          casOperationId = OperationId "record-window",
+          casFencing = FencingContext
+            { fenceOccurrenceId = OccurrenceId occurrenceIdentity,
+              fenceToken = FencingToken (claimedFencingToken selected),
+              fenceEpoch = FencingEpoch (claimedAttempt selected)
+            }
+        }
       now
   revision <- case result of
     CasApplied value -> pure value
@@ -351,7 +516,7 @@ persistentWindowRunner paths nowRef windowCalls pluginCalls = Runner runTask cal
       when (mode /= "execute") (fail "unexpected fake task mode")
       path <- maybe (fail "missing fake invocation") pure invocationPath
       invocationValue <- readJsonValue path
-      (task, occurrenceIdentity, fence, fenceEpoch, revision, count, logicalTime) <-
+      (task, occurrenceIdentity, fence, epoch, revision, count, logicalTime) <-
         either fail pure (parseEither parseWindowInvocation invocationValue)
       modifyIORef' windowCalls (+ 1)
       let nextCount = count + 1
@@ -371,14 +536,18 @@ persistentWindowRunner paths nowRef windowCalls pluginCalls = Runner runTask cal
       checkpointResult <-
         compareAndSetBusinessState
           paths
-          "example.active-window"
-          revision
-          1
-          nextState
-          "capture-active-window"
-          occurrenceIdentity
-          fence
-          fenceEpoch
+          StateCasRequest
+            { casStateKey = "example.active-window",
+              casExpectedRevision = revision,
+              casSchemaVersion = 1,
+              casValue = nextState,
+              casOperationId = OperationId "capture-active-window",
+              casFencing = FencingContext
+                { fenceOccurrenceId = OccurrenceId occurrenceIdentity,
+                  fenceToken = FencingToken fence,
+                  fenceEpoch = FencingEpoch epoch
+                }
+            }
           now
       nextRevision <- case checkpointResult of
         CasApplied value -> pure value
@@ -437,7 +606,7 @@ parseWindowInvocation :: Value -> Parser (Text, Text, Text, Word32, Maybe Text, 
 parseWindowInvocation = withObject "window invocation" $ \fields -> do
   task <- fields .: "task"
   fence <- fields .: "fencing_token"
-  fenceEpoch <- fields .: "attempt"
+  epoch <- fields .: "attempt"
   trigger <- fields .: "trigger"
   selectedState <- fields .: "state"
   occurrenceIdentity <- withObject "trigger" (.: "occurrence_id") trigger
@@ -445,7 +614,7 @@ parseWindowInvocation = withObject "window invocation" $ \fields -> do
   revision <- withObject "state" (.:? "revision") selectedState
   stateValue <- withObject "state" (.: "value") selectedState
   count <- withObject "window log" (.: "capturedWindows") stateValue
-  pure (task, occurrenceIdentity, fence, fenceEpoch, revision, count, logicalTime)
+  pure (task, occurrenceIdentity, fence, epoch, revision, count, logicalTime)
 
 testRelativeSdkDiscovery :: IO ()
 testRelativeSdkDiscovery = withTemporaryWorkspace "relative-sdk" $ \root -> do
@@ -604,10 +773,17 @@ occurrence identity idempotency now =
 createTactusWorkspace :: FilePath -> FilePath -> IO ()
 createTactusWorkspace root sdk = do
   createDirectoryIfMissing True (root </> ".tactus" </> "scripts")
-  writeFile (root </> ".tactus" </> "tactus.toml") "api = \"clef.runtime/v1\"\ndefault_provider = \"codex\"\ninstructions = \".tactus/PROMPT.md\"\n[plugins]\n"
+  createDirectoryIfMissing True (root </> ".tactus" </> "runs")
+  TextIO.writeFile (root </> ".tactus" </> "tactus.toml") (testWorkspaceConfig "[plugins]\n")
+  writeFile (root </> ".tactus" </> "PROMPT.md") "Offline fixture.\n"
   let clef = takeDirectory sdk </> "clef-sdk"
       relativeClef = fmap (\character -> if character == '\\' then '/' else character) (makeRelative (root </> ".tactus") clef)
   writeFile (root </> ".tactus" </> "cabal.project") ("packages:\n  \"" <> relativeClef <> "\"\n")
+
+testWorkspaceConfig :: Text -> Text
+testWorkspaceConfig plugins =
+  "api = \"clef.runtime/v1\"\ndefault_provider = \"fake\"\ninstructions = \".tactus/PROMPT.md\"\n"
+    <> plugins <> "\n[providers.fake]\ncommand = ['unused-provider']\n"
 
 locateSegnoSource :: IO FilePath
 locateSegnoSource = do
