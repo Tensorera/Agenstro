@@ -64,14 +64,16 @@ Then follow the three-step path:
 
 1. In your project, run `tactus init --sdk /path/to/Agenstro/clef-sdk`.
 2. Start your chosen coding-agent CLI in that folder.
-3. Ask the agent to use Motivo to investigate, organize or review the task.
+3. Ask the agent to read `.tactus/skills/motivo/SKILL.md` and use it to
+   investigate, organize or review the task.
 
-Initialization installs the canonical skills and supported project-local host
-pointers. Existing user files are preserved. If your host does not expose skills,
-ask it to read `.tactus/skills/motivo/SKILL.md` directly.
+Initialization installs skills only under `.tactus/skills` for explicit reading.
+It does not create `.codex`, `.claude`, `.opencode`, or `.agents` discovery
+mirrors. Existing user files and previously installed mirrors are preserved.
 
-The [Tactus skill](skills/tactus/SKILL.md) covers execution, daemon supervision
-and live output. The [Segno skill](skills/segno/SKILL.md) covers persistent
+The [Tactus skill](skills/tactus/SKILL.md) covers Haskell execution and live
+output; daemon monitoring requires separate explicit authorization.
+The [Segno skill](skills/segno/SKILL.md) covers persistent
 organizers and scheduling. For existing projects, `tactus skills update --dry-run`
 previews changes; `tactus skills update` updates unchanged bundled copies and
 provides incoming versions for customized files without overwriting them.

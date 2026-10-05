@@ -47,6 +47,46 @@ fn main() {
     let request: Value = serde_json::from_str(&input).expect("request JSON");
     let id = request.get("id").cloned().expect("request id");
     match mode.as_str() {
+        "permission-capable"
+        | "permission-partial"
+        | "permission-legacy"
+        | "permission-invalid"
+        | "permission-slow-description" => {
+            let workspace =
+                std::path::Path::new(request["params"]["workspace"].as_str().expect("workspace"));
+            let mut calls = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(workspace.join("permission-calls.jsonl"))
+                .expect("call log");
+            writeln!(calls, "{}", request).expect("call record");
+            if mode == "permission-slow-description" && request["method"] == "describe" {
+                thread::sleep(Duration::from_secs(30));
+            }
+            let value = if request["method"] == "describe" {
+                match mode.as_str() {
+                    "permission-capable" => serde_json::json!({"permissions_capabilities":{
+                        "allowed_tools":{"support":"supported","scope":"fixture"},
+                        "allowed_skills":{"support":"supported","scope":"fixture"},
+                        "sandbox":{"support":"supported","scope":"fixture","workspace":true}
+                    }}),
+                    "permission-partial" => serde_json::json!({"permissions_capabilities":{
+                        "allowed_tools":{"support":"partial","scope":"builtin","reason":"MCP tools retain normal mode"},
+                        "allowed_skills":{"support":"unsupported","reason":"No skills filter: PRIVATE_PERMISSION_REASON /private/secret"},
+                        "sandbox":{"support":"supported","scope":"fixture","workspace":false,"modes":["read-only"]}
+                    }}),
+                    "permission-invalid" => {
+                        serde_json::json!({"permissions_capabilities":{"allowed_tools":{"support":"future-mode"}}})
+                    }
+                    _ => serde_json::json!({"name":"legacy"}),
+                }
+            } else {
+                let mut value = request["params"].clone();
+                value["text"] = Value::String(request["params"].to_string());
+                value
+            };
+            write_json(&serde_json::json!({"type":"result","id":id,"ok":true,"value":value}));
+        }
         "success" => success(&id, Duration::ZERO, false),
         "stream" => success(&id, Duration::from_millis(400), false),
         "stderr" => success(&id, Duration::ZERO, true),

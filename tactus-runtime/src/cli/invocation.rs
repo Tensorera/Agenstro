@@ -4,7 +4,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, TryLockError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -13,9 +13,9 @@ use super::{
     CliError, InvocationReport, ToolRuntime, apply_transport_limits,
     attach_builtin_provider_to_supervised_group, create_journal_preserving_execution,
     diagnostic_frame, finish_journal_preserving_outcome, in_memory_degraded_summary,
-    note_journal_degradation, outcome_unknown_diagnostic_value, presentation_for_frame,
-    process_error_outcome, record_outcome_transition, resolve_builtin_command,
-    safe_invocation_subject, safe_presentation_identifier,
+    known_runtime_failure, note_journal_degradation, outcome_unknown_diagnostic_value,
+    permission_dispatch, presentation_for_frame, process_error_outcome, record_outcome_transition,
+    resolve_builtin_command, safe_invocation_subject, safe_presentation_identifier,
 };
 use crate::{
     journal::{
@@ -158,6 +158,9 @@ impl Invocation {
         request: &PluginRequest,
         mut sink: impl FnMut(&PluginFrame) + Send + 'static,
     ) -> Result<InvocationCompletion, CliError> {
+        let started = Instant::now();
+        let total_deadline =
+            (process.timeout_seconds != 0).then(|| Duration::from_secs(process.timeout_seconds));
         let tool_runtime = ToolRuntime::create(process.workspace)?;
         let mut spec = ProcessSpec::new(
             resolve_builtin_command(process.definition.command())?,
@@ -169,20 +172,74 @@ impl Invocation {
             .insert("TACTUS_WATCH_RUN_ID".to_owned(), self.run_id.clone());
         attach_builtin_provider_to_supervised_group(&mut spec, process.definition.command());
         spec.limits.deadline =
-            (process.timeout_seconds != 0).then(|| Duration::from_secs(process.timeout_seconds));
+            total_deadline.map(|budget| budget.saturating_sub(started.elapsed()));
+        let builtin =
+            spec.command
+                .get(1)
+                .is_some_and(|value| value == "provider-host")
+                && spec.command.first().is_some_and(|value| {
+                    env::current_exe().ok().as_deref() == Some(Path::new(value))
+                });
+        let (request, permission_report) =
+            if matches!(process.definition, ResolvedPlugin::Provider(_))
+                && request.method == "invoke"
+                && !builtin
+            {
+                permission_dispatch::negotiate(&mut spec, request, process.cancellation)?
+            } else {
+                (request.clone(), None)
+            };
+        let mut initial_events = permission_report
+            .as_ref()
+            .map(|report| permission_dispatch::events(&request, report))
+            .unwrap_or_default();
         let mut shared_state = SharedJournal::new(self.journal);
         shared_state.error = self.journal_error;
+        for event in &initial_events {
+            shared_state.record_frame(&self.name, event);
+        }
         let shared_journal = Arc::new(Mutex::new(shared_state));
         let callback_journal = Arc::clone(&shared_journal);
         let display_name = self.name.clone();
-        let result = ProcessSupervisor.invoke(&spec, request, process.cancellation, move |frame| {
-            callback_journal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_frame(&display_name, frame);
-            sink(frame);
-        });
-        let outcome = result.unwrap_or_else(|error| process_error_outcome(&error));
+        let callback_report = permission_report.clone();
+        // Charge all preparation, negotiation, report serialization and journal
+        // writes to one wall-clock budget, not just the describe subprocess.
+        spec.limits.deadline =
+            total_deadline.map(|budget| budget.saturating_sub(started.elapsed()));
+        let result = if process.cancellation.is_cancelled() {
+            Ok(known_runtime_failure(
+                "provider_dispatch_cancelled",
+                "Invocation was cancelled before provider dispatch.",
+            ))
+        } else if spec.limits.deadline == Some(Duration::ZERO) {
+            Ok(known_runtime_failure(
+                "provider_dispatch_deadline",
+                "The invocation deadline expired during permission negotiation; invoke was not dispatched.",
+            ))
+        } else {
+            ProcessSupervisor.invoke(&spec, &request, process.cancellation, move |frame| {
+                // Deliver synthetic reports inside the bounded observer worker too;
+                // a blocked downstream sink must not stall process supervision.
+                for event in initial_events.drain(..) {
+                    sink(&event);
+                }
+                let mut frame = frame.clone();
+                if let Some(report) = &callback_report {
+                    permission_dispatch::annotate_frame(&mut frame, report);
+                }
+                callback_journal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_frame(&display_name, &frame);
+                sink(&frame);
+            })
+        };
+        let mut outcome = result.unwrap_or_else(|error| process_error_outcome(&error));
+        if let Some(report) = &permission_report
+            && let Some(terminal) = &mut outcome.terminal
+        {
+            permission_dispatch::annotate_terminal(terminal, report);
+        }
         let (mut journal, mut degradation) = match take_shared_journal(&shared_journal) {
             Ok((journal, error)) => (Some(journal), error.map(|error| error.to_string())),
             Err(error) => (None, Some(error.to_string())),
@@ -300,6 +357,79 @@ mod tests {
     };
     use std::{fs, io};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn exhausted_permission_probe_budget_never_dispatches_invoke() {
+        let temporary = tempdir().unwrap();
+        let sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("clef-sdk");
+        let workspace =
+            crate::workspace::initialize_workspace(temporary.path().join("project"), Some(&sdk))
+                .unwrap()
+                .workspace;
+        let script = workspace.root.join("slow-provider.sh");
+        fs::write(
+            &script,
+            "IFS= read -r request\nprintf '%s\\n' \"$request\" >> calls.jsonl\nsleep 2\n",
+        )
+        .unwrap();
+        let definition = crate::workspace::ProviderDefinition {
+            command: vec!["sh".to_owned(), script.display().to_string()],
+            model: None,
+            effort: None,
+            permissions: None,
+            options: Default::default(),
+        };
+        let limits = RuntimeLimits::default();
+        let cancellation = CancellationToken::new();
+        let invocation = Invocation::start(
+            &workspace,
+            "slow",
+            "provider",
+            "invoke",
+            &definition.command,
+            InvocationOrigin::Cli,
+        );
+        let request = PluginRequest::new(
+            "one",
+            "invoke",
+            json!({"workspace":workspace.root,"permissions":{"allowed_tools":[]}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let completed = invocation
+            .run(
+                InvocationProcess {
+                    workspace: &workspace,
+                    definition: ResolvedPlugin::Provider(&definition),
+                    limits: &limits,
+                    timeout_seconds: 1,
+                    cancellation: &cancellation,
+                },
+                &request,
+                |_| {},
+            )
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let calls = fs::read_to_string(workspace.root.join("calls.jsonl")).unwrap();
+        assert_eq!(calls.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(calls.trim()).unwrap()["method"],
+            "describe"
+        );
+        match completed.report.summary.outcome.terminal.unwrap() {
+            TerminalResult::Failure { error } => {
+                assert_eq!(error.code, "provider_dispatch_deadline")
+            }
+            other => panic!("unexpected terminal: {other:?}"),
+        }
+    }
 
     #[test]
     fn journal_callback_failure_preserves_known_terminal_outcomes() {

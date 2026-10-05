@@ -296,20 +296,86 @@ directory, and native CLI policy.
 
 ## Permission behavior
 
-The reference adapters are intended for an already trusted local workflow:
+Permissions are an invocation request, independent of model selection and the
+open `options` map. Set startup defaults in `.tactus/tactus.toml`:
 
-- Codex is invoked with its dangerous approval/sandbox bypass;
-- Claude Code is invoked with its dangerous permission bypass;
-- Antigravity uses `--dangerously-skip-permissions` for automatic approval,
-  with `full_bypass = false` because unrestricted tool execution is not
-  established and native policy/sandbox settings remain relevant; and
-- OpenCode receives an allow-oriented permission override, but Tactus reports
-  `full_bypass = false` because an explicit deny or managed policy can still
-  win.
+```toml
+[providers.codex.permissions]
+allowed_tools = ["Read"]
+allowed_skills = []
 
-These flags do not make Agenstro a sandbox and do not override operating-system
-permissions. Native CLI updates can change semantics; the authenticated live
-matrix is not exercised in public CI.
+[providers.codex.permissions.sandbox]
+mode = "read-only"
+# Optional absolute native working area, using this machine's path syntax:
+# workspace = "/srv/isolated/project"
+```
+
+Clef `ProviderRef.providerRefPermissions` and provider `invoke` JSON
+`params.permissions` can replace that entire object for each call. Omission
+inherits the registry default; an explicit empty object requests normal mode.
+Within the object, omission means normal behavior and `[]` requests an empty
+allowlist. Consecutive and concurrent calls do not rewrite the registry or
+native provider configuration files.
+
+For example, two calls can use independently authored permission objects:
+
+```haskell compile
+{-# LANGUAGE OverloadedStrings #-}
+module Main (main) where
+
+import Clef
+import qualified Data.Text.IO as Text
+
+main :: IO ()
+main = do
+  let reader = (providerRef "codex")
+        { providerRefPermissions = Just (emptyPermissions
+            { invocationSandbox = Just (SandboxRequest ReadOnly Nothing) }) }
+      ordinary = (providerRef "codex")
+        { providerRefPermissions = Just emptyPermissions }
+      task = textTask "explain" (\topic -> "Explain briefly: " <> topic)
+  answer <- runTactus $ do
+    first <- invokeWith reader task "the configured workspace"
+    invokeWith ordinary task first
+  Text.putStrLn answer
+```
+
+| Provider | Tools | Skills | Sandbox |
+| --- | --- | --- | --- |
+| Codex | Unsupported; warn and retain normal tools | Unsupported; warn and retain normal discovery | Native sandbox mode and absolute working directory |
+| Claude Code | Partial: native builtin `--tools`; MCP remains governed by native configuration | Unsupported; warn and retain normal discovery | Unsupported; warn and retain normal mode |
+| OpenCode / Antigravity | Unsupported; warn and retain normal mode | Unsupported; warn and retain normal mode | Unsupported; warn and retain normal mode |
+| Custom provider plugin | Per-field `describe.permissions_capabilities` declaration | Same | Same, including supported modes and custom workspace support |
+
+An unsupported field falls back independently; supported fields still apply.
+Malformed requests and native arguments that contradict a supported requested
+restriction are rejected before starting the model call. A legacy or invalid
+capability declaration receives the ordinary request without unsupported
+permission fields. Tactus does not retry the model invocation to obtain a
+fallback.
+
+Read `permission_report.requested`, `effective`, `applications` and `warnings`
+in the provider result. `provider.permission.warning` events also reach the
+journal, Clef dispatch stream and text-mode warning output. Custom capability
+claims are trusted plugin declarations, not runtime attestation. A scalar
+custom result retains its original value shape; the report remains available
+as a `provider.permissions` event. Durable journals retain application statuses,
+warning codes, and value fingerprints; the live result/event carries the full
+requested/effective configuration.
+
+Normal mode preserves the previous adapter behavior: Codex and Claude use
+native approval bypass flags, Antigravity uses its approval-bypass flag, and
+OpenCode receives the existing allow-oriented override. A supported Codex
+sandbox request replaces its hardcoded sandbox bypass. These native mappings
+do not sandbox the Tactus process, arbitrary Haskell code, wrapper commands,
+or arbitrary configured plugins.
+
+Initialization and permissions negotiation do not overwrite users' `.codex`,
+`.claude`, `.opencode`, `.agents`, or global instructions. Unsupported skill or
+sandbox isolation can still load native user configuration in normal mode;
+the warning explicitly prevents treating that fallback as an isolated call.
+Native CLI updates can change semantics; tests use fake native executables,
+and the authenticated live matrix is not exercised in public CI.
 
 ## Generation versus workflow execution
 

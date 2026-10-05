@@ -12,6 +12,11 @@ Tests that exercise one implementation stay beside that implementation:
 `segno-flow/haskell/test/`, and `motivo-studio/tests/`. This keeps normal package
 tools and IDE discovery working without custom test-path rewrites.
 
+`motivo/tests/tdd.py` exercises authored suites, red/green evidence, immutable
+oracle matching, and real Linux sandbox execution. `tactus-runtime/tests-rust/permissions.rs`
+checks per-call replacement, concurrent configurations, capability fallback,
+warnings and the Clef-to-Tactus dispatch boundary. Both belong to the Full gate.
+
 The language-neutral norm checker keeps its request/expectation fixtures beside
 the implementation under `plugins/latex-norm-check/fixtures/`; run them with
 `python plugins/latex-norm-check/run_fixtures.py`.

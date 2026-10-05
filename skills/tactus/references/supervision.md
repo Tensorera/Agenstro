@@ -1,45 +1,23 @@
 # Daemon supervision and live output
 
-## Enable a daemon for one run
+## Daemon requires separate explicit authorization
 
 Daemon monitors selected entries through periodic prompts to a registered agent
 provider. It is attached to `tactus run`, not a machine scheduler; use the sibling
-[Segno skill](../../segno/SKILL.md) for persistent schedules. Configuring
-`[daemon]` alone does not enable it. Start with monitoring and local reporting:
+[Segno skill](../../segno/SKILL.md) for persistent schedules. These monitoring
+and repair calls originate in the Rust runtime rather than a Clef Haskell
+workflow. They are outside the
+[Tactus skill's default provider calling channel](../SKILL.md#provider-calling-rules).
+Do not enable daemon because the user merely asks to run a workflow. Use it
+only when the user separately and explicitly authorizes this provider-backed
+monitoring or repair feature. Configuring `[daemon]` alone does not enable it.
 
-```sh
-tactus run --root /path/to/project --script .tactus/scripts/010_work.hs \
-  --daemon --daemon-provider reviewer -- /path/to/work-directory
-```
-
-Register `reviewer` in `.tactus/tactus.toml` independently of the business
-provider. It may use a different adapter, native executable, model, effort, and
-provider options. Reuse a working provider configuration and change only what
-the task needs; do not assume that a provider's accepted model or effort strings
-are shared by another provider.
-
-```toml
-[providers.reviewer]
-command = ["tactus", "provider-host", "claude-code"]
-# Optional: choose values supported by this installed native CLI.
-# model = "provider-specific-model"
-# effort = "high"
-
-[daemon]
-provider = "reviewer"
-interval_seconds = 60
-timeout_seconds = 120
-max_retries = 1
-retry_scripts = []
-```
-
-The selected native CLI owns authentication. Built-in adapters request
-autonomous tool execution; the daemon retains the authority of that adapter
-and the native CLI's effective policy.
-If executable discovery is ambiguous, set `executable` under
-`[providers.reviewer.options]` to the intended native CLI path for this machine.
-Daemon requests can incur provider usage even when the business script does not
-invoke a model.
+For separately authorized daemon operation, consult the runtime's provider
+and CLI references. Its registered monitoring provider may differ from the
+business provider in adapter, model, effort, and invocation permissions.
+Authentication and effective policy belong to the selected native CLI and
+the invocation configuration. Daemon requests can incur provider usage even
+when the Haskell business script does not invoke a model.
 
 | Workspace setting | Default | Constraint / CLI override |
 | --- | --- | --- |
@@ -56,15 +34,10 @@ from the daemon provider deadline.
 
 ## Authorize bounded repair
 
-An entry must be explicitly retryable before daemon may edit and rerun it. Use
-the workspace `retry_scripts` list or a run-local addition:
-
-```sh
-tactus run --root /path/to/project --script .tactus/scripts/010_work.hs \
-  --daemon --daemon-provider reviewer \
-  --daemon-retry-script .tactus/scripts/010_work.hs \
-  --daemon-max-retries 1 -- /path/to/work-directory
-```
+After separate authorization for daemon repair, an entry must also be
+explicitly retryable before daemon may edit and rerun it. Its workspace
+`retry_scripts` list or a run-local addition identifies that entry. A request
+to monitor an existing run alone does not authorize editing and rerunning it.
 
 Choose entries whose repeated effects are safe, such as deterministic output
 replacement or operations with stable idempotency keys. A known process failure
@@ -104,7 +77,7 @@ tactus watch --root /path/to/project --port 47831
 ```
 
 Open the complete printed URL, including `#token=...`. In another terminal,
-launch the selected run, generation, or provider invocation. The viewer binds
+launch the selected Haskell workflow with `tactus run`. The viewer binds
 to `127.0.0.1`, is read-only, and uses a temporary `.tactus/watch.json` connection
 descriptor. Only one viewer owns a workspace at a time. Treat the complete URL
 and descriptor as local access credentials; the page may show sensitive model

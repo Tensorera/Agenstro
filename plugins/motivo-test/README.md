@@ -26,6 +26,12 @@ command = ["motivo-test"]
 The plugin's working directory must be the initialized project root. The effect
 uses that directory, not an input-supplied workspace path.
 
+The installed `Motivo.Test` Haskell framework reuses this `run` contract for
+command acceptance suites. It independently evaluates assertions and records
+red/green baselines without changing the experiment protocol. See
+[Motivo acceptance](../../docs/motivo-studio.md#executable-acceptance-and-test-driven-development)
+and the [runnable example](../../motivo/examples/tdd/README.md).
+
 ## Methods
 
 - `describe`: returns implementation, input bounds, backend and directory rules.

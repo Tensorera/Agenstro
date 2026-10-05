@@ -2,6 +2,7 @@ module Clef
   ( module Clef.Diagnostic,
     module Clef.Error,
     module Clef.Norm,
+    module Clef.Permissions,
     module Clef.Rubric,
     module Clef.Runtime,
     module Clef.Runtime.Config,
@@ -16,6 +17,7 @@ import Clef.Error
 -- norm API (including the check-spec constructor of that name) remains
 -- available from the exposed Clef.Norm module.
 import Clef.Norm hiding (Occurrence)
+import Clef.Permissions
 import Clef.Rubric
 import Clef.Runtime
 import Clef.Runtime.Config

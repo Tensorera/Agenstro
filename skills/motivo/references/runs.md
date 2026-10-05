@@ -1,5 +1,9 @@
 # Running and reading a method
 
+For executable acceptance suites and recorded red/green cycles, use
+[tdd.md](tdd.md). The independent eight method templates keep the behavior
+described below.
+
 Initialize the project with `tactus init PROJECT --sdk PATH_TO_CLEF_SDK`.
 New workspaces receive the Tactus, Motivo and Segno skills, independent Motivo
 templates, a report asset and the `motivo.test` effect registration. Initialization

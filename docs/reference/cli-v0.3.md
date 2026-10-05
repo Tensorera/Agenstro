@@ -72,8 +72,9 @@ from default discovery and `run --all`; other unnumbered helpers cannot run.
 Daemon monitoring is opt-in per run. Automatic repairs also require an explicit
 retryable entry allowlist; see [provider setup](../providers.md#optional-task-daemon).
 
-`init` distributes Tactus, Motivo and Segno skills plus discovery entries for
-supported coding-agent hosts. It preserves existing files. `skills update`
+`init` installs Tactus, Motivo and Segno skills only under `.tactus/skills` for
+explicit reading; it does not create host discovery mirrors. It preserves
+existing host files, including mirrors from previous versions. `skills update`
 compares against known installation baselines; customized and unrecognized
 copies remain in place, with incoming files under `.tactus/skill-updates/`
 for manual comparison. Its `--dry-run` mode creates no files. See

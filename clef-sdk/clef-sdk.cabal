@@ -35,6 +35,7 @@ library
       Clef.Effect.WorkspacePaths
       Clef.Error
       Clef.Norm
+      Clef.Permissions
       Clef.Plugin.Protocol
       Clef.Rubric
       Clef.Runtime

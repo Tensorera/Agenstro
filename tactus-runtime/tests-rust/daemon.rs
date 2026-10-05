@@ -45,6 +45,7 @@ impl Project {
                 ],
                 model: None,
                 effort: None,
+                permissions: None,
                 options: Default::default(),
             },
         );

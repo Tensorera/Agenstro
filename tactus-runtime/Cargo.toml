@@ -50,5 +50,9 @@ path = "tests-rust/adapters.rs"
 name = "daemon"
 path = "tests-rust/daemon.rs"
 
+[[test]]
+name = "permissions"
+path = "tests-rust/permissions.rs"
+
 [lints]
 workspace = true

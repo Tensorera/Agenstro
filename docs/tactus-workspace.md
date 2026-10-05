@@ -114,11 +114,15 @@ The three skills have separate responsibilities: Tactus covers workflow
 authoring, execution, daemon supervision and live output; Segno covers
 timestamp organizers, persistent scheduling and recovery; Motivo covers task
 methods and routes execution or scheduling work to the relevant sibling skill.
-`tactus init` installs all three and host discovery pointers while preserving
-existing files. Use `tactus skills update --dry-run` to inspect changes and
+`tactus init` installs all three only under `.tactus/skills`, for explicit
+selection by the user or caller. It does not create `.codex`, `.claude`,
+`.opencode`, or `.agents` discovery trees. Existing host files and old mirrors
+are left untouched. Use `tactus skills update --dry-run` to inspect changes and
 `tactus skills update` to update known unchanged copies. Customized or unknown
 versions remain in place and receive review candidates under `skill-updates/`.
 Neither command automatically overwrites project-owned method or business code.
+Generation reads the configured `instructions` file; it no longer automatically
+prepends the installed Tactus skill body.
 
 ## Configuration schema
 
@@ -228,7 +232,20 @@ Other control files and ordinary helper modules are not runnable entries.
 | `command` | non-empty string array | none | Executable followed by fixed arguments |
 | `model` | string | omitted | Provider-specific model forwarded by the adapter |
 | `effort` | string | omitted | Provider-specific reasoning effort or OpenCode variant |
+| `permissions` | table | omitted | Startup defaults for allowed tools, allowed skills and sandbox; an explicit call object replaces the whole table |
 | `options` | table | `{}` | Open adapter/plugin options |
+
+`permissions` accepts `allowed_tools` and `allowed_skills` arrays and a `sandbox`
+object with `mode` (`read-only`, `workspace-write`, `unrestricted`) and optional
+absolute `workspace`. An omitted array requests normal provider behavior;
+an empty array requests an empty allowed set. Names are provider-defined.
+Unknown fields and malformed values are rejected before invocation.
+
+These are capability-negotiated requests. Unsupported fields fall back to
+normal provider behavior with warnings, so the requested object alone is not
+proof of enforcement. Each invocation returns or emits a `permission_report`
+containing the requested/effective values and per-field application status.
+See [permission behavior](providers.md#permission-behavior).
 
 ### Effect definition
 

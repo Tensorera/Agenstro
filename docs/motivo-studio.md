@@ -2,7 +2,7 @@
 title: Motivo methods and offline reports
 status: alpha
 owners: [motivo]
-last_verified: 2026-09-05
+last_verified: 2026-10-04
 applies_to: "Motivo, Clef and Tactus 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -26,10 +26,11 @@ Open your coding agent in the initialized project and ask, for example:
 > Use Motivo to investigate why importing a large file stalls. Keep the work
 > focused and show me the evidence before deciding what to change.
 
-Initialization installs canonical instructions in `.tactus/skills/motivo` and
-project-local discovery pointers for supported agents. If a host does not expose
-skills, ask it to read `.tactus/skills/motivo/SKILL.md` directly. Existing user
-instructions and skills are preserved.
+Initialization installs canonical instructions in `.tactus/skills/motivo`.
+Ask the existing coding agent to read `.tactus/skills/motivo/SKILL.md` explicitly;
+init does not create host-specific discovery pointers or load these instructions
+into provider calls. Existing user instructions, skills and historical discovery
+files are preserved.
 
 The agent can point you at `.tactus/motivo/index.html`. Open that file in your
 browser. Keep task instructions, model choices and feedback in the original
@@ -125,6 +126,99 @@ A nonzero exit, timeout, or missing terminal result is evidence to inspect.
 Motivo does not retry an experiment automatically or promote experimental files
 into business source. The main agent chooses any subsequent business Haskell
 step using the Tactus skill.
+
+## Executable acceptance and test-driven development
+
+`090_test.hs` and the installed `Motivo.Test` module add command acceptance
+suites alongside the eight independent methods. A suite contains named cases;
+each case runs one explicit argv command through the same `motivo.test` effect.
+The host checks declared assertions against protected stdout/stderr, exit facts
+and files under that case's `/work`. It does not accept a provider's `testsRun`
+claim as a test result or call a provider implicitly.
+
+Write the acceptance oracle before implementing the behavior. For example:
+
+```json
+{
+  "api": "motivo.test-suite/v1",
+  "id": "addition",
+  "cases": [{
+    "id": "two-plus-two",
+    "command": {
+      "argv": ["/usr/bin/python3", "/project/add.py", "2", "2"],
+      "timeout_seconds": 15
+    },
+    "assertions": [
+      {"kind": "exit_code", "expected": 0},
+      {"kind": "stdout_equals", "expected": "4\n"}
+    ]
+  }]
+}
+```
+
+Save it as `acceptance.json`, run red, make the authorized implementation change
+outside the experiment sandbox, and run green:
+
+```sh
+tactus run --scripts-dir .tactus/motivoscript \
+  --script .tactus/motivoscript/090_test.hs \
+  -- --suite acceptance.json --run-id addition-red --phase red
+
+# Edit add.py as an explicit implementation step.
+
+tactus run --scripts-dir .tactus/motivoscript \
+  --script .tactus/motivoscript/090_test.hs \
+  -- --suite acceptance.json --run-id addition-green \
+  --phase green --baseline addition-red
+```
+
+Red is established only by at least one actual assertion failure with no
+execution or evidence errors. Its exit code remains 1, preserving the fact that
+the tests failed. All-pass red, invalid baseline, changed oracle, isolation
+failure, timeout, cancellation, signal termination, malformed facts, absent or
+truncated logs are errors (exit 2). Normal/green all-pass returns 0; actual failed
+assertions return 1. No phase retries a case or edits an implementation.
+
+Green validates the baseline before executing any case. Suite identity, ordered
+case ids, argv, timeout values and assertions must match the red run's normalized
+manifest exactly. Implementation contents can change. The saved baseline is
+local caller-controlled evidence, not a signature or a defense against someone
+rewriting the reports themselves.
+
+The manifest does not freeze the contents of external test programs invoked by
+argv. Keep those test sources and their dependencies under independent review
+and version control.
+
+The eight assertion kinds cover exit code, stdout/stderr equality or containment,
+and file existence/equality/containment. A suite has 1–64 unique cases, with 1–16
+explicit assertions per case. JSON rejects unknown fields and duplicate keys.
+Expected text is bounded at 64 KiB, normalized suite input at 512 KiB, and host
+evidence reads at 1 MiB. File evidence rejects traversal, links and nonregular
+files. The per-case 1–600 second budget covers preparation and execution;
+fixture preparation before the invocation is separate. Required logs must be
+complete UTF-8. Text displayed in the report is limited to 4096 characters per
+assertion; complete command logs remain separately linked. Missing declared
+output artifacts are known failed assertions.
+
+Haskell entries can call `runTestSuite (suite ... [testCase ...])` with the same
+phase/baseline flags. Existing Clef workflows can compose
+`runSuite :: FilePath -> Text -> Suite -> Workflow SuiteResult` and
+`requireBecause "acceptance failed" suitePassed` to reject an implementation
+independently of a provider reply. The core returns structured evidence; the
+CLI wrapper adds red/green validation and reports. Place these numbered entries
+in `.tactus/motivoscript` so installed helper modules are in the include path.
+See the installed `references/tdd.md` and the runnable
+[`motivo/examples/tdd`](../motivo/examples/tdd/README.md) example.
+
+Test reports retain `motivo.run/v1`, with `method = "test"` and `test_suite`
+metadata, and join the same offline index. `artifacts/suite.json` stores the
+oracle; `artifacts/test-suite.json` contains outcomes and independently checked
+assertions; `samples.jsonl` retains ordered suite/case/assertion observations.
+Existing method and probe records keep their format. Linux acceptance tests
+exercise both protocol fixtures and real Bubblewrap red/green; other platforms
+compile installed entries and explicitly skip unsupported execution. Passing
+assertions establish their declared behavior, not complete correctness of the
+user's entire task.
 
 ## Records and model identity
 

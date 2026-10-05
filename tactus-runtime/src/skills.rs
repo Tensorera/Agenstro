@@ -79,7 +79,7 @@ pub(crate) enum InstallMode {
     Update,
 }
 
-/// Return the complete static skill payload, including each host's discovery file.
+/// Return the explicit-only skill payload owned by `.tactus`.
 pub(crate) fn bundled_files() -> Vec<(String, String)> {
     let canonical = [
         (
@@ -115,6 +115,10 @@ pub(crate) fn bundled_files() -> Vec<(String, String)> {
             include_str!("../../skills/motivo/references/runs.md"),
         ),
         (
+            "motivo/references/tdd.md",
+            include_str!("../../skills/motivo/references/tdd.md"),
+        ),
+        (
             "motivo/assets/report-template.html",
             include_str!("../../motivo-studio/report-template.html"),
         ),
@@ -143,31 +147,10 @@ pub(crate) fn bundled_files() -> Vec<(String, String)> {
             include_str!("../../skills/segno/assets/010_business.hs"),
         ),
     ];
-    let mut files: Vec<_> = canonical
+    canonical
         .into_iter()
         .map(|(path, content)| (format!(".tactus/skills/{path}"), content.to_owned()))
-        .collect();
-    for host in [".agents", ".claude", ".opencode"] {
-        for (name, description) in [
-            (
-                "tactus",
-                "Write, check, and execute Haskell workflows; configure daemon supervision and inspect live provider output with Tactus.",
-            ),
-            (
-                "motivo",
-                "Use Motivo to investigate, analyze, research, organize, experiment, review, and hand off a complex task from this coding agent.",
-            ),
-            (
-                "segno",
-                "Create and manage persistent scheduled Tactus tasks with a timestamp organizer and a separate business workflow.",
-            ),
-        ] {
-            files.push((format!("{host}/skills/{name}/SKILL.md"), format!(
-                "---\nname: {name}\ndescription: {description}\n---\n\nRead the project-local canonical instructions in\n[.tactus/skills/{name}/SKILL.md](../../../.tactus/skills/{name}/SKILL.md)\nbefore using this skill. Resolve references from that canonical skill directory.\nThe project root is three directories above this skill directory.\nContinue the user's work in the current coding-agent conversation.\n"
-            )));
-        }
-    }
-    files
+        .collect()
 }
 
 /// Upgrade bundled skills without overwriting locally changed or unknown versions.
@@ -506,7 +489,7 @@ fn bundle_digest(files: &[(String, String)]) -> String {
     format!("{digest:x}", digest = digest.finalize())
 }
 
-/// Normalized hashes of the seven canonical files and six discovery files
+/// Normalized hashes of the seven canonical files
 /// shipped by `tactus init` at the pre-PR main baseline (34abcba) and the later
 /// pre-manifest bundle (3e90ad1). No Git access at runtime.
 fn legacy_hashes(path: &str) -> &'static [&'static str] {
@@ -533,16 +516,6 @@ fn legacy_hashes(path: &str) -> &'static [&'static str] {
         }
         ".tactus/skills/motivo/assets/report-template.html" => {
             &["d97d37453f3f51f078055d943115386cf1f6eae005be6656548d7dee4dd4e2ca"]
-        }
-        ".agents/skills/tactus/SKILL.md"
-        | ".claude/skills/tactus/SKILL.md"
-        | ".opencode/skills/tactus/SKILL.md" => {
-            &["5a5c2a7e0656ce7ce9f3e2a9291de7882d2441b0720ad3ba1689f7c43aba2968"]
-        }
-        ".agents/skills/motivo/SKILL.md"
-        | ".claude/skills/motivo/SKILL.md"
-        | ".opencode/skills/motivo/SKILL.md" => {
-            &["1aeee69b93566028014eb9446a858a1c41e6f2129861521099ee5a2cd4aeaf47"]
         }
         _ => &[],
     }
@@ -598,7 +571,14 @@ mod tests {
     fn fresh_initialization_distributes_all_three_skills_and_preserves_repeated_customizations() {
         let (_temporary, root, sdk) = project();
         let bundle = bundled_files();
-        assert_eq!(bundle.len(), 24);
+        assert!(
+            bundle
+                .iter()
+                .all(|(path, _)| path.starts_with(".tactus/skills/"))
+        );
+        for host in [".codex", ".claude", ".opencode", ".agents"] {
+            assert!(!root.join(host).exists(), "{host} must remain caller-owned");
+        }
         for (path, content) in &bundle {
             assert_eq!(
                 fs::read(root.join(path)).expect("installed file"),
@@ -614,7 +594,7 @@ mod tests {
         }
         let customized = [
             ".tactus/skills/tactus/SKILL.md",
-            ".agents/skills/segno/SKILL.md",
+            ".tactus/skills/segno/SKILL.md",
         ];
         for path in customized {
             fs::write(root.join(path), "user customization\n").expect("customize");
@@ -656,13 +636,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retired_host_mirrors_are_preserved_and_removed_from_the_managed_manifest() {
+        let (_temporary, root, sdk) = project();
+        let manifest_path = root.join(MANIFEST);
+        let mut manifest: Manifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+                .expect("manifest JSON");
+        let hosts = [".codex", ".claude", ".opencode", ".agents"];
+        for host in hosts {
+            let relative = format!("{host}/skills/tactus/SKILL.md");
+            let path = root.join(&relative);
+            fs::create_dir_all(path.parent().expect("mirror parent")).expect("host directory");
+            fs::write(&path, "previous host skill\n").expect("old mirror");
+            manifest
+                .files
+                .insert(relative, content_hash(b"previous host skill\n"));
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).expect("JSON"))
+            .expect("legacy manifest");
+        let before = snapshot(&root);
+        let preview = update_skills(&root, true).expect("preview");
+        assert!(preview.manifest_changed);
+        assert_eq!(
+            snapshot(&root),
+            before,
+            "preview must not alter old mirrors"
+        );
+        let applied = update_skills(&root, false).expect("update");
+        assert!(
+            applied
+                .files
+                .iter()
+                .all(|entry| entry.path.starts_with(".tactus/skills/"))
+        );
+        let managed: Manifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("updated manifest"))
+                .expect("manifest JSON");
+        assert!(
+            managed
+                .files
+                .keys()
+                .all(|path| path.starts_with(".tactus/skills/"))
+        );
+        initialize_workspace(&root, Some(&sdk)).expect("repeat init");
+        for host in hosts {
+            assert_eq!(
+                fs::read(root.join(format!("{host}/skills/tactus/SKILL.md")))
+                    .expect("preserved mirror"),
+                b"previous host skill\n",
+                "{host} is no longer a managed destination"
+            );
+        }
+    }
+
     fn assert_legacy_upgrade(tactus: &str, commands: &str) {
         for crlf in [false, true] {
             let (_temporary, root, _sdk) = project();
             fs::remove_dir_all(root.join(".tactus/skills")).expect("remove new bundle");
-            for host in [".agents", ".claude", ".opencode"] {
-                fs::remove_dir_all(root.join(host)).expect("remove discovery");
-            }
             fs::remove_file(root.join(MANIFEST)).expect("remove manifest");
             let bundle = bundled_files();
             let mut legacy_count = 0;
@@ -674,12 +705,13 @@ mod tests {
                 let legacy = match path.as_str() {
                     ".tactus/skills/tactus/SKILL.md" => tactus.to_owned(),
                     ".tactus/skills/tactus/references/commands.md" => commands.to_owned(),
-                    ".tactus/skills/motivo/SKILL.md" => include_str!("../tests-rust/fixtures/skills-legacy/motivo.md").to_owned(),
-                    ".tactus/skills/motivo/references/runs.md" => include_str!("../tests-rust/fixtures/skills-legacy/motivo-runs.md").to_owned(),
-                    path if !path.starts_with(".tactus/") && path.contains("/tactus/") => current.replace(
-                        "Write, check, and execute Haskell workflows; configure daemon supervision and inspect live provider output with Tactus.",
-                        "Write, check, and execute project Haskell workflows with Clef and Tactus.",
-                    ),
+                    ".tactus/skills/motivo/SKILL.md" => {
+                        include_str!("../tests-rust/fixtures/skills-legacy/motivo.md").to_owned()
+                    }
+                    ".tactus/skills/motivo/references/runs.md" => {
+                        include_str!("../tests-rust/fixtures/skills-legacy/motivo-runs.md")
+                            .to_owned()
+                    }
                     _ => current.clone(),
                 };
                 let legacy = legacy.replace("\r\n", "\n");
@@ -696,7 +728,7 @@ mod tests {
                 fs::write(root.join(path), legacy).expect("old installed bytes");
                 legacy_count += 1;
             }
-            assert_eq!(legacy_count, 13);
+            assert_eq!(legacy_count, 7);
             let report = update_skills(&root, false).expect("legacy update");
             for path in [
                 ".tactus/skills/tactus/SKILL.md",
@@ -759,7 +791,8 @@ mod tests {
         let (_temporary, root, _sdk) = project();
         let path = ".tactus/skills/segno/SKILL.md";
         fs::write(root.join(path), "unknown installed version\n").expect("unknown skill");
-        fs::remove_file(root.join(".claude/skills/segno/SKILL.md")).expect("missing discovery");
+        fs::remove_file(root.join(".tactus/skills/segno/agents/openai.yaml"))
+            .expect("missing canonical asset");
         fs::remove_file(root.join(MANIFEST)).expect("no baseline");
         fs::remove_file(root.join(LOCK)).expect("no lock file");
         for path in [
@@ -849,7 +882,6 @@ mod tests {
         let link = ".tactus/skills/tactus/SKILL.md";
         fs::remove_file(root.join(link)).expect("remove skill");
         symlink(&target, root.join(link)).expect("skill link");
-        fs::remove_dir_all(root.join(".claude")).expect("remove host");
         symlink(&outside, root.join(".claude")).expect("host link");
         let fifo = ".tactus/skills/segno/assets/segno.hs";
         fs::remove_file(root.join(fifo)).expect("remove asset");
@@ -863,13 +895,11 @@ mod tests {
         let report = update_skills(&root, false).expect("skip unsafe files");
         assert_eq!(entry(&report, link).action, "skipped");
         assert_eq!(entry(&report, fifo).action, "skipped");
-        assert_eq!(
+        assert!(
             report
                 .files
                 .iter()
-                .filter(|entry| entry.path.starts_with(".claude/") && entry.action == "skipped")
-                .count(),
-            3
+                .all(|entry| entry.path.starts_with(".tactus/skills/"))
         );
         assert_eq!(
             fs::read_to_string(target).expect("outside file"),

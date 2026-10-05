@@ -97,8 +97,11 @@ correlated process operation. `segno service start` adds a local scheduler and
 read-only web dashboard for registered `.tactus/segno.hs` tasks. It shares no
 business-state database with the Tactus daemon.
 
-Tactus distributes the three canonical skills and their host discovery entries.
-The Tactus skill owns execution, daemon and streaming guidance; the Segno skill
+Tactus installs the three canonical skills only under `.tactus/skills` for
+explicit reading. It neither installs host discovery mirrors nor injects skills
+into provider requests automatically. The Tactus skill owns Haskell execution
+and streaming guidance; daemon provider monitoring requires separate explicit
+authorization. The Segno skill
 owns persistent-task authoring and scheduler lifecycle; Motivo routes work to
 those skills when a selected task method needs execution or persistence.
 `tactus skills update` refreshes unchanged installed instructions and stages
@@ -208,9 +211,9 @@ one occurrence; it does not schedule or persist lifecycle state.
   sessions/
 ```
 
-Initialization also installs short project skill discovery entries for Codex,
-Claude Code, and OpenCode. They point to the canonical `.tactus/skills` files;
-existing project instructions and edited templates are preserved. `list`,
+Initialization keeps skills in `.tactus/skills` and does not create discovery
+mirrors in `.codex`, `.claude`, `.opencode`, or `.agents`. Existing host files,
+project instructions and edited templates are preserved. `list`,
 `check`, and `run` accept a generic `--scripts-dir` below `.tactus`. Discovery,
 explicit source validation, and Haskell module lookup use that selected tree.
 The default `.tactus/scripts` tree never includes Motivo methods in `--all`.
@@ -218,7 +221,8 @@ Source selection is not an IO sandbox.
 
 `tactus.toml` has three registries:
 
-- `[providers.<name>]`: command plus optional model, effort, and open options;
+- `[providers.<name>]`: command plus optional model, effort, typed invocation
+  permissions, and open options;
 - `[effects.<name>]`: command, open options, and observer participation; and
 - `[plugins.<name>]`: command plus open options for arbitrary domain plugins.
 

@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | File-backed method reports for a coding agent. No model selection or loop.
-module Motivo.Run (runMethod, parseSections, validateNotes) where
+module Motivo.Run (runMethod, parseSections, validateNotes, refreshWorkspaceIndex) where
 
 import Clef
   ( EventSink (..), operation, perform, renderRuntimeRecord, runWorkflow,
@@ -10,34 +10,32 @@ import Clef
     ProviderRef (..), textTask, writeRuntimePresentation
   )
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
-import Control.Exception (IOException, SomeException, bracketOnError, displayException, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, displayException, throwIO, try)
 import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as Bytes
 import qualified Data.ByteString.Lazy as LazyBytes
-import Data.Char (isAscii, isAlphaNum)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.IO as TextIO
-import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
+import Data.Time (UTCTime, defaultTimeLocale, parseTimeM)
 import Motivo.Html (escapeHtml, renderMarkdown, renderPage)
 import Motivo.Markdown (MarkdownBlock (..), blockLines, markdownBlocks)
 import Motivo.Method
+import Motivo.Record
 import System.Directory
-  ( canonicalizePath, createDirectory, createDirectoryIfMissing,
-    doesFileExist, getCurrentDirectory, listDirectory, pathIsSymbolicLink,
-    removeFile, renameFile
+  ( canonicalizePath, createDirectory,
+    doesFileExist, getCurrentDirectory, listDirectory
   )
 import System.Environment (getArgs, lookupEnv)
-import System.FilePath ((</>), takeDirectory, splitDirectories)
-import System.IO (IOMode (AppendMode, ReadMode), hClose, hFlush, hSetEncoding, hSetNewlineMode, noNewlineTranslation, openTempFile, utf8, withBinaryFile, withFile)
-import System.IO.Error (catchIOError, isAlreadyExistsError, isDoesNotExistError)
+import System.FilePath ((</>), splitDirectories)
+import System.IO (IOMode (AppendMode, ReadMode), hFlush, withBinaryFile, withFile)
+import System.IO.Error (catchIOError, isAlreadyExistsError)
 import Text.Read (readMaybe)
 
 data Options = Options
@@ -163,10 +161,6 @@ checkedLabel value = if null value || length value > 200 || any (`elem` ['\r', '
 checkedToken :: String -> String -> Either String Text
 checkedToken label value = let token = Text.pack value in if validToken token
   then Right token else Left ("Invalid " ++ label ++ ": use 1–80 ASCII letters, digits, underscores or hyphens")
-
-validToken :: Text -> Bool
-validToken value = not (Text.null value) && Text.length value <= 80 && Text.all valid value
-  where valid character = isAscii character && (isAlphaNum character || character == '_' || character == '-')
 
 -- | Markdown H2 fields. Duplicate headings are rejected by validateNotes.
 parseSections :: Text -> [(Text, Text)]
@@ -402,8 +396,12 @@ reportHtml recorder status generated count samples observation =
       <> "</strong><p>" <> escapeHtml (valueText "summary" value) <> "</p></div></li>"
 
 refreshIndex :: Recorder -> Text -> IO ()
-refreshIndex recorder generated = do
-  let runs = recordRoot recorder </> ".tactus/motivo/runs"
+refreshIndex recorder = refreshWorkspaceIndex (recordRoot recorder) (recordTemplate recorder)
+
+-- | Both method and test reports share the same conservative offline index.
+refreshWorkspaceIndex :: FilePath -> Text -> Text -> IO ()
+refreshWorkspaceIndex root template generated = do
+  let runs = root </> ".tactus/motivo/runs"
   names <- listDirectory runs
   reports <- forM (filter (validToken . Text.pack) names) $ \name -> do
     let directory = runs </> name
@@ -423,8 +421,8 @@ refreshIndex recorder generated = do
       runCard (name, value) = "<article class=\"run-card\" data-method=\"" <> escapeHtml (valueText "method" value) <> "\"><div><p class=\"eyebrow\">" <> escapeHtml (valueText "started_at" value)
         <> "</p><h2><a href=\"runs/" <> Text.pack name <> "/report.html\">" <> escapeHtml (valueText "title" value) <> "</a></h2><p>" <> escapeHtml (Text.pack name) <> "</p></div><div><p class=\"status\">"
         <> escapeHtml (valueText "status" value) <> "</p><p>" <> escapeHtml (valueText "agent" value) <> " · " <> escapeHtml (valueText "model" value) <> "</p></div></article>"
-  page <- either fail pure (renderPage (recordTemplate recorder) body)
-  atomicWriteText (recordRoot recorder </> ".tactus/motivo/index.html") page
+  page <- either fail pure (renderPage template body)
+  atomicWriteText (root </> ".tactus/motivo/index.html") page
 
 -- %Q has variable fractional precision, so lexical timestamp order is not time
 -- order. Unknown timestamps sort last; the run name breaks equal-time ties.
@@ -441,63 +439,7 @@ valueText key (Object values) = case KeyMap.lookup (fromStringKey key) values of
   where fromStringKey = Key.fromText
 valueText _ _ = "not reported"
 
-jsonText :: Value -> Text
-jsonText = Encoding.decodeUtf8 . LazyBytes.toStrict . encode
-
 displayedModel :: Options -> Text
 displayedModel options = case selectedProvider options of
   Nothing -> modelName options
   Just provider -> provider <> " / requested: " <> modelName options <> "; actual model: not reported"
-
-nowText :: IO Text
-nowText = Text.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" <$> getCurrentTime
-
-newRunId :: IO Text
-newRunId = Text.pack . ("run-" ++) . formatTime defaultTimeLocale "%Y%m%dT%H%M%S%qZ" <$> getCurrentTime
-
-readBoundedText :: FilePath -> IO Text
-readBoundedText path = do
-  bytes <- withBinaryFile path ReadMode (\handle -> Bytes.hGet handle (512 * 1024 + 1))
-  when (Bytes.length bytes > 512 * 1024) (fail ("Motivo input exceeds 512 KiB: " ++ path))
-  either (fail . show) pure (Encoding.decodeUtf8' bytes)
-
-findWorkspace :: FilePath -> IO FilePath
-findWorkspace directory = do
-  exists <- doesFileExist (directory </> ".tactus/tactus.toml")
-  if exists then pure directory else
-    let parent = takeDirectory directory in
-    if parent == directory then fail "No initialized .tactus workspace found" else findWorkspace parent
-
-isLinked :: FilePath -> IO Bool
-isLinked path = pathIsSymbolicLink path `catchIOError` \errorValue ->
-  if isDoesNotExistError errorValue then pure False else ioError errorValue
-
--- Check each output ancestor before creating it; this prevents accidental links
--- from redirecting reports. The experiment plugin owns OS write isolation.
-ensureDirectory :: FilePath -> [FilePath] -> IO ()
-ensureDirectory _ [] = pure ()
-ensureDirectory parent (part : rest) = do
-  let path = parent </> part
-  linked <- isLinked path
-  when linked (fail ("Motivo output directory must not be a symbolic link: " ++ path))
-  createDirectoryIfMissing False path
-  resolved <- canonicalizePath path
-  unless (takeDirectory resolved == parent) (fail "Motivo output directory escaped its parent")
-  ensureDirectory resolved rest
-
-atomicWriteText :: FilePath -> Text -> IO ()
-atomicWriteText path content = bracketOnError
-  (openTempFile (takeDirectory path) ".motivo-write-")
-  (\(temporary, handle) -> do
-      hClose handle `catchIOError` (\_ -> pure ())
-      removeFile temporary `catchIOError` (\_ -> pure ()))
-  (\(temporary, handle) -> do
-      hSetEncoding handle utf8
-      hSetNewlineMode handle noNewlineTranslation
-      TextIO.hPutStr handle content
-      hFlush handle
-      hClose handle
-      renameFile temporary path `onException` (removeFile temporary `catchIOError` (\_ -> pure ())))
-
-atomicWriteJson :: FilePath -> Value -> IO ()
-atomicWriteJson path = atomicWriteText path . (<> "\n") . jsonText

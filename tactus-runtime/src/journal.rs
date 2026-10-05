@@ -857,7 +857,11 @@ fn public_durable_identifier(key: &str, value: &str) -> bool {
                 | "effect.progress"
                 | "effect.warning"
         ),
-        "event_type" | "id" => false,
+        "event_type" => matches!(
+            value,
+            "provider.permission.warning" | "provider.permissions"
+        ),
+        "id" => false,
         _ => false,
     }
 }
@@ -866,6 +870,10 @@ fn public_diagnostic_code(value: &str) -> bool {
     matches!(
         value,
         "outcome_unknown"
+            | "permission_unsupported"
+            | "permission_partial"
+            | "provider_dispatch_cancelled"
+            | "provider_dispatch_deadline"
             | "plugin.outcome_unknown"
             | "plugin.deadline_exceeded"
             | "plugin.transport_failed"

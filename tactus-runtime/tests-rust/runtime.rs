@@ -95,6 +95,12 @@ fn plugin_registration_cli_accepts_typed_json_and_rejects_ambiguous_input() {
 #[test]
 fn initialization_preserves_existing_agent_instructions_and_source_customizations() {
     let (temporary, project) = initialized_project();
+    for host in [".codex", ".claude", ".opencode", ".agents"] {
+        assert!(
+            !project.join(host).exists(),
+            "initialization created {host}"
+        );
+    }
     let personalized = [
         "AGENTS.md",
         "CLAUDE.md",
@@ -103,8 +109,12 @@ fn initialization_preserves_existing_agent_instructions_and_source_customization
         ".tactus/motivoscript/020_investigate.hs",
         ".agents/skills/motivo/SKILL.md",
         ".claude/skills/tactus/SKILL.md",
+        ".codex/skills/tactus/SKILL.md",
+        ".opencode/skills/segno/SKILL.md",
     ];
     for path in personalized {
+        fs::create_dir_all(project.join(path).parent().expect("custom file parent"))
+            .expect("custom parent directory");
         fs::write(project.join(path), "project-owned content\n").expect("customization");
     }
     let report = initialize_workspace(&project, Some(&temporary.path().join("sdk")))
@@ -124,8 +134,8 @@ fn skills_update_cli_previews_then_preserves_local_guidance_with_an_incoming_cop
     let (_temporary, project) = initialized_project();
     let skill = project.join(".tactus/skills/segno/SKILL.md");
     fs::write(&skill, "local organizer policy\n").expect("custom skill");
-    let discovery = project.join(".agents/skills/segno/SKILL.md");
-    fs::remove_file(&discovery).expect("remove discovery");
+    let missing_asset = project.join(".tactus/skills/segno/agents/openai.yaml");
+    fs::remove_file(&missing_asset).expect("remove canonical asset");
     let invoke = |dry_run: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tactus"));
         command
@@ -155,7 +165,7 @@ fn skills_update_cli_previews_then_preserves_local_guidance_with_an_incoming_cop
     assert_eq!(preserved["action"], "preserved");
     let candidate = project.join(preserved["candidate"].as_str().expect("candidate path"));
     assert!(!candidate.exists());
-    assert!(!discovery.exists());
+    assert!(!missing_asset.exists());
     let applied = invoke(false);
     assert_eq!(applied["dry_run"], false);
     assert_eq!(
@@ -166,12 +176,27 @@ fn skills_update_cli_previews_then_preserves_local_guidance_with_an_incoming_cop
         fs::read(candidate).expect("incoming skill"),
         include_bytes!("../../skills/segno/SKILL.md")
     );
-    assert!(discovery.is_file());
+    assert!(missing_asset.is_file());
+    assert!(
+        applied["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|file| {
+                file["path"]
+                    .as_str()
+                    .expect("file path")
+                    .starts_with(".tactus/skills/")
+            })
+    );
+    for host in [".codex", ".claude", ".opencode", ".agents"] {
+        assert!(!project.join(host).exists(), "skills update created {host}");
+    }
 }
 
 #[cfg(unix)]
 #[test]
-fn initialization_skips_linked_agent_discovery_paths_without_writing_through_them() {
+fn initialization_and_skill_updates_leave_linked_host_directories_untouched() {
     use std::os::unix::fs::symlink;
 
     let temporary = tempdir().expect("temporary directory");
@@ -182,22 +207,28 @@ fn initialization_skips_linked_agent_discovery_paths_without_writing_through_the
         fs::create_dir(path).expect("directory");
     }
     fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("sdk manifest");
-    symlink(&outside, project.join(".claude")).expect("external agent directory");
+    fs::write(outside.join("user.md"), "external host instructions\n").expect("outside file");
+    for host in [".codex", ".claude", ".opencode", ".agents"] {
+        symlink(&outside, project.join(host)).expect("external agent directory");
+    }
     let report = initialize_workspace(&project, Some(&sdk)).expect("core initialization");
-    assert_eq!(report.skipped.len(), 3);
-    assert!(
-        report
-            .skipped
-            .iter()
-            .all(|path| path.starts_with(".claude/skills/"))
+    assert!(report.skipped.is_empty(), "host trees must not be visited");
+    tactus_runtime::skills::update_skills(&project, false).expect("skills update");
+    for host in [".codex", ".claude", ".opencode", ".agents"] {
+        assert_eq!(
+            fs::read_link(project.join(host)).expect("preserved link"),
+            outside
+        );
+    }
+    assert_eq!(
+        fs::read(outside.join("user.md")).expect("outside file"),
+        b"external host instructions\n"
     );
-    assert!(
-        fs::read_dir(&outside)
-            .expect("outside directory")
-            .next()
-            .is_none()
+    assert_eq!(
+        fs::read_dir(&outside).expect("outside directory").count(),
+        1
     );
-    assert!(project.join(".agents/skills/motivo/SKILL.md").is_file());
+    assert!(project.join(".tactus/skills/motivo/SKILL.md").is_file());
     assert!(project.join(".tactus/scripts").is_dir());
 }
 
@@ -1419,6 +1450,11 @@ fn generate_accepts_helper_only_edits_and_keeps_author_guidance_separate() {
     )
     .expect("existing helper");
     fs::write(project.join(".tactus/PROMPT.md"), "AUTHOR_GUIDANCE_ONLY").expect("author guide");
+    fs::write(
+        project.join(".tactus/skills/tactus/SKILL.md"),
+        "EXPLICIT_SKILL_ONLY",
+    )
+    .expect("skill guide");
     fs::write(project.join(".tactus/RUNTIME.md"), "BUSINESS_GUIDANCE_ONLY").expect("runtime guide");
     let config_path = project.join(".tactus/tactus.toml");
     let config = fs::read_to_string(&config_path).expect("config");
@@ -1455,6 +1491,8 @@ fn generate_accepts_helper_only_edits_and_keeps_author_guidance_separate() {
                     .expect("provider prompt");
             assert!(prompt.contains("AUTHOR_GUIDANCE_ONLY"));
             assert!(!prompt.contains("BUSINESS_GUIDANCE_ONLY"));
+            assert!(!prompt.contains("EXPLICIT_SKILL_ONLY"));
+            assert!(!prompt.contains("# Tactus agent skill"));
         } else {
             assert_eq!(report["generated_delta"], serde_json::json!([]));
         }

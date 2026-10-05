@@ -1,0 +1,28 @@
+{
+  "api": "motivo.test-suite/v1",
+  "id": "addition",
+  "cases": [
+    {
+      "id": "two-plus-two",
+      "command": {
+        "argv": ["/usr/bin/python3", "/project/add.py", "2", "2"],
+        "timeout_seconds": 15
+      },
+      "assertions": [
+        {"kind": "exit_code", "expected": 0},
+        {"kind": "stdout_equals", "expected": "4\n"}
+      ]
+    },
+    {
+      "id": "negative-operand",
+      "command": {
+        "argv": ["/usr/bin/python3", "/project/add.py", "-3", "5"],
+        "timeout_seconds": 15
+      },
+      "assertions": [
+        {"kind": "exit_code", "expected": 0},
+        {"kind": "stdout_equals", "expected": "2\n"}
+      ]
+    }
+  ]
+}

@@ -30,6 +30,7 @@ use crate::{
         OutcomeContext, OutcomeState, OutcomeUnknownDiagnostic, classify_outcome,
         outcome_is_unknown,
     },
+    permissions::InvocationPermissions,
     process::{
         CancellationToken, CommandKind, CommandOutcome, InvocationKind, InvocationPhase,
         InvocationProgress, ProcessError, ProcessOutcome, ProcessSpec, ProcessSupervisor,
@@ -47,6 +48,7 @@ use crate::{
 };
 
 mod invocation;
+mod permission_dispatch;
 
 use invocation::{Invocation, InvocationOrigin, InvocationProcess};
 
@@ -65,7 +67,7 @@ pub struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Install or safely upgrade bundled project skills and agent discovery.
+    /// Install or safely upgrade bundled skills below `.tactus` for explicit use.
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
@@ -1940,9 +1942,8 @@ fn generate(
         .get(provider_name)
         .ok_or_else(|| WorkspaceError::UnknownPlugin(provider_name.to_owned()))?;
     let instructions = workspace.read_prompt(&config)?;
-    let skill = workspace.read_tactus_skill()?;
     let generation_prompt = format!(
-        "{instructions}\n\n# Tactus agent skill\n\n{skill}\n\n# Generation goal\n\n{goal}\n\nCreate or update the Haskell sources needed for this goal. Prefer the smallest sufficient change; helper-only changes and a single entry are valid. You may use `tactus check` with explicit source paths for compiler feedback. Do not execute the generated business workflow or its external effects.\n"
+        "{instructions}\n\n# Generation goal\n\n{goal}\n\nCreate or update the Haskell sources needed for this goal. Prefer the smallest sufficient change; helper-only changes and a single entry are valid. You may use `tactus check` with explicit source paths for compiler feedback. Do not execute the generated business workflow or its external effects.\n"
     );
     let mut params = Map::new();
     params.insert("prompt".to_owned(), Value::String(generation_prompt));
@@ -3878,6 +3879,22 @@ fn inject_registered_params(
     params.insert("options".to_owned(), Value::Object(options));
 
     if let ResolvedPlugin::Provider(provider) = definition {
+        if method == "invoke" {
+            if let Some(defaults) = &provider.permissions {
+                params
+                    .entry("permissions".to_owned())
+                    .or_insert(serde_json::to_value(defaults)?);
+            }
+            if let Some(requested) = params.get("permissions") {
+                let requested: InvocationPermissions = serde_json::from_value(requested.clone())
+                    .map_err(|error| {
+                        CliError::InvalidArguments(format!("invalid permissions: {error}"))
+                    })?;
+                requested.validate().map_err(|error| {
+                    CliError::InvalidArguments(format!("invalid permissions: {error}"))
+                })?;
+            }
+        }
         if let Some(model) = provider.model.as_ref() {
             params
                 .entry("model".to_owned())
@@ -4244,6 +4261,27 @@ fn render_presentation(presentation: &Presentation) {
 
 fn presentation_for_frame(name: &str, frame: &PluginFrame) -> Option<Presentation> {
     match frame {
+        PluginFrame::Event { event, .. } if event.kind == "provider.permission.warning" => {
+            let field = match event.payload.get("field").and_then(Value::as_str) {
+                Some("allowed_tools") => "allowed tools",
+                Some("allowed_skills") => "allowed skills",
+                Some("sandbox") => "sandbox settings",
+                _ => "permissions",
+            };
+            let detail = if event.payload.get("code").and_then(Value::as_str)
+                == Some("permission_partial")
+            {
+                "were only partially applied; unsupported portions retain normal provider behavior"
+            } else {
+                "were not applied; normal provider behavior is retained"
+            };
+            Some(Presentation::new(
+                PresentationCategory::Warning,
+                format!(
+                    "{name}: requested {field} {detail}. Inspect the permission report for details."
+                ),
+            ))
+        }
         PluginFrame::Event { event, .. } if event.kind == "effect.warning" => {
             let skipped = event
                 .payload
@@ -4281,6 +4319,11 @@ fn presentation_for_frame(name: &str, frame: &PluginFrame) -> Option<Presentatio
 }
 
 fn diagnostic_frame(frame: &PluginFrame) -> (&'static str, Value) {
+    if let PluginFrame::Event { event, .. } = frame
+        && let Some(data) = permission_dispatch::diagnostic_event(&event.kind, &event.payload)
+    {
+        return ("plugin.event", data);
+    }
     match frame {
         PluginFrame::Event { event, .. } => (
             "plugin.event",
@@ -4680,6 +4723,7 @@ mod tests {
             ],
             model: None,
             effort: None,
+            permissions: None,
             options,
         }
     }

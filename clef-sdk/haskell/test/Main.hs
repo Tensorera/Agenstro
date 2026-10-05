@@ -67,6 +67,7 @@ import qualified Data.Text.Encoding as Text.Encoding
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory
   ( createDirectory,
+    copyFile,
     doesFileExist,
     getCurrentDirectory,
     listDirectory,
@@ -77,7 +78,7 @@ import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv, unsetE
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (hClose, openBinaryTempFile, stderr)
 import qualified System.IO as IO
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeExtension)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import MonadIOCompatibility (standardLiftIO)
@@ -87,6 +88,8 @@ main = do
   arguments <- getArgs
   case arguments of
     ["--fake-plugin"] -> fakePlugin
+    ["--fake-permission-provider", policy] -> fakePermissionProvider policy
+    ["dispatch", "--namespace", "provider"] -> fakePermissionProvider "dispatch"
     ["--fake-exit"] -> exitFailure
     ["--fake-reported-exit"] -> fakeReportedExit
     ["--fake-outcome-unknown"] -> fakeOutcomeUnknown
@@ -122,6 +125,9 @@ runTests = do
           ("refinement returns the last rejected candidate at its round budget", testRefinementRoundBudget workspace executable),
           ("refinement propagates generator failures without retry", testRefinementGeneratorFailure workspace executable),
           ("runtime config schema", testRuntimeConfig executable workspace),
+          ("invocation permissions preserve empty selection and validate wire data", testPermissionModel workspace),
+          ("provider permissions replace startup defaults and negotiate direct plugins", testInvocationPermissions workspace executable),
+          ("direct permission probes share the invocation deadline", testPermissionDeadline workspace executable),
           ("JSONL terminal protocol", testProtocolRules),
           ("shared Rust and Haskell protocol conformance vectors", testProtocolConformance workspace),
           ("incremental protocol parsing is chunk-boundary independent", testProtocolChunkBoundaries),
@@ -164,6 +170,7 @@ runQualityStageTests = do
       ("rubric validation gates emit structured failures", testValidationGate workspace executable),
       ("critique gates reject mismatched evidence without changing unchecked policy", testCritiqueGateIntegrity workspace executable),
       ("runtime config schema", testRuntimeConfig executable workspace),
+      ("provider permissions replace startup defaults and negotiate direct plugins", testInvocationPermissions workspace executable),
       ("direct Clef plugin transport is bounded", testDirectPluginTransportBounds workspace executable)
     ]
 
@@ -267,7 +274,8 @@ testProviderConcurrency workspace executable = do
                   { providerCommand = [Text.pack executable, "--fake-gated-provider", Text.pack markerDirectory, Text.pack releasePath],
                     providerModel = Nothing,
                     providerEffort = Nothing,
-                    providerOptions = mempty
+                    providerOptions = mempty,
+                    providerPermissions = Nothing
                   },
             runtimeEffects = Map.empty,
             runtimeLimits =
@@ -1784,6 +1792,91 @@ testPluginParameterConflicts workspace executable = do
     )
     (runWorkflow effectRuntime (perform conflictingEffect))
 
+testPermissionModel :: FilePath -> IO ()
+testPermissionModel workspace = do
+  assertEqual "empty request encodes to an empty object" (object []) (toJSON emptyPermissions)
+  let selected = emptyPermissions {allowedTools = Just [], allowedSkills = Just ["provider-owned-skill"], invocationSandbox = Just (SandboxRequest ReadOnly (Just workspace))}
+  assertEqual "typed permission wire roundtrip" (Right selected) (eitherDecodeStrict' (strictEncode (toJSON selected)))
+  forM_ [object ["allowed_tools" .= ["" :: Text]], object ["sandbox" .= object ["mode" .= ("read-only" :: Text), "workspace" .= ("relative" :: Text)]], object ["unknown" .= True]] $ \value ->
+    case eitherDecodeStrict' (strictEncode value) :: Either String InvocationPermissions of
+      Left _ -> pure ()
+      Right _ -> failTest "invalid permissions were accepted"
+  let sandboxOnly = emptyPermissions {invocationSandbox = Just (SandboxRequest WorkspaceWrite (Just workspace))}
+      support = PermissionCapability Supported (Just "plugin_declared") Nothing (Just [WorkspaceWrite]) (Just False)
+      unsupported = PermissionCapability Unsupported Nothing Nothing Nothing Nothing
+      report = negotiatePermissions sandboxOnly (PermissionCapabilities unsupported unsupported support)
+  assertEqual "workspace fallback retains supported sandbox mode" (Just (SandboxRequest WorkspaceWrite Nothing)) (invocationSandbox (effectivePermissions report))
+  assertEqual "workspace fallback is partial" [PartiallyApplied] (map applicationStatus (permissionApplications report))
+
+testInvocationPermissions :: FilePath -> FilePath -> IO ()
+testInvocationPermissions workspace executable = do
+  let startup = emptyPermissions {allowedTools = Just ["startup-tool"], allowedSkills = Just ["startup-skill"], invocationSandbox = Just (SandboxRequest WorkspaceWrite (Just workspace))}
+      override = emptyPermissions {allowedTools = Just []}
+      configFor policy defaults =
+        let base = testConfig workspace executable
+         in base {runtimeEffects = Map.empty, runtimeInstructions = "",
+              runtimeProviders = Map.singleton "fake" (ProviderConfig [Text.pack executable, "--fake-permission-provider", policy] Nothing Nothing mempty defaults)}
+      echo = jsonTask "permission-echo" (const "inspect request") :: Task () Value
+      invokeAndRead policy defaults selected = withRuntime (configFor policy defaults) $ \runtime -> do
+        params <- runWorkflow runtime (invokeWith selected echo ())
+        records <- readRuntimeRecords runtime
+        let values = [value | ProviderValueRecord _ "fake" value <- records]
+            descriptions = [() | PluginEventRecord "provider:fake" _ value <- records, eventKind value == Just (String "fixture.describe")]
+            warnings = [() | PluginEventRecord "provider:fake" _ value <- records, eventKind value == Just (String "provider.permission.warning")]
+        pure (params, values, length descriptions, length warnings)
+      field name (Object fields) = KeyMap.lookup name fields
+      field _ _ = Nothing
+      eventKind value = field "event" value >>= field "type"
+      permissionField name params = field "permissions" params >>= field name
+  (inherited, values, descriptions, warnings) <- invokeAndRead "supported" (Just startup) (providerRef "fake")
+  assertEqual "startup tools are inherited" (Just (toJSON ["startup-tool" :: Text])) (permissionField "allowed_tools" inherited)
+  assertEqual "unsupported startup skills are omitted" Nothing (permissionField "allowed_skills" inherited)
+  assertEqual "one bounded describe precedes direct invoke" 1 descriptions
+  assertEqual "skills and sandbox workspace warnings reach records" 2 warnings
+  case values of
+    [value] -> assertEqual "report retains full startup request" (Just (toJSON startup)) (field "permission_report" value >>= field "requested")
+    _ -> failTest "missing provider terminal value"
+  (replaced, _, _, _) <- invokeAndRead "supported" (Just startup) ((providerRef "fake") {providerRefPermissions = Just override})
+  assertEqual "explicit empty tools are forwarded" (Just (toJSON ([] :: [Text]))) (permissionField "allowed_tools" replaced)
+  assertEqual "whole request replacement removes startup sandbox" Nothing (permissionField "sandbox" replaced)
+  (reset, resetValues, resetDescriptions, resetWarnings) <- invokeAndRead "supported" (Just startup) ((providerRef "fake") {providerRefPermissions = Just emptyPermissions})
+  assertEqual "empty object restores ordinary provider params" Nothing (field "permissions" reset)
+  assertEqual "empty object does not probe" 0 resetDescriptions
+  assertEqual "empty object has no warnings" 0 resetWarnings
+  case resetValues of
+    [value] -> assertEqual "empty object remains in requested report" (Just (object [])) (field "permission_report" value >>= field "requested")
+    _ -> failTest "missing reset value"
+  (legacy, _, _, legacyWarnings) <- invokeAndRead "legacy" Nothing ((providerRef "fake") {providerRefPermissions = Just override})
+  assertEqual "legacy provider retains ordinary params" Nothing (field "permissions" legacy)
+  assertEqual "legacy provider warning" 1 legacyWarnings
+  dispatchDirectory <- vacantTemporaryPath workspace "clef-permission-dispatch"
+  let dispatcher = dispatchDirectory </> if takeExtension executable == ".exe" then "tactus.exe" else "tactus"
+      prepare = createDirectory dispatchDirectory >> copyFile executable dispatcher
+  bracket prepare (const (removeDirectoryRecursive dispatchDirectory)) $ \_ -> do
+    let dispatchConfig = (configFor "supported" Nothing)
+          {runtimeProviders = Map.singleton "fake" (ProviderConfig [Text.pack dispatcher, "dispatch", "--namespace", "provider"] Nothing Nothing mempty Nothing)}
+    withRuntime dispatchConfig $ \runtime -> do
+      forwarded <- runWorkflow runtime (invokeWith ((providerRef "fake") {providerRefPermissions = Just startup}) echo ())
+      assertEqual "Tactus dispatch receives un-negotiated original request" (Just (toJSON startup)) (field "permissions" forwarded)
+      records <- readRuntimeRecords runtime
+      assertEqual "Clef does not double-probe Tactus dispatch" 0
+        (length [() | PluginEventRecord _ _ value <- records, eventKind value == Just (String "fixture.describe")])
+
+testPermissionDeadline :: FilePath -> FilePath -> IO ()
+testPermissionDeadline workspace executable = do
+  runtime <- newRuntime (testConfig workspace executable)
+  let limits = defaultPluginTransportLimits {transportDeadlineSeconds = Just 1}
+      params = KeyMap.fromList ["workspace" .= workspace, "prompt" .= ("fixture" :: Text), "permissions" .= emptyPermissions {allowedTools = Just []}]
+  started <- getPOSIXTime
+  outcome <- try (callPluginWithLimits limits runtime "provider:fake" [Text.pack executable, "--fake-permission-provider", "slow"] "invoke" params)
+    :: IO (Either WorkflowError PluginCallResult)
+  elapsed <- subtract started <$> getPOSIXTime
+  case outcome of
+    Left PluginOutcomeUnknown {} -> pure ()
+    _ -> failTest "describe and invoke did not share the original deadline"
+  unless (elapsed < 1.8) (failTest "permission negotiation added a second full deadline")
+  closeRuntime runtime
+
 testInvokeAndObserve :: FilePath -> FilePath -> IO ()
 testInvokeAndObserve workspace executable = do
   runtime <- newRuntime (testConfig workspace executable)
@@ -2272,7 +2365,8 @@ testConfig workspace executable =
             { providerCommand = pluginCommand,
               providerModel = Just "default-model",
               providerEffort = Just "default-effort",
-              providerOptions = mempty
+              providerOptions = mempty,
+              providerPermissions = Nothing
             },
       runtimeEffects =
         Map.fromList
@@ -2311,6 +2405,34 @@ testConfig workspace executable =
     }
   where
     pluginCommand = [Text.pack executable, "--fake-plugin"]
+
+fakePermissionProvider :: String -> IO ()
+fakePermissionProvider policy = do
+  line <- ByteString.Char8.getLine
+  request <- either failTest pure (eitherDecodeStrict' line)
+  (requestId, method, params) <- parseFakeParams
+    (withObject "permission request" (\fields -> (,,) <$> fields .: "id" <*> fields .: "method" <*> fields .: "params")) request
+      :: IO (Text, Text, Value)
+  let emit value = LazyChar8.putStrLn (encode value) >> IO.hFlush IO.stdout
+      succeed value = emit (object ["type" .= ("result" :: Text), "id" .= requestId, "ok" .= True, "value" .= value])
+      event kind = emit (object ["type" .= ("event" :: Text), "id" .= requestId, "event" .= object ["type" .= (kind :: Text)]])
+  case method of
+    "describe" -> do
+      whenDispatch policy
+      event "fixture.describe"
+      if policy == "slow" then threadDelay 700000 else pure ()
+      succeed $ if policy == "legacy" then object [] else object
+        ["permissions_capabilities" .= object
+          ["allowed_tools" .= object ["support" .= ("supported" :: Text), "scope" .= ("fake_catalog" :: Text)],
+           "allowed_skills" .= object ["support" .= ("unsupported" :: Text)],
+           "sandbox" .= object ["support" .= ("supported" :: Text), "modes" .= ["workspace-write" :: Text], "workspace" .= False]]]
+    "invoke" -> do
+      event "fixture.invoke"
+      if policy == "slow" then threadDelay 700000 else pure ()
+      succeed (object ["text" .= Text.Encoding.decodeUtf8 (strictEncode params), "received" .= params])
+    _ -> failTest "unexpected fake permission method"
+  where
+    whenDispatch selected = if selected == "dispatch" then failTest "dispatch must not be probed" else pure ()
 
 fakePlugin :: IO ()
 fakePlugin = do

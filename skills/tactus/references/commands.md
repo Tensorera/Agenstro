@@ -12,12 +12,15 @@ tactus doctor --root /path/to/project --json
 ```
 
 For skill upgrades, `tactus skills update --root /path/to/project --dry-run`
-previews the installed Tactus, Motivo and Segno files and host discovery entries.
+previews the installed Tactus, Motivo and Segno files below `.tactus/skills`.
 Omit `--dry-run` to apply updates: known unchanged copies are refreshed, while
 customized or unknown files remain in place with incoming versions under
 `.tactus/skill-updates/` for review. This command does not update business
 scripts, method templates or provider configuration; repeated `init` also
 preserves existing files.
+Neither command installs host discovery mirrors. Read the selected
+`.tactus/skills/<name>/SKILL.md` explicitly; existing host directories and
+previously installed mirrors remain unchanged.
 
 `check` takes positional sources, including helper modules. `run` takes
 repeatable `--script` arguments and preserves their order; `--all` and ranges
@@ -58,14 +61,17 @@ Use the sibling [Segno skill](../../segno/SKILL.md) for its timestamp/result
 protocol, execution environment, registration, and recovery. For per-run daemon
 supervision and live output, read [supervision.md](supervision.md).
 
-`tactus generate --root /path/to/project 'authoring goal'` invokes the configured
-generation provider. It can type-check while authoring; generation does not
-execute the resulting business workflow. Edits to helper modules count as
-source changes. Select and run entries separately when the task needs execution.
+Author the Haskell source in the current coding-agent conversation. For a
+provider task, use Clef's `invoke` or `invokeWith` in that source, then check
+and run the selected entry. This skill does not permit `tactus generate`,
+provider `plugin-call`, `provider-host`, native provider CLIs, `smoke --live`,
+or shell/Python/JavaScript wrappers to invoke a provider. See the
+[provider calling rules](../SKILL.md#provider-calling-rules).
 
 For plugin authoring, read the workspace registry and the plugin's `describe`
 response before constructing an invocation. `describe` reports methods and
 capabilities; it does not validate task correctness.
+The following commands address an effect, not a model/provider invocation:
 
 ```sh
 tactus plugin-call --root /path/to/project --namespace effect project.tests describe

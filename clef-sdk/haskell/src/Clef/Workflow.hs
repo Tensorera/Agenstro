@@ -82,6 +82,7 @@ import Clef.Error
   )
 import Clef.Internal.Exception (isAsynchronousException)
 import Clef.Plugin.Protocol (decodeStrictJSON)
+import Clef.Permissions (InvocationPermissions)
 import Clef.Runtime
   ( PluginCallResult (..),
     Runtime,
@@ -151,7 +152,10 @@ data ProviderRef = ProviderRef
     providerRefModel :: Maybe Text,
     providerRefEffort :: Maybe Text,
     providerRefOptions :: Object,
-    providerRefExtraArgs :: [Text]
+    providerRefExtraArgs :: [Text],
+    -- | A complete replacement of the startup request. Just emptyPermissions
+    -- restores ordinary provider configuration, rather than merging defaults.
+    providerRefPermissions :: Maybe InvocationPermissions
   }
   deriving (Eq, Show)
 
@@ -162,7 +166,8 @@ providerRef name =
       providerRefModel = Nothing,
       providerRefEffort = Nothing,
       providerRefOptions = mempty,
-      providerRefExtraArgs = []
+      providerRefExtraArgs = [],
+      providerRefPermissions = Nothing
     }
 
 textTask :: Text -> (input -> Text) -> Task input Text
@@ -585,6 +590,7 @@ invokeTask runtime selectedProvider selectedTask input = do
       prompt = prependInstructions (Config.runtimeInstructions config) renderedPrompt
       model = providerRefModel selectedProvider <|> Config.providerModel providerConfig
       effort = providerRefEffort selectedProvider <|> Config.providerEffort providerConfig
+      permissions = providerRefPermissions selectedProvider <|> Config.providerPermissions providerConfig
       options = KeyMap.union (providerRefOptions selectedProvider) (Config.providerOptions providerConfig)
       params =
         KeyMap.fromList . catMaybes $
@@ -593,6 +599,7 @@ invokeTask runtime selectedProvider selectedTask input = do
             Just ("workspace", toJSON (Config.runtimeWorkspace config)),
             ("model",) . toJSON <$> model,
             ("effort",) . toJSON <$> effort,
+            ("permissions",) . toJSON <$> permissions,
             Just ("options", Object options),
             if null (providerRefExtraArgs selectedProvider)
               then Nothing

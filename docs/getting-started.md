@@ -66,7 +66,8 @@ The relevant workspace layout is:
   skills/segno/     persistent task authoring, service operations and templates
 ```
 
-`init` preserves existing files and installs short host-agent skill pointers.
+`init` preserves existing files and installs skills only below `.tactus/skills`
+for explicit reading. It does not install host-agent discovery mirrors.
 Use `tactus skills update --dry-run` to inspect skill updates for an existing
 project, then `tactus skills update` to apply unchanged bundled files and stage
 incoming versions beside customized ones for review.
@@ -86,9 +87,10 @@ conversation.
 
 ## 3. Ask the agent to use Motivo when it helps
 
-An initial request can be ordinary language:
+Explicitly select the installed skill in the initial request:
 
-> Use Motivo to investigate why importing a large folder is slow. Start with the
+> Read `.tactus/skills/motivo/SKILL.md` and use Motivo to investigate why
+> importing a large folder is slow. Start with the
 > relevant code and existing evidence, record what remains uncertain, and show
 > me the report before proposing a focused experiment.
 
@@ -164,11 +166,13 @@ range is required for check/run; an omitted selection cannot silently execute
 the workspace. A logical entry is not a transaction or a rollback mechanism.
 
 Provider-assisted `tactus generate --provider NAME GOAL...` remains available
-when explicitly useful. Generation reads `.tactus/PROMPT.md` and the Tactus skill,
+when explicitly useful outside the Tactus skill's Haskell-only provider calling
+channel. Generation reads the configured generation instructions,
 may compile-check changes, and does not automatically execute the generated
-business workflow. An agent already working in the project can usually author
-that entry directly. Keep generation guidance separate from optional shared
-business-call `runtime_instructions`.
+business workflow. Skills are not automatically added to that request. An agent
+following the Tactus skill authors the entry directly and routes provider calls
+through Clef's `invoke` or `invokeWith`. Keep generation guidance separate from
+optional shared business-call `runtime_instructions`.
 
 ## Continue from the result
 

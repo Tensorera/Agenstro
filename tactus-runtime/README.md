@@ -15,10 +15,12 @@ configured provider. `tactus watch` serves a live local provider-output viewer.
 Persistent scheduling remains in Segno. Neither component adds workflow
 rollback or a provider credential broker.
 
-Initialization distributes the Tactus, Motivo and Segno skills. The
-`tactus skills update` command upgrades unchanged bundled skill files and host
-discovery entries; customized files remain intact, with incoming versions
-available for comparison. `--dry-run` previews these decisions without writes.
+Initialization installs the Tactus, Motivo and Segno skills only under
+`.tactus/skills`, for explicit reading by the calling agent. It does not create
+host discovery mirrors or change existing host files. The `tactus skills update`
+command upgrades unchanged bundled skill files; customized files remain intact,
+with incoming versions available for comparison. `--dry-run` previews these
+decisions without writes.
 
 Tactus is licensed with the rest of Agenstro under
 [GNU AGPL v3.0 only](../LICENSE).

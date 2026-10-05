@@ -58,7 +58,10 @@ current compatibility targets. Git history is the migration record.
    explicit `parallel` boundary over a global DAG or type-level effect row.
 2. Keep provider policy out of `Workflow`. Models, effort, variants, permission
    flags, credentials, and provider-specific options belong to configuration
-   and adapters.
+   and adapters. The shared `InvocationPermissions` request is provider-neutral;
+   adapters and capability negotiation own application and fallback warnings.
+   Record requested and effective permissions separately. A call override
+   replaces the startup request as a whole without editing user configuration.
 3. Keep Tactus typed and deterministic at its boundary. Parse TOML into
    category-specific Rust structures, reject invalid configuration early, and
    preserve open nested plugin options.
@@ -263,10 +266,12 @@ ships, rather than silently copying newer repository files into the workspace:
 ```sh
 cargo build --workspace --locked
 python3 motivo/tests/run.py --tactus Build/cargo/debug/tactus --installed-only
+python3 motivo/tests/tdd.py --tactus Build/cargo/debug/tactus --motivo-test Build/cargo/debug/motivo-test --installed-only
 ```
 
-Keep the embedded skill file list and host discovery descriptions aligned with
-all three skills. Skill-upgrade tests must preserve customized and unrecognized
+Keep the embedded skill file list aligned with all three skills. Installation
+is confined to `.tactus/skills` for explicit use; preserve existing host trees
+and legacy mirrors without creating new discovery files. Skill-upgrade tests must preserve customized and unrecognized
 files, including across repeated initialization, and keep dry-run free of writes.
 The Segno service acceptance executes the organizer and business assets installed
 by Tactus, so missing or stale packaged templates fail the end-to-end check.
@@ -278,6 +283,14 @@ preservation, method-specific artifacts, source/run references, interrupted
 experiments, identity provenance, and actual Haskell execution. The default
 tests do not contact a real model. [ADR-0008](docs/adr/0008-agent-led-motivo.md)
 records the method and observation boundary.
+
+`Motivo.Test` suites check exit codes, protected logs and sample artifacts from
+`motivo.test`. Red needs an actual assertion failure with complete evidence;
+green must pass the same normalized command/assertion manifest. Infrastructure
+failures, incomplete logs and provider claims cannot establish either phase.
+The Full gate checks those distinctions and a real Linux sandbox red/green
+cycle using isolated fixtures. Unsupported platforms type-check the templates
+and report skipped execution coverage; they never run experiments on the host.
 
 The reference norm checker is a standalone Python plugin. Its fixture runner
 checks both domain results and the JSONL terminal/correlation rules:

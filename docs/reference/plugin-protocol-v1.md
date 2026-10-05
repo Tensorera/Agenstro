@@ -130,6 +130,62 @@ counters belong in technical diagnostics; Tactus's durable journals use the
 bounded diagnostic projection described below. Stderr alone never means
 `[error]`.
 
+## Provider permission negotiation
+
+Provider `invoke` requests may contain a typed `params.permissions` object:
+
+```json
+{
+  "allowed_tools": ["Read"],
+  "allowed_skills": [],
+  "sandbox": {"mode": "read-only", "workspace": "/srv/project"}
+}
+```
+
+Omission inherits provider registry startup defaults; an explicit object
+replaces them as a whole. `{}` selects normal mode. `[]` requests an empty set,
+while an absent field leaves that feature in normal mode. Sandbox modes are
+`read-only`, `workspace-write` and `unrestricted`; a workspace must be absolute.
+
+Custom providers can publish this optional object in their `describe` value:
+
+```json
+{
+  "permissions_capabilities": {
+    "allowed_tools": {"support": "partial", "scope": "builtin", "reason": "MCP tools retain native policy"},
+    "allowed_skills": {"support": "supported", "scope": "plugin"},
+    "sandbox": {"support": "supported", "modes": ["read-only"], "workspace": true}
+  }
+}
+```
+
+Each feature's `support` is `supported`, `partial`, or `unsupported`; omitted
+features are unsupported. Omitted `modes` accepts all three modes; an empty
+list accepts none. Custom workspace support must explicitly be `true`.
+Supported fields reach `invoke`; unsupported fields are removed and a
+`provider.permission.warning` event records fallback to ordinary behavior.
+Partial support retains only supported configuration and emits a warning.
+No supported fields means the entire `permissions` key is omitted, preserving
+legacy plugins that reject unknown parameter keys. Empty requests need no
+capability probe. Native Tactus hosts compile requests directly.
+
+The custom capability query is offline, bounded to five seconds, and charged
+to the invocation deadline. Missing, invalid or failed descriptions yield
+unsupported fields, never a second model invocation. Cancellation or an
+exhausted overall deadline prevents the subsequent invoke from starting.
+This declaration is a plugin contract, not proof that arbitrary trusted plugin
+code implements its claim.
+
+Tactus emits `provider.permissions` with a `permission_report`, and adds that
+report to object provider results under the reserved `permission_report` key.
+The report contains `requested`, `effective`, `applications` and `warnings`;
+application statuses are `applied`, `partial`, and `unsupported`. Failure details
+retain the report alongside `provider_details`. Scalar results keep their ABI
+and expose the report through events. Durable journals keep field statuses,
+warning codes and configuration fingerprints rather than raw paths or names.
+Consumers must inspect `effective` and
+warnings rather than assume the requested limits were enforced.
+
 ## Terminal result
 
 Success requires `ok=true`, a present `value` (which may itself be JSON null),

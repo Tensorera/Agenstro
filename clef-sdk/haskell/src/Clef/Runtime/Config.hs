@@ -35,6 +35,7 @@ import System.Environment (lookupEnv)
 import System.FilePath (isAbsolute)
 import Clef.Error (WorkflowError (..))
 import Clef.Plugin.Protocol (decodeStrictJSON)
+import Clef.Permissions (InvocationPermissions)
 
 data RuntimeConfig = RuntimeConfig
   { runtimeApi :: Text,
@@ -85,7 +86,8 @@ data ProviderConfig = ProviderConfig
   { providerCommand :: [Text],
     providerModel :: Maybe Text,
     providerEffort :: Maybe Text,
-    providerOptions :: Object
+    providerOptions :: Object,
+    providerPermissions :: Maybe InvocationPermissions
   }
   deriving (Eq, Show)
 
@@ -173,6 +175,7 @@ instance FromJSON ProviderConfig where
       <*> objectValue .:? "model"
       <*> objectValue .:? "effort"
       <*> objectValue .:? "options" .!= mempty
+      <*> objectValue .:? "permissions"
 
 instance FromJSON EffectConfig where
   parseJSON = withObject "effect configuration" $ \objectValue -> do

@@ -223,6 +223,12 @@ function Invoke-FullSteps {
             "haskell_topology_workflow_runs_all_stages_with_parallel_reviews", "--", "--ignored", "--exact"
         )
     }
+    Invoke-QualityStep "cross-language-permissions" {
+        Invoke-NativeCommand "cargo" @(
+            "test", "--locked", "-p", "tactus-runtime", "--test", "permissions",
+            "haskell_permissions_cross_dispatch_without_double_probe", "--", "--ignored", "--exact"
+        )
+    }
     Invoke-QualityStep "haskell-tests-werror" {
         Invoke-NativeCommand "cabal" @(
             "test", "--builddir=Build/cabal", "all", "--test-show-details=direct", "--ghc-options=-Werror"
@@ -272,6 +278,14 @@ function Invoke-FullSteps {
         $tactusName = if ($IsWindows) { "tactus.exe" } else { "tactus" }
         Invoke-NativeCommand $pythonCommand @(
             "motivo/tests/run.py", "--tactus", (Join-Path $cargoTarget "debug/$tactusName"), "--installed-only"
+        )
+    }
+    Invoke-QualityStep "motivo-test-suites" {
+        $tactusName = if ($IsWindows) { "tactus.exe" } else { "tactus" }
+        $testName = if ($IsWindows) { "motivo-test.exe" } else { "motivo-test" }
+        Invoke-NativeCommand $pythonCommand @(
+            "motivo/tests/tdd.py", "--tactus", (Join-Path $cargoTarget "debug/$tactusName"),
+            "--motivo-test", (Join-Path $cargoTarget "debug/$testName"), "--installed-only"
         )
     }
     Invoke-QualityStep "motivo-package" {

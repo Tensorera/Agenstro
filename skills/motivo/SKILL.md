@@ -1,6 +1,6 @@
 ---
 name: motivo
-description: Help a coding agent clarify, investigate, analyze, research, organize, review, or hand off a complex task, and record bounded local experiments and readable evidence reports. Use when the user asks for Motivo or when uncertainty, coordination, or a failed approach warrants a focused method.
+description: Help a coding agent clarify, investigate, analyze, research, organize, review, or hand off a complex task, and run independent command acceptance suites with red/green evidence. Use when the user asks for Motivo, test-driven development, or when uncertainty, coordination, or a failed approach warrants a focused method.
 ---
 
 # Motivo in your current coding-agent session
@@ -58,6 +58,17 @@ explicit business workflow, not in an experiment sandbox.
 Use a new run/sample identity after inspecting an interrupted attempt. Preserve
 its observations. A timeout, missing response, or partial result does not prove
 nothing happened, and does not authorize an automatic retry.
+
+## Test-driven acceptance
+
+Use `090_test.hs` or the `Motivo.Test` Haskell DSL when a concrete behavior should
+be tested before implementation. Follow [references/tdd.md](references/tdd.md)
+to author command cases and assertions, observe an actual red phase, then run a
+matching green phase after the authorized implementation change. The host checks
+protected logs and files; a provider's claim that it ran tests cannot replace
+these observations. Keep the same oracle across red and green. Execution errors
+and incomplete evidence are distinct from failed assertions. The agent leads
+the cycle; there is no autonomous controller or retry loop.
 
 ## Agent identity and optional separate calls
 

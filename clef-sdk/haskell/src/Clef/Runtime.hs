@@ -66,6 +66,7 @@ import Control.Exception
 import Control.Monad (forever, unless, when)
 import Data.Aeson
   ( Object,
+    FromJSON (parseJSON),
     ToJSON (toJSON),
     Value (..),
     encode,
@@ -75,6 +76,7 @@ import Data.Aeson
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (parseEither)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq, ViewL (..), (|>))
 import qualified Data.Sequence as Seq
@@ -86,6 +88,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+import System.FilePath (takeFileName)
 import System.IO (Handle, hClose, hSetBinaryMode, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process
@@ -112,6 +115,7 @@ import Clef.Error
     workflowErrorDiagnostic,
   )
 import Clef.Internal.Exception (isAsynchronousException)
+import Clef.Permissions
 import Clef.Plugin.Protocol
   ( ParsedPluginOutput (..),
     PluginFailure (..),
@@ -500,8 +504,95 @@ withProviderPermit runtime pluginName action
 
 callPluginWithLimits :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
 callPluginWithLimits transportLimits runtime pluginName command method params =
-  withProviderPermit runtime pluginName $
-    callPluginWithoutPermit transportLimits runtime pluginName command method params
+  withProviderPermit runtime pluginName $ case KeyMap.lookup "permissions" params of
+    Just value | isProviderPlugin pluginName && method == "invoke" -> do
+      requested <- either
+        (throwWorkflow . PluginProtocolFailed pluginName . Text.pack)
+        pure (parseEither parseJSON value)
+      if handlesProviderPermissions command
+        then callPluginWithoutPermit transportLimits runtime pluginName command method params
+        else callDirectProviderWithPermissions transportLimits runtime pluginName command params requested
+    _ -> callPluginWithoutPermit transportLimits runtime pluginName command method params
+
+-- Normal runtime documents route all providers through Tactus dispatch. Native
+-- hosts also compile requests themselves. Probe only direct custom commands.
+handlesProviderPermissions :: [Text] -> Bool
+handlesProviderPermissions command = case command of
+  executable : subcommand : arguments ->
+    let nativeHost = Text.toLower (Text.pack (takeFileName (Text.unpack executable))) `elem` ["tactus", "tactus.exe"]
+     in (nativeHost && subcommand == "dispatch" && "--namespace" `elem` arguments && "provider" `elem` arguments)
+          || (nativeHost && subcommand `elem` ["provider-host", "provider"])
+  _ -> False
+
+callDirectProviderWithPermissions :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Object -> InvocationPermissions -> IO PluginCallResult
+callDirectProviderWithPermissions limits runtime pluginName command params requested = do
+  let action = do
+        capabilities <- if requested == emptyPermissions
+          then pure (PermissionCapabilities unsupported unsupported unsupported)
+          else do
+            let probeLimits = limits
+                  { transportDeadlineSeconds = Just (min 5 (maybe 5 id (transportDeadlineSeconds limits))),
+                    transportMaxFrameBytes = min (64 * 1024) (transportMaxFrameBytes limits),
+                    transportMaxStdoutBytes = min (128 * 1024) (transportMaxStdoutBytes limits),
+                    transportMaxEventFrames = min 16 (transportMaxEventFrames limits) }
+                probeParams = KeyMap.filterWithKey (\key _ -> key `elem` ["workspace", "options"]) params
+            outcome <- try (callPluginWithoutPermit probeLimits runtime pluginName command "describe" probeParams)
+              :: IO (Either WorkflowError PluginCallResult)
+            pure $ case outcome of
+              Right result -> case pluginCallValue result of
+                Object fields | Just declaration <- KeyMap.lookup "permissions_capabilities" fields ->
+                  either (const missingCapabilities) id (parseEither parseJSON declaration)
+                _ -> missingCapabilities
+              Left _ -> missingCapabilities
+        let report = negotiatePermissions requested capabilities
+            ordinary = KeyMap.delete "permissions" params
+            forwarded = if effectivePermissions report == emptyPermissions then ordinary
+              else KeyMap.insert "permissions" (toJSON (effectivePermissions report)) ordinary
+        reportId <- freshRuntimeId runtime
+        events <- mapM (emitPermissionWarning reportId) (permissionWarnings report)
+        let reportEvent = permissionEventFrame reportId (object ["type" .= ("provider.permissions" :: Text), "permission_report" .= report])
+        emitEvent runtime pluginName reportId reportEvent
+        outcome <- try (callPluginWithoutPermit limits runtime pluginName command "invoke" forwarded)
+          :: IO (Either WorkflowError PluginCallResult)
+        case outcome of
+          Left failure -> throwIO (attachPermissionFailure report failure)
+          Right result -> pure result
+            { pluginCallValue = attachPermissionValue report (pluginCallValue result),
+              pluginCallEvents = events <> [reportEvent] <> pluginCallEvents result }
+  outcome <- case transportDeadlineSeconds limits of
+    Nothing -> Just <$> action
+    Just seconds -> timeout (seconds * 1000000) action
+  case outcome of
+    Just result -> pure result
+    Nothing -> throwWorkflow (PluginOutcomeUnknown pluginName "invoke"
+      (WorkflowCause "plugin.deadline_exceeded" "provider permission negotiation and invocation exceeded their shared deadline" Nothing))
+  where
+    unsupported = PermissionCapability Unsupported Nothing Nothing Nothing Nothing
+    missingCapabilities = let missing = unsupported { capabilityReason = Just "The provider did not return a valid permissions_capabilities declaration; this field uses the provider's normal mode." }
+      in PermissionCapabilities missing missing missing
+    emitPermissionWarning requestId warning = do
+      let payload = case toJSON warning of
+            Object fields -> Object (KeyMap.insert "type" (String "provider.permission.warning") fields)
+            _ -> error "permission warning encodes as an object"
+          event = permissionEventFrame requestId payload
+      emitEvent runtime pluginName requestId event
+      pure event
+
+permissionEventFrame :: Text -> Value -> Value
+permissionEventFrame requestId event = object ["type" .= ("event" :: Text), "id" .= requestId, "event" .= event]
+
+attachPermissionValue :: PermissionReport -> Value -> Value
+attachPermissionValue report (Object fields) = Object (KeyMap.insert "permission_report" (toJSON report) fields)
+attachPermissionValue _ value = value
+
+attachPermissionFailure :: PermissionReport -> WorkflowError -> WorkflowError
+attachPermissionFailure report failure = case failure of
+  PluginOutcomeUnknown plugin method cause -> PluginOutcomeUnknown plugin method (attach cause)
+  PluginReportedFailure plugin method cause -> PluginReportedFailure plugin method (attach cause)
+  _ -> failure
+  where
+    attach cause = cause {workflowCauseDetails = Just (object
+      ["permission_report" .= report, "provider_details" .= workflowCauseDetails cause])}
 
 callPluginWithoutPermit :: PluginTransportLimits -> Runtime -> Text -> [Text] -> Text -> Object -> IO PluginCallResult
 callPluginWithoutPermit transportLimits runtime pluginName command method params = do
@@ -715,6 +806,26 @@ emitEvent runtime pluginName requestId event = do
       (internalLastEventUnixMillis runtime)
       (Map.insert (pluginName, requestId) eventUnixMillis)
   recordRuntime runtime (PluginEventRecord pluginName requestId event)
+  let payload = case event of
+        Object fields | Just inner <- KeyMap.lookup "event" fields -> inner
+        _ -> event
+  case payload of
+    Object fields
+      | KeyMap.lookup "type" fields == Just (String "provider.permission.warning") -> do
+          -- Plugin reason strings remain in live structured records. Default
+          -- output contains only a fixed projection, never plugin-owned text.
+          let requested = case KeyMap.lookup "field" fields of
+                Just (String "allowed_tools") -> "tool selection"
+                Just (String "allowed_skills") -> "skill selection"
+                Just (String "sandbox") -> "sandbox configuration"
+                _ -> "invocation permission configuration"
+              outcome = if KeyMap.lookup "code" fields == Just (String "permission_partial")
+                then "is only partially supported by this provider."
+                else "is unsupported by this provider; its ordinary configuration is retained."
+              diagnostic = "[warning] The requested " <> requested <> " " <> outcome
+          recordRuntime runtime (PluginDiagnosticRecord pluginName diagnostic)
+          Text.IO.hPutStrLn stderr diagnostic
+    _ -> pure ()
 
 -- | Add bounded, non-content-bearing reconciliation evidence to an ambiguous
 -- plugin result.  Raw event payloads remain in runtime records; this summary

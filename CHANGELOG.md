@@ -3,6 +3,20 @@
 This project is a source alpha. Versions describe checked-in contracts; they
 do not imply a package-registry release or compatibility guarantee.
 
+## Unreleased — invocation permissions and Motivo test suites
+
+- Add typed Clef/Tactus startup and per-call tool, skill and sandbox requests,
+  capability negotiation, effective permission reports and fallback warnings.
+  Map Codex sandbox settings and Claude builtin tool selection without editing
+  native configuration files; unsupported fields retain ordinary behavior.
+- Install bundled skills only below `.tactus/skills` for explicit selection;
+  preserve existing host trees and legacy mirrors, and remove automatic Tactus
+  skill-body injection from generation prompts.
+- Require provider model calls under the Tactus skill to use Haskell/Clef;
+  daemon monitoring remains separately authorized.
+- Add `Motivo.Test`, JSON-authored suites, the `090_test.hs` entry, and recorded
+  red/green acceptance using real command facts, frozen manifests and offline
+  reports. Incomplete execution evidence cannot establish a red or green result.
 
 ## Unreleased — daemon, Segno service and live output
 

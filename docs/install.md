@@ -60,11 +60,11 @@ tactus doctor
 tactus list
 ```
 
-Start your chosen coding agent from this folder and ask it to use Motivo. The
-canonical skills are in `.tactus/skills/{motivo,tactus,segno}`. Initialization installs
-project-local discovery pointers for supported hosts and preserves existing
-files. If your host does not expose skills, ask it to read the canonical skill
-path directly.
+Start your chosen coding agent from this folder and ask it to read
+`.tactus/skills/motivo/SKILL.md` before using Motivo. Skills are installed only
+in `.tactus/skills/{motivo,tactus,segno}` for explicit reading. Initialization
+does not create `.codex`, `.claude`, `.opencode`, or `.agents` discovery mirrors.
+Existing host files, including mirrors from older installations, remain unchanged.
 
 Open `.tactus/motivo/index.html` in a browser to observe recorded work. All task
 instructions and feedback stay in the original coding-agent conversation.
@@ -84,7 +84,7 @@ including user-edited templates, skills and `tactus.toml`. Inspect its created,
 preserved and skipped entries. It does not silently upgrade existing method
 code or overwrite a user's provider settings.
 
-To update only the bundled skills and their coding-agent discovery entries:
+To update only the bundled skills under `.tactus/skills`:
 
 ```sh
 tactus skills update --root /path/to/project --dry-run
@@ -103,8 +103,9 @@ Motivo method sources and generated reports are outside this update command.
 The updater records baselines in `.tactus/skills-manifest.json`. Repeating
 `init` preserves existing skills and never treats local modifications as a
 fresh installed baseline. A runtime upgrade alone does not refresh existing
-workspace skills. After updating, reload the coding agent's skill discovery
-if it has cached the old instructions.
+workspace skills. After updating, ask the coding agent to explicitly reread
+the selected `.tactus/skills/<name>/SKILL.md` and its references if it has cached
+the old instructions. The updater neither refreshes nor removes old host mirrors.
 
 If an existing configuration lacks the new experiment effect, add only this
 entry while preserving other settings:

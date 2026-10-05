@@ -16,6 +16,7 @@ struct FakeNativeCli {
     prefix: Vec<String>,
     arguments_path: PathBuf,
     environment_path: PathBuf,
+    workspace_path: PathBuf,
 }
 
 impl FakeNativeCli {
@@ -23,12 +24,14 @@ impl FakeNativeCli {
         let directory = Arc::new(tempdir().expect("fake CLI directory"));
         let arguments_path = directory.path().join("arguments.txt");
         let environment_path = directory.path().join("environment.txt");
+        let workspace_path = directory.path().join("workspace.txt");
         let prefix = create_fake_script(directory.path());
         Self {
             _directory: directory,
             prefix,
             arguments_path,
             environment_path,
+            workspace_path,
         }
     }
 
@@ -38,7 +41,8 @@ impl FakeNativeCli {
             "timeout_seconds":5,
             "extra_env":{
                 "FAKE_ARGS_PATH":self.arguments_path,
-                "FAKE_ENV_PATH":self.environment_path
+                "FAKE_ENV_PATH":self.environment_path,
+                "FAKE_CWD_PATH":self.workspace_path
             }
         })
     }
@@ -62,6 +66,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 > "%FAKE_ARGS_PATH%" echo(%~1
 >> "%FAKE_ARGS_PATH%" echo(%*
 > "%FAKE_ENV_PATH%" echo(%OPENCODE_CONFIG_CONTENT%
+> "%FAKE_CWD_PATH%" cd
 echo %* | %SystemRoot%\System32\findstr.exe /C:"--version" >nul
 if not errorlevel 1 (
   echo fake-cli 1.0
@@ -101,6 +106,7 @@ fn create_fake_script(directory: &Path) -> Vec<String> {
         r#"#!/bin/sh
 printf '%s\n' "$@" > "$FAKE_ARGS_PATH"
 printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$FAKE_ENV_PATH"
+pwd > "$FAKE_CWD_PATH"
 for item in "$@"; do
   if [ "$item" = "--version" ]; then printf '%s\n' 'fake-cli 1.0'; exit 0; fi
 done
@@ -124,6 +130,218 @@ esac
     // Concurrent forked tests may temporarily retain the script's writable
     // descriptor and make direct exec fail with ETXTBSY (Text file busy).
     vec!["/bin/sh".to_owned(), script.to_string_lossy().into_owned()]
+}
+
+#[test]
+fn permission_descriptions_advertise_only_validated_adapter_mappings() {
+    for provider in ["codex", "claude-code", "opencode", "antigravity"] {
+        let (code, frames, _) = call_provider(provider, "describe", json!({}));
+        assert_eq!(code, 0);
+        let capabilities = &frames.last().unwrap()["value"]["permissions_capabilities"];
+        assert_eq!(capabilities["allowed_skills"]["support"], "unsupported");
+        assert_eq!(
+            capabilities["allowed_tools"]["support"],
+            if provider == "claude-code" {
+                "partial"
+            } else {
+                "unsupported"
+            }
+        );
+        assert_eq!(
+            capabilities["sandbox"]["support"],
+            if provider == "codex" {
+                "supported"
+            } else {
+                "unsupported"
+            }
+        );
+    }
+}
+
+#[test]
+fn codex_requested_sandbox_replaces_bypass_and_selects_actual_working_directory() {
+    let workspace = tempdir().unwrap();
+    let selected = tempdir().unwrap();
+    for (mode, native_mode, bypass) in [
+        ("read-only", "read-only", false),
+        ("workspace-write", "workspace-write", false),
+        ("unrestricted", "danger-full-access", true),
+    ] {
+        let fake = FakeNativeCli::create();
+        let requested = json!({"sandbox":{"mode":mode,"workspace":selected.path()}});
+        let (code, frames, diagnostics) = call_provider(
+            "codex",
+            "invoke",
+            json!({"workspace":workspace.path(),"prompt":"fixture","options":fake.options(),"permissions":requested}),
+        );
+        assert_eq!(code, 0, "{diagnostics}");
+        let args = fake.arguments().join("\n");
+        assert!(args.contains("--sandbox"));
+        assert!(args.contains(native_mode));
+        assert!(args.contains("approval_policy=\"never\""));
+        if mode == "workspace-write" {
+            assert!(args.contains("sandbox_workspace_write.writable_roots=[]"));
+            assert!(args.contains("sandbox_workspace_write.exclude_tmpdir_env_var=true"));
+            assert!(args.contains("sandbox_workspace_write.exclude_slash_tmp=true"));
+        }
+        assert!(!args.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(args.contains(&selected.path().to_string_lossy().to_string()));
+        let actual_cwd = fs::read_to_string(&fake.workspace_path).unwrap();
+        assert_eq!(
+            dunce::canonicalize(actual_cwd.trim()).unwrap(),
+            dunce::canonicalize(selected.path()).unwrap()
+        );
+        let value = &frames.last().unwrap()["value"];
+        assert_eq!(value["full_bypass"], bypass);
+        assert_eq!(value["permission_report"]["requested"], requested);
+        assert_eq!(
+            value["permission_report"]["applications"][0]["status"],
+            "applied"
+        );
+        assert_eq!(frames[0]["event"]["type"], "provider.permissions");
+    }
+}
+
+#[test]
+fn unsupported_permission_fields_fall_back_with_result_event_and_stderr_evidence() {
+    let workspace = tempdir().unwrap();
+    for provider in ["codex", "claude-code", "opencode"] {
+        let fake = FakeNativeCli::create();
+        let requested = if provider == "codex" {
+            json!({"allowed_tools":[],"allowed_skills":["native-skill"]})
+        } else {
+            json!({"allowed_skills":[],"sandbox":{"mode":"read-only"}})
+        };
+        let (code, frames, diagnostics) = call_provider(
+            provider,
+            "invoke",
+            json!({"workspace":workspace.path(),"prompt":"fixture","options":fake.options(),"permissions":requested}),
+        );
+        assert_eq!(code, 0, "{provider}: {diagnostics}");
+        let report = &frames.last().unwrap()["value"]["permission_report"];
+        assert_eq!(report["requested"], requested);
+        assert_eq!(report["effective"], json!({}));
+        assert_eq!(report["warnings"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["event"]["type"] == "provider.permission.warning")
+                .count(),
+            2
+        );
+        assert!(diagnostics.contains("permission_unsupported"));
+        assert!(!fake.arguments().join("\n").contains("--sandbox"));
+        assert_eq!(
+            frames.last().unwrap()["value"]["full_bypass"],
+            provider != "opencode"
+        );
+    }
+}
+
+#[test]
+fn claude_tool_catalog_selection_is_partial_and_unknown_names_fall_back_whole_field() {
+    let workspace = tempdir().unwrap();
+    for tools in [
+        json!([]),
+        json!(["Read", "Bash"]),
+        json!(["Read", "mcp__server__read"]),
+    ] {
+        let fake = FakeNativeCli::create();
+        let (code, frames, diagnostics) = call_provider(
+            "claude-code",
+            "invoke",
+            json!({"workspace":workspace.path(),"prompt":"fixture","options":fake.options(),"permissions":{"allowed_tools":tools}}),
+        );
+        assert_eq!(code, 0, "{diagnostics}");
+        let report = &frames.last().unwrap()["value"]["permission_report"];
+        let unknown = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool.as_str().unwrap().starts_with("mcp__"));
+        assert_eq!(
+            report["applications"][0]["status"],
+            if unknown { "unsupported" } else { "partial" }
+        );
+        assert_eq!(
+            report["effective"],
+            if unknown {
+                json!({})
+            } else {
+                json!({"allowed_tools":tools})
+            }
+        );
+        assert_eq!(fake.arguments().join("\n").contains("--tools"), !unknown);
+        assert!(diagnostics.contains(if unknown {
+            "permission_unsupported"
+        } else {
+            "MCP"
+        }));
+    }
+}
+
+#[test]
+fn supported_permissions_reject_conflicting_extra_args_before_native_spawn() {
+    let workspace = tempdir().unwrap();
+    for (provider, permission, argument) in [
+        (
+            "codex",
+            json!({"sandbox":{"mode":"read-only"}}),
+            "--full-auto",
+        ),
+        (
+            "codex",
+            json!({"sandbox":{"mode":"read-only"}}),
+            "--sandbox=danger-full-access",
+        ),
+        (
+            "codex",
+            json!({"sandbox":{"mode":"read-only"}}),
+            "-csandbox_mode=\"danger-full-access\"",
+        ),
+        (
+            "claude-code",
+            json!({"allowed_tools":[]}),
+            "--tools=default",
+        ),
+    ] {
+        let fake = FakeNativeCli::create();
+        let mut options = fake.options();
+        options["extra_args"] = json!([argument]);
+        let (code, frames, _) = call_provider(
+            provider,
+            "invoke",
+            json!({"workspace":workspace.path(),"prompt":"fixture","options":options,"permissions":permission}),
+        );
+        assert_ne!(code, 0);
+        assert_eq!(frames.last().unwrap()["error"]["code"], "invalid_params");
+        assert!(
+            !fake.arguments_path.exists(),
+            "invalid request spawned native CLI"
+        );
+    }
+}
+
+#[test]
+fn empty_permission_object_retains_ordinary_mode_without_warnings() {
+    let workspace = tempdir().unwrap();
+    let fake = FakeNativeCli::create();
+    let (code, frames, diagnostics) = call_provider(
+        "codex",
+        "invoke",
+        json!({"workspace":workspace.path(),"prompt":"fixture","options":fake.options(),"permissions":{}}),
+    );
+    assert_eq!(code, 0, "{diagnostics}");
+    assert!(
+        fake.arguments()
+            .join("\n")
+            .contains("--dangerously-bypass-approvals-and-sandbox")
+    );
+    assert_eq!(
+        frames.last().unwrap()["value"]["permission_report"]["applications"],
+        json!([])
+    );
+    assert!(!diagnostics.contains("permission_unsupported"));
 }
 
 #[test]
@@ -268,6 +486,52 @@ fn antigravity_options(capture: &Path, mode: &str) -> Value {
         "timeout_seconds":5,
         "extra_env":{"FAKE_AGY_CAPTURE":capture, "FAKE_AGY_MODE":mode}
     })
+}
+
+#[test]
+fn antigravity_unsupported_permissions_preserve_native_mode_even_on_failure() {
+    let workspace = tempdir().unwrap();
+    let requested = json!({"allowed_tools":[],"allowed_skills":[],"sandbox":{"mode":"read-only"}});
+    for mode in ["success", "error"] {
+        let capture = workspace.path().join(mode);
+        let (code, frames, diagnostics) = call_provider(
+            "antigravity",
+            "invoke",
+            json!({
+                "workspace":workspace.path(), "prompt":"fixture", "options":antigravity_options(&capture, mode), "permissions":requested
+            }),
+        );
+        assert_eq!(code == 0, mode == "success");
+        let terminal = frames.last().unwrap();
+        let report = if mode == "success" {
+            &terminal["value"]["permission_report"]
+        } else {
+            &terminal["error"]["details"]["permission_report"]
+        };
+        assert_eq!(report["requested"], requested);
+        assert_eq!(report["effective"], json!({}));
+        assert_eq!(report["warnings"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["event"]["type"] == "provider.permission.warning")
+                .count(),
+            3
+        );
+        assert!(diagnostics.contains("permission_unsupported"));
+        let args: Vec<String> =
+            serde_json::from_slice(&fs::read(capture.with_extension("args.json")).unwrap())
+                .unwrap();
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--tools" || arg == "--sandbox")
+        );
+    }
 }
 
 #[test]

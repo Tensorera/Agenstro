@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
-use crate::{executable::ExecutableResolver, limits::RuntimeLimits};
+use crate::{
+    executable::ExecutableResolver, limits::RuntimeLimits, permissions::InvocationPermissions,
+};
 
 /// Runtime configuration version shared with Clef.
 pub const RUNTIME_API: &str = "clef.runtime/v1";
@@ -70,6 +72,18 @@ const MOTIVO_TEMPLATES: &[(&str, &str)] = &[
     (
         "080_handoff.hs",
         include_str!("../../motivo/templates/080_handoff.hs"),
+    ),
+    (
+        "090_test.hs",
+        include_str!("../../motivo/templates/090_test.hs"),
+    ),
+    (
+        "Motivo/Record.hs",
+        include_str!("../../motivo/templates/Motivo/Record.hs"),
+    ),
+    (
+        "Motivo/Test.hs",
+        include_str!("../../motivo/templates/Motivo/Test.hs"),
     ),
     (
         "Motivo/Method.hs",
@@ -157,8 +171,6 @@ const DEFAULT_PROMPT: &str = r#"# Tactus workflow scripts
 - Write multi-MiB business artifacts into the workspace and return a relative
   path, digest, and short summary instead of returning the whole artifact in a
   terminal plugin value.
-- Before inspecting or changing existing workflows, follow
-  `.tactus/skills/tactus/SKILL.md`.
 - During generation, create or update Haskell sources. Use `tactus check` with
   explicit source paths for compiler feedback when useful. Do not execute the
   generated business workflow or its external effects.
@@ -176,6 +188,9 @@ pub struct ProviderDefinition {
     /// Optional provider-specific effort level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Invocation defaults; an explicit per-call object replaces this whole value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<InvocationPermissions>,
     /// Extension surface serialized into runtime JSON without interpretation.
     #[serde(default)]
     pub options: BTreeMap<String, JsonValue>,
@@ -736,6 +751,11 @@ impl RuntimeConfig {
         }
         for (name, plugin) in &self.providers {
             validate_command("providers", name, &plugin.command)?;
+            if let Some(permissions) = &plugin.permissions {
+                permissions.validate().map_err(|error| {
+                    WorkspaceError::InvalidConfig(format!("providers.{name}.permissions: {error}"))
+                })?;
+            }
             let options = plugin
                 .options
                 .iter()
@@ -1541,6 +1561,7 @@ mod tests {
                 ],
                 model: None,
                 effort: None,
+                permissions: None,
                 options: BTreeMap::from([("executable".to_owned(), JsonValue::String(relative))]),
             };
             let mut checks = Vec::new();
@@ -1584,6 +1605,7 @@ mod tests {
             ],
             model: None,
             effort: None,
+            permissions: None,
             options: BTreeMap::new(),
         };
         let resolver = ExecutableResolver::new(

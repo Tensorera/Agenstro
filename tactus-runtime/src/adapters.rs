@@ -1,9 +1,10 @@
 //! Built-in one-shot provider adapters and the observational workspace path effect.
 //!
 //! These hosts implement the language-neutral `agenstro.plugin/v1` boundary. They
-//! deliberately do not add authentication, policy, content storage, rollback, or
-//! artifact semantics. Provider credentials and environment are inherited by the
-//! native command.
+//! compile supported explicit invocation permissions into native flags and report
+//! unsupported fields. Provider credentials and environment are inherited by the
+//! native command; content storage, rollback, and artifact semantics remain outside
+//! these adapters.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,6 +29,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     executable::{ExecutableResolutionError, ExecutableResolver},
+    permissions::{
+        InvocationPermissions, InvocationSandboxMode, PermissionApplicationStatus,
+        PermissionCapabilities, PermissionCapability, PermissionField, PermissionReport,
+    },
     protocol::{PLUGIN_API, PluginFailure, PluginRequest, RequestId, decode_request},
 };
 
@@ -422,6 +427,7 @@ fn provider_description(provider: Provider) -> Value {
         "methods": ["describe", "smoke", "invoke"],
         "operations": ["describe", "smoke", "invoke"],
         "full_bypass": provider.full_bypass(),
+        "permissions_capabilities": provider_permission_capabilities(provider),
         "reasoning_parameter": if provider == Provider::OpenCode { "variant" } else { "effort" },
         "options_schema": {
             "type":"object",
@@ -451,6 +457,293 @@ fn provider_description(provider: Provider) -> Value {
             json!(ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM.as_secs());
     }
     value
+}
+
+const CLAUDE_TOOLS_SCOPE: &str = "builtin_tools";
+const CLAUDE_TOOLS_REASON: &str = "Claude --tools selects built-in tools only; configured or managed MCP tools remain outside this selection.";
+
+fn provider_permission_capabilities(provider: Provider) -> PermissionCapabilities {
+    let mut capabilities = PermissionCapabilities {
+        allowed_tools: PermissionCapability::unsupported(
+            "This adapter has no validated native complete tool-catalog allowlist mapping; its ordinary tool configuration is retained.",
+        ),
+        allowed_skills: PermissionCapability::unsupported(
+            "This adapter has no validated native skill allowlist mapping; its ordinary skill discovery is retained.",
+        ),
+        sandbox: PermissionCapability::unsupported(
+            "This adapter has no validated native sandbox mapping; its ordinary execution environment is retained.",
+        ),
+    };
+    match provider {
+        Provider::Codex => {
+            capabilities.sandbox = PermissionCapability::supported("native_sandbox");
+            capabilities.sandbox.modes = Some(vec![
+                InvocationSandboxMode::ReadOnly,
+                InvocationSandboxMode::WorkspaceWrite,
+                InvocationSandboxMode::Unrestricted,
+            ]);
+            capabilities.sandbox.workspace = Some(true);
+        }
+        Provider::ClaudeCode => {
+            capabilities.allowed_tools =
+                PermissionCapability::partial(CLAUDE_TOOLS_SCOPE, CLAUDE_TOOLS_REASON);
+        }
+        Provider::OpenCode | Provider::Antigravity => {}
+    }
+    capabilities
+}
+
+struct CompiledProviderPermissions {
+    arguments: Vec<String>,
+    workspace: Option<PathBuf>,
+    sandbox_requested: bool,
+    full_bypass: bool,
+    report: Option<PermissionReport>,
+}
+
+fn compile_provider_permissions(
+    provider: Provider,
+    params: &Map<String, Value>,
+    workspace: &Path,
+    extra_args: &[String],
+) -> Result<CompiledProviderPermissions, AdapterError> {
+    let mut compiled = CompiledProviderPermissions {
+        arguments: Vec::new(),
+        workspace: None,
+        sandbox_requested: false,
+        full_bypass: provider.full_bypass(),
+        report: None,
+    };
+    let Some(value) = params.get("permissions") else {
+        return Ok(compiled);
+    };
+    let requested: InvocationPermissions =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            AdapterError::new("invalid_params", format!("invalid permissions: {error}"))
+        })?;
+    requested
+        .validate()
+        .map_err(|error| AdapterError::new("invalid_params", error.to_string()))?;
+    let capabilities = provider_permission_capabilities(provider);
+    let mut report = PermissionReport::new(requested.clone());
+    if let Some(tools) = &requested.allowed_tools {
+        if provider == Provider::ClaudeCode && tools.iter().all(|tool| is_claude_builtin_tool(tool))
+        {
+            reject_permission_conflicts(PermissionField::AllowedTools, extra_args, |argument| {
+                matches!(
+                    argument,
+                    "--tools"
+                        | "--allowedTools"
+                        | "--allowed-tools"
+                        | "--disallowedTools"
+                        | "--disallowed-tools"
+                ) || [
+                    "--tools=",
+                    "--allowedTools=",
+                    "--allowed-tools=",
+                    "--disallowedTools=",
+                    "--disallowed-tools=",
+                ]
+                .iter()
+                .any(|prefix| argument.starts_with(prefix))
+            })?;
+            compiled
+                .arguments
+                .extend(["--tools".to_owned(), tools.join(",")]);
+            report.partial(
+                PermissionField::AllowedTools,
+                &requested,
+                CLAUDE_TOOLS_SCOPE,
+                CLAUDE_TOOLS_REASON,
+            );
+        } else {
+            let reason = if provider == Provider::ClaudeCode {
+                "The requested tool list contains names outside this adapter's validated Claude built-in catalog; the entire tool selection falls back to the ordinary native configuration."
+            } else {
+                capabilities
+                    .allowed_tools
+                    .reason
+                    .as_deref()
+                    .expect("unsupported reason")
+            };
+            report.unsupported(PermissionField::AllowedTools, reason);
+        }
+    }
+    if requested.allowed_skills.is_some() {
+        report.unsupported(
+            PermissionField::AllowedSkills,
+            capabilities
+                .allowed_skills
+                .reason
+                .as_deref()
+                .expect("unsupported reason"),
+        );
+    }
+    if let Some(sandbox) = &requested.sandbox {
+        if provider == Provider::Codex {
+            reject_permission_conflicts(
+                PermissionField::Sandbox,
+                extra_args,
+                codex_permission_conflict,
+            )?;
+            let selected_workspace = match &sandbox.workspace {
+                None => workspace.to_path_buf(),
+                Some(path) => {
+                    let resolved = dunce::canonicalize(path).map_err(|error| {
+                        AdapterError::new(
+                            "invalid_params",
+                            format!("cannot resolve sandbox.workspace: {error}"),
+                        )
+                    })?;
+                    if !resolved.is_dir() {
+                        return Err(AdapterError::new(
+                            "invalid_params",
+                            "sandbox.workspace must name an existing directory",
+                        ));
+                    }
+                    compiled.workspace = Some(resolved.clone());
+                    resolved
+                }
+            };
+            let mode = match sandbox.mode {
+                InvocationSandboxMode::ReadOnly => "read-only",
+                InvocationSandboxMode::WorkspaceWrite => "workspace-write",
+                InvocationSandboxMode::Unrestricted => "danger-full-access",
+            };
+            compiled.arguments.extend([
+                "--sandbox".to_owned(),
+                mode.to_owned(),
+                "-c".to_owned(),
+                "approval_policy=\"never\"".to_owned(),
+            ]);
+            if sandbox.mode == InvocationSandboxMode::WorkspaceWrite {
+                // Native workspace-write otherwise inherits extra configured
+                // roots and writable /tmp/TMPDIR. These are per-process
+                // overrides and leave the user's configuration untouched.
+                for setting in [
+                    "sandbox_workspace_write.writable_roots=[]",
+                    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                    "sandbox_workspace_write.exclude_slash_tmp=true",
+                ] {
+                    compiled
+                        .arguments
+                        .extend(["-c".to_owned(), setting.to_owned()]);
+                }
+            }
+            compiled.sandbox_requested = true;
+            compiled.full_bypass = sandbox.mode == InvocationSandboxMode::Unrestricted;
+            let mut effective = requested.clone();
+            effective
+                .sandbox
+                .as_mut()
+                .expect("sandbox requested")
+                .workspace = Some(selected_workspace);
+            report.record(
+                PermissionField::Sandbox,
+                PermissionApplicationStatus::Applied,
+                &effective,
+                Some("native_sandbox"),
+                None,
+            );
+        } else {
+            report.unsupported(
+                PermissionField::Sandbox,
+                capabilities
+                    .sandbox
+                    .reason
+                    .as_deref()
+                    .expect("unsupported reason"),
+            );
+        }
+    }
+    compiled.report = Some(report);
+    Ok(compiled)
+}
+
+fn is_claude_builtin_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "Bash"
+            | "Read"
+            | "Write"
+            | "Edit"
+            | "Glob"
+            | "Grep"
+            | "WebFetch"
+            | "WebSearch"
+            | "NotebookEdit"
+            | "TodoWrite"
+            | "Task"
+            | "Agent"
+            | "Skill"
+            | "AskUserQuestion"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "ToolSearch"
+    )
+}
+
+fn codex_permission_conflict(argument: &str) -> bool {
+    // Config overrides and profiles can alter permissions, including named
+    // permission profiles. Do not guess their contents or report them as applied.
+    argument == "--"
+        || matches!(
+            argument,
+            "-c" | "--config"
+                | "-p"
+                | "--profile"
+                | "-s"
+                | "--sandbox"
+                | "-a"
+                | "--ask-for-approval"
+                | "--full-auto"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--add-dir"
+                | "-C"
+                | "--cd"
+        )
+        || [
+            "--config=",
+            "--profile=",
+            "--sandbox=",
+            "--ask-for-approval=",
+            "--add-dir=",
+            "--cd=",
+        ]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix))
+        || ["-c", "-p", "-s", "-a", "-C"].iter().any(|prefix| {
+            argument.starts_with(prefix)
+                && argument.len() > prefix.len()
+                && !argument.starts_with("--")
+        })
+}
+
+fn reject_permission_conflicts(
+    field: PermissionField,
+    extra_args: &[String],
+    conflicts: impl Fn(&str) -> bool,
+) -> Result<(), AdapterError> {
+    if extra_args.iter().any(|argument| conflicts(argument)) {
+        return Err(AdapterError::new(
+            "invalid_params",
+            "extra_args conflicts with the requested native invocation permission configuration",
+        )
+        .with_details(json!({"field":field})));
+    }
+    Ok(())
+}
+
+fn with_permission_report(
+    mut error: AdapterError,
+    report: Option<&PermissionReport>,
+) -> AdapterError {
+    if let Some(report) = report {
+        let details = error.details.get_or_insert_with(|| json!({}));
+        details["permission_report"] =
+            serde_json::to_value(report).expect("permission report encodes");
+    }
+    error
 }
 
 fn provider_smoke<W: Write, E: Write>(
@@ -583,142 +876,176 @@ fn provider_invoke<W: Write, E: Write>(
         params,
         (provider == Provider::Antigravity).then_some(ANTIGRAVITY_DEFAULT_TIMEOUT),
     )?;
-    if provider == Provider::Antigravity
-        && options.extra_args.iter().any(|argument| {
-            let flag = argument.trim_start_matches('-');
-            argument == "--" || flag == "print-timeout" || flag.starts_with("print-timeout=")
-        })
-    {
-        return Err(AdapterError::new(
-            "invalid_params",
-            "Antigravity extra_args cannot contain -- or --print-timeout; use options.timeout_seconds so the Tactus deadline precedes the native partial-success timer.",
-        ));
-    }
-    let model = optional_string(params, "model")?.or(optional_string(&options.open, "model")?);
-    let mut reasoning =
-        optional_string(params, "effort")?.or(optional_string(&options.open, "effort")?);
-    if provider == Provider::OpenCode {
-        reasoning = optional_string(params, "variant")?
-            .or(optional_string(&options.open, "variant")?)
-            .or(reasoning);
-    }
-    let environment = provider_environment(provider, &options.extra_env)?;
-    let executable = resolved_executable(provider, &options, Some(&workspace))?;
-    let temporary = if provider == Provider::Codex {
-        Some(TemporaryDirectory::create("tactus-codex")?)
-    } else {
-        None
-    };
-    let last_message = temporary
-        .as_ref()
-        .map(|directory| directory.path.join("last-message.txt"));
-    let mut native_arguments = provider_arguments(
-        provider,
-        &workspace,
-        model.as_deref(),
-        reasoning.as_deref(),
-        &options.extra_args,
-        last_message.as_deref(),
-    );
-    if provider == Provider::Antigravity {
-        // CLI 1.1.28+ treats its own print-timeout as partial SUCCESS. Keep
-        // that timer strictly beyond our deadline. Conflicting extra_args are
-        // rejected above. Never guess that zero is unlimited.
-        let timeout = options.timeout.expect("Antigravity has a bounded default");
-        let native_timeout = timeout
-            .checked_add(ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM)
-            .filter(|duration| duration.as_nanos() <= i64::MAX as u128)
-            .ok_or_else(|| {
-                AdapterError::new(
-                    "invalid_params",
-                    "Antigravity timeout exceeds its native duration range",
+    let permissions =
+        compile_provider_permissions(provider, params, &workspace, &options.extra_args)?;
+    let outcome = (|| {
+        let workspace = permissions.workspace.as_ref().unwrap_or(&workspace);
+        if let Some(report) = &permissions.report {
+            for warning in &report.warnings {
+                writeln!(
+                    diagnostics,
+                    "[warning] {}: {}",
+                    warning.code, warning.message
                 )
-            })?;
-        native_arguments.splice(
-            0..0,
-            [
-                "--print-timeout".to_owned(),
-                format!("{}ns", native_timeout.as_nanos()),
-            ],
-        );
-    }
-    let argv = command_with_prefix(&options.command_prefix, &executable, &native_arguments);
-    let completed = run_provider_command(
-        ProviderRun {
-            provider,
-            argv: &argv,
-            workspace: &workspace,
-            environment: &environment,
-            prompt: &prompt,
-            timeout: options.timeout,
-            limits: options.native_limits,
-        },
-        writer,
-        diagnostics,
-    )?;
-    let reported_failure = completed.reported_failure;
-    let (text, result_recognized) = match last_message {
-        Some(path) => match read_codex_last_message(&path, options.native_limits.max_result_bytes)?
+                .map_err(|error| AdapterError::new("output_failed", error.to_string()))?;
+                let payload = serde_json::to_value(warning)
+                    .expect("permission warning encodes")
+                    .as_object()
+                    .expect("permission warning is an object")
+                    .clone();
+                writer.event("provider.permission.warning", payload)?;
+            }
+            let payload = Map::from_iter([("permission_report".to_owned(), json!(report))]);
+            writer.event("provider.permissions", payload)?;
+        }
+        if provider == Provider::Antigravity
+            && options.extra_args.iter().any(|argument| {
+                let flag = argument.trim_start_matches('-');
+                argument == "--" || flag == "print-timeout" || flag.starts_with("print-timeout=")
+            })
         {
-            Some(text) => (text, true),
-            None => (completed.text, completed.result_recognized),
-        },
-        None => (completed.text, completed.result_recognized),
-    };
-    if reported_failure {
-        return Err(AdapterError::new(
-            "provider_reported_failure",
-            format!("{} reported a terminal native failure", provider.name()),
+            return Err(AdapterError::new(
+                "invalid_params",
+                "Antigravity extra_args cannot contain -- or --print-timeout; use options.timeout_seconds so the Tactus deadline precedes the native partial-success timer.",
+            ));
+        }
+        let model = optional_string(params, "model")?.or(optional_string(&options.open, "model")?);
+        let mut reasoning =
+            optional_string(params, "effort")?.or(optional_string(&options.open, "effort")?);
+        if provider == Provider::OpenCode {
+            reasoning = optional_string(params, "variant")?
+                .or(optional_string(&options.open, "variant")?)
+                .or(reasoning);
+        }
+        let environment = provider_environment(provider, &options.extra_env)?;
+        let executable = resolved_executable(provider, &options, Some(workspace))?;
+        let temporary = if provider == Provider::Codex {
+            Some(TemporaryDirectory::create("tactus-codex")?)
+        } else {
+            None
+        };
+        let last_message = temporary
+            .as_ref()
+            .map(|directory| directory.path.join("last-message.txt"));
+        let mut native_arguments = provider_arguments(
+            provider,
+            workspace,
+            model.as_deref(),
+            reasoning.as_deref(),
+            &options.extra_args,
+            last_message.as_deref(),
+            &permissions,
+        );
+        if provider == Provider::Antigravity {
+            // CLI 1.1.28+ treats its own print-timeout as partial SUCCESS. Keep
+            // that timer strictly beyond our deadline. Conflicting extra_args are
+            // rejected above. Never guess that zero is unlimited.
+            let timeout = options.timeout.expect("Antigravity has a bounded default");
+            let native_timeout = timeout
+                .checked_add(ANTIGRAVITY_NATIVE_TIMEOUT_HEADROOM)
+                .filter(|duration| duration.as_nanos() <= i64::MAX as u128)
+                .ok_or_else(|| {
+                    AdapterError::new(
+                        "invalid_params",
+                        "Antigravity timeout exceeds its native duration range",
+                    )
+                })?;
+            native_arguments.splice(
+                0..0,
+                [
+                    "--print-timeout".to_owned(),
+                    format!("{}ns", native_timeout.as_nanos()),
+                ],
+            );
+        }
+        let argv = command_with_prefix(&options.command_prefix, &executable, &native_arguments);
+        let completed = run_provider_command(
+            ProviderRun {
+                provider,
+                argv: &argv,
+                workspace,
+                environment: &environment,
+                prompt: &prompt,
+                timeout: options.timeout,
+                limits: options.native_limits,
+            },
+            writer,
+            diagnostics,
         )
-        .with_details(json!({
+        .map_err(|error| with_permission_report(error, permissions.report.as_ref()))?;
+        let reported_failure = completed.reported_failure;
+        let (text, result_recognized) = match last_message {
+            Some(path) => {
+                match read_codex_last_message(&path, options.native_limits.max_result_bytes)? {
+                    Some(text) => (text, true),
+                    None => (completed.text, completed.result_recognized),
+                }
+            }
+            None => (completed.text, completed.result_recognized),
+        };
+        if reported_failure {
+            return Err(AdapterError::new(
+                "provider_reported_failure",
+                format!("{} reported a terminal native failure", provider.name()),
+            )
+            .with_details(json!({
+                "provider":provider.name(),
+                "cause":"native_reported_failure",
+            })))
+            .map_err(|error| with_permission_report(error, permissions.report.as_ref()));
+        }
+        if !completed.status.success() {
+            let mut details = json!({
+                "provider":provider.name(),
+                "cause":"provider_exit",
+                "exit_code":completed.status.code(),
+                "text":text,
+                "full_bypass":permissions.full_bypass
+            });
+            if let Some(warning) = provider.warning() {
+                details["warning"] = Value::String(warning.to_owned());
+            }
+            return Err(AdapterError::new(
+                "outcome_unknown",
+                format!(
+                    "{} exited without proving whether the external request completed",
+                    provider.name()
+                ),
+            )
+            .with_details(details))
+            .map_err(|error| with_permission_report(error, permissions.report.as_ref()));
+        }
+        if !result_recognized {
+            return Err(AdapterError::new(
+                "outcome_unknown",
+                format!(
+                    "{} completed without a recognized native result record",
+                    provider.name()
+                ),
+            )
+            .with_details(json!({
+                "provider":provider.name(),
+                "cause":"native_result_unrecognized",
+            })))
+            .map_err(|error| with_permission_report(error, permissions.report.as_ref()));
+        }
+
+        let mut value = json!({
             "provider":provider.name(),
-            "cause":"native_reported_failure",
-        })));
-    }
-    if !completed.status.success() {
-        let mut details = json!({
-            "provider":provider.name(),
-            "cause":"provider_exit",
-            "exit_code":completed.status.code(),
             "text":text,
-            "full_bypass":provider.full_bypass()
+            "exit_code":0,
+            "full_bypass":permissions.full_bypass
         });
         if let Some(warning) = provider.warning() {
-            details["warning"] = Value::String(warning.to_owned());
+            value["warning"] = Value::String(warning.to_owned());
         }
-        return Err(AdapterError::new(
-            "outcome_unknown",
-            format!(
-                "{} exited without proving whether the external request completed",
-                provider.name()
-            ),
-        )
-        .with_details(details));
-    }
-    if !result_recognized {
-        return Err(AdapterError::new(
-            "outcome_unknown",
-            format!(
-                "{} completed without a recognized native result record",
-                provider.name()
-            ),
-        )
-        .with_details(json!({
-            "provider":provider.name(),
-            "cause":"native_result_unrecognized",
-        })));
-    }
-
-    let mut value = json!({
-        "provider":provider.name(),
-        "text":text,
-        "exit_code":0,
-        "full_bypass":provider.full_bypass()
-    });
-    if let Some(warning) = provider.warning() {
-        value["warning"] = Value::String(warning.to_owned());
-    }
-    Ok(value)
+        if let Some(report) = &permissions.report {
+            value["permission_report"] =
+                serde_json::to_value(report).expect("permission report encodes");
+        }
+        Ok(value)
+    })();
+    outcome.map_err(|error| with_permission_report(error, permissions.report.as_ref()))
 }
 
 fn provider_arguments(
@@ -728,11 +1055,11 @@ fn provider_arguments(
     reasoning: Option<&str>,
     extra_args: &[String],
     last_message: Option<&Path>,
+    permissions: &CompiledProviderPermissions,
 ) -> Vec<String> {
     let mut arguments = match provider {
         Provider::Codex => vec![
             "exec".to_owned(),
-            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
             "--json".to_owned(),
             "-C".to_owned(),
             workspace.to_string_lossy().into_owned(),
@@ -764,6 +1091,10 @@ fn provider_arguments(
             "--dangerously-skip-permissions".to_owned(),
         ],
     };
+    if provider == Provider::Codex && !permissions.sandbox_requested {
+        arguments.insert(1, "--dangerously-bypass-approvals-and-sandbox".to_owned());
+    }
+    arguments.extend_from_slice(&permissions.arguments);
     if let Some(model) = model {
         arguments.extend(["--model".to_owned(), model.to_owned()]);
     }

@@ -50,6 +50,21 @@ main :: IO ()
 main = runTactus workflow >>= print
 ```
 
+## Invocation permission request additions
+
+Current source adds `providerRefPermissions :: Maybe InvocationPermissions` to
+`ProviderRef` and `providerPermissions :: Maybe InvocationPermissions` to
+`ProviderConfig`. Prefer `providerRef "name"` with record updates. Code that
+constructs these records directly must initialize the new field to `Nothing`
+to retain previous behavior; positional constructor calls must also add it
+in the constructor's declared field order.
+
+Existing runtime JSON without `permissions` remains valid. A per-call `Nothing`
+inherits startup defaults; `Just emptyPermissions` restores ordinary provider
+behavior. Explicit requests replace the whole startup object. Unsupported
+fields produce warning events and a permission report instead of pretending
+the request was enforced. See [provider setup](../docs/providers.md#permission-behavior).
+
 ## What is not promised
 
 The Haskell type checker verifies ordinary Haskell types; it does not verify a
