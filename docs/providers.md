@@ -357,7 +357,10 @@ fallback.
 Read `permission_report.requested`, `effective`, `applications` and `warnings`
 in the provider result. `provider.permission.warning` events also reach the
 journal, Clef dispatch stream and text-mode warning output. Custom capability
-claims are trusted plugin declarations, not runtime attestation. A scalar
+queries include each call's permission request. Their
+`permission_report_basis = "capability_declaration"` identifies the report as
+negotiated configuration sent to the plugin, not execution attestation. Any
+plugin-supplied receipt is preserved as `provider_permission_report`. A scalar
 custom result retains its original value shape; the report remains available
 as a `provider.permissions` event. Durable journals retain application statuses,
 warning codes, and value fingerprints; the live result/event carries the full

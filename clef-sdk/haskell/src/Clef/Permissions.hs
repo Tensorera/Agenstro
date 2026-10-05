@@ -212,8 +212,9 @@ instance FromJSON PermissionReport where
 rejectUnknown :: [Text] -> Object -> Parser ()
 rejectUnknown known fields = unless (all ((`elem` known) . Key.toText) (KeyMap.keys fields)) (fail "unknown permission request field")
 
--- | Negotiate only fields the plugin advertises. This records declared support;
--- the plugin owns native enforcement and may report narrower application itself.
+-- | Negotiate only fields the plugin advertises. This records declared support
+-- and forwarded configuration, not execution proof. Plugin runtime receipts
+-- remain separate; the plugin owns enforcement of its declaration.
 negotiatePermissions :: InvocationPermissions -> PermissionCapabilities -> PermissionReport
 negotiatePermissions requested capabilities = foldl select initial selections
   where

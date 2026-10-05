@@ -148,6 +148,8 @@ while an absent field leaves that feature in normal mode. Sandbox modes are
 `read-only`, `workspace-write` and `unrestricted`; a workspace must be absolute.
 
 Custom providers can publish this optional object in their `describe` value:
+The capability query includes the current `permissions` request, workspace
+and options, so support can differ between invocations.
 
 ```json
 {
@@ -185,6 +187,15 @@ and expose the report through events. Durable journals keep field statuses,
 warning codes and configuration fingerprints rather than raw paths or names.
 Consumers must inspect `effective` and
 warnings rather than assume the requested limits were enforced.
+
+For custom providers, `permission_report_basis = "capability_declaration"`
+marks this as a negotiation report: `effective` identifies the configuration
+forwarded according to the plugin's declaration, not an execution attestation.
+An existing plugin result's `permission_report` is preserved separately as
+`provider_permission_report`. Providers must evaluate support for the current
+request before advertising it; if execution later cannot honor that contract,
+they must return a failure or explicitly emit warning/evidence of the narrower
+behavior. Negotiation does not silently replace those provider receipts.
 
 ## Terminal result
 

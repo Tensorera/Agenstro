@@ -535,7 +535,7 @@ callDirectProviderWithPermissions limits runtime pluginName command params reque
                     transportMaxFrameBytes = min (64 * 1024) (transportMaxFrameBytes limits),
                     transportMaxStdoutBytes = min (128 * 1024) (transportMaxStdoutBytes limits),
                     transportMaxEventFrames = min 16 (transportMaxEventFrames limits) }
-                probeParams = KeyMap.filterWithKey (\key _ -> key `elem` ["workspace", "options"]) params
+                probeParams = KeyMap.filterWithKey (\key _ -> key `elem` ["workspace", "options", "permissions"]) params
             outcome <- try (callPluginWithoutPermit probeLimits runtime pluginName command "describe" probeParams)
               :: IO (Either WorkflowError PluginCallResult)
             pure $ case outcome of
@@ -582,7 +582,12 @@ permissionEventFrame :: Text -> Value -> Value
 permissionEventFrame requestId event = object ["type" .= ("event" :: Text), "id" .= requestId, "event" .= event]
 
 attachPermissionValue :: PermissionReport -> Value -> Value
-attachPermissionValue report (Object fields) = Object (KeyMap.insert "permission_report" (toJSON report) fields)
+attachPermissionValue report (Object fields) =
+  let retained = case KeyMap.lookup "permission_report" fields of
+        Just original -> KeyMap.insert "provider_permission_report" original fields
+        Nothing -> fields
+   in Object (KeyMap.insert "permission_report_basis" (String "capability_declaration")
+        (KeyMap.insert "permission_report" (toJSON report) retained))
 attachPermissionValue _ value = value
 
 attachPermissionFailure :: PermissionReport -> WorkflowError -> WorkflowError

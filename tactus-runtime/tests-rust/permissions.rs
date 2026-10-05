@@ -70,6 +70,7 @@ fn each_call_replaces_registry_permissions_without_mutating_user_files() {
     let first = value(&call(&root, json!({"prompt":"first"})));
     assert_eq!(first["permissions"], defaults);
     assert_eq!(first["permission_report"]["effective"], defaults);
+    assert_eq!(first["permission_report_basis"], "capability_declaration");
     let changed = json!({"allowed_tools":[]});
     let second = value(&call(
         &root,
@@ -87,6 +88,9 @@ fn each_call_replaces_registry_permissions_without_mutating_user_files() {
             .collect::<Vec<_>>(),
         ["describe", "invoke", "describe", "invoke", "invoke"]
     );
+    let records = calls(&root);
+    assert_eq!(records[0]["params"]["permissions"], defaults);
+    assert_eq!(records[2]["params"]["permissions"], changed);
     assert_eq!(before, fs::read(root.join(".tactus/tactus.toml")).unwrap());
     let runtime = Command::new(env!("CARGO_BIN_EXE_tactus"))
         .args(["runtime-json", "--root"])
@@ -96,6 +100,24 @@ fn each_call_replaces_registry_permissions_without_mutating_user_files() {
     assert!(runtime.status.success());
     let runtime: Value = serde_json::from_slice(&runtime.stdout).unwrap();
     assert_eq!(runtime["providers"]["codex"]["permissions"], defaults);
+}
+
+#[test]
+fn custom_provider_receipt_is_preserved_beside_negotiation_report() {
+    let (_temporary, root) = project("permission-receipt", None);
+    let result = value(&call(
+        &root,
+        json!({"permissions":{"allowed_tools":["Read"]}}),
+    ));
+    assert_eq!(
+        result["provider_permission_report"],
+        json!({"provider_fact":"per-invocation receipt"})
+    );
+    assert_eq!(result["permission_report_basis"], "capability_declaration");
+    assert_eq!(
+        result["permission_report"]["effective"],
+        json!({"allowed_tools":["Read"]})
+    );
 }
 
 #[test]

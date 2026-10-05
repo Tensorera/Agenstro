@@ -52,6 +52,7 @@ pub(super) fn negotiate(
     if let Some(options) = request.params.get("options") {
         params.insert("options".to_owned(), options.clone());
     }
+    params.insert("permissions".to_owned(), serde_json::to_value(&requested)?);
     let description = PluginRequest {
         api: request.api.clone(),
         id: request.id.clone(),
@@ -233,7 +234,14 @@ fn annotate_value(value: &mut Value, report: &PermissionReport) {
     // Scalar provider values retain their ABI; the report is still an event and
     // a journal record. Object providers reserve this runtime metadata field.
     if let Some(object) = value.as_object_mut() {
+        if let Some(receipt) = object.remove("permission_report") {
+            object.insert("provider_permission_report".to_owned(), receipt);
+        }
         object.insert("permission_report".to_owned(), json!(report));
+        object.insert(
+            "permission_report_basis".to_owned(),
+            json!("capability_declaration"),
+        );
     }
 }
 

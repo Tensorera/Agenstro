@@ -48,6 +48,7 @@ fn main() {
     let id = request.get("id").cloned().expect("request id");
     match mode.as_str() {
         "permission-capable"
+        | "permission-receipt"
         | "permission-partial"
         | "permission-legacy"
         | "permission-invalid"
@@ -65,11 +66,13 @@ fn main() {
             }
             let value = if request["method"] == "describe" {
                 match mode.as_str() {
-                    "permission-capable" => serde_json::json!({"permissions_capabilities":{
-                        "allowed_tools":{"support":"supported","scope":"fixture"},
-                        "allowed_skills":{"support":"supported","scope":"fixture"},
-                        "sandbox":{"support":"supported","scope":"fixture","workspace":true}
-                    }}),
+                    "permission-capable" | "permission-receipt" => {
+                        serde_json::json!({"permissions_capabilities":{
+                            "allowed_tools":{"support":"supported","scope":"fixture"},
+                            "allowed_skills":{"support":"supported","scope":"fixture"},
+                            "sandbox":{"support":"supported","scope":"fixture","workspace":true}
+                        }})
+                    }
                     "permission-partial" => serde_json::json!({"permissions_capabilities":{
                         "allowed_tools":{"support":"partial","scope":"builtin","reason":"MCP tools retain normal mode"},
                         "allowed_skills":{"support":"unsupported","reason":"No skills filter: PRIVATE_PERMISSION_REASON /private/secret"},
@@ -83,6 +86,10 @@ fn main() {
             } else {
                 let mut value = request["params"].clone();
                 value["text"] = Value::String(request["params"].to_string());
+                if mode == "permission-receipt" {
+                    value["permission_report"] =
+                        serde_json::json!({"provider_fact":"per-invocation receipt"});
+                }
                 value
             };
             write_json(&serde_json::json!({"type":"result","id":id,"ok":true,"value":value}));

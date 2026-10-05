@@ -1821,9 +1821,9 @@ testInvocationPermissions workspace executable = do
         params <- runWorkflow runtime (invokeWith selected echo ())
         records <- readRuntimeRecords runtime
         let values = [value | ProviderValueRecord _ "fake" value <- records]
-            descriptions = [() | PluginEventRecord "provider:fake" _ value <- records, eventKind value == Just (String "fixture.describe")]
+            descriptions = [value | PluginEventRecord "provider:fake" _ value <- records, eventKind value == Just (String "fixture.describe")]
             warnings = [() | PluginEventRecord "provider:fake" _ value <- records, eventKind value == Just (String "provider.permission.warning")]
-        pure (params, values, length descriptions, length warnings)
+        pure (params, values, descriptions, length warnings)
       field name (Object fields) = KeyMap.lookup name fields
       field _ _ = Nothing
       eventKind value = field "event" value >>= field "type"
@@ -1831,17 +1831,21 @@ testInvocationPermissions workspace executable = do
   (inherited, values, descriptions, warnings) <- invokeAndRead "supported" (Just startup) (providerRef "fake")
   assertEqual "startup tools are inherited" (Just (toJSON ["startup-tool" :: Text])) (permissionField "allowed_tools" inherited)
   assertEqual "unsupported startup skills are omitted" Nothing (permissionField "allowed_skills" inherited)
-  assertEqual "one bounded describe precedes direct invoke" 1 descriptions
+  assertEqual "one bounded describe precedes direct invoke" 1 (length descriptions)
+  assertEqual "describe receives the complete startup permissions request" [Just (toJSON startup)]
+    [field "event" value >>= field "permissions" | value <- descriptions]
   assertEqual "skills and sandbox workspace warnings reach records" 2 warnings
   case values of
     [value] -> assertEqual "report retains full startup request" (Just (toJSON startup)) (field "permission_report" value >>= field "requested")
     _ -> failTest "missing provider terminal value"
-  (replaced, _, _, _) <- invokeAndRead "supported" (Just startup) ((providerRef "fake") {providerRefPermissions = Just override})
+  (replaced, _, overrideDescriptions, _) <- invokeAndRead "supported" (Just startup) ((providerRef "fake") {providerRefPermissions = Just override})
   assertEqual "explicit empty tools are forwarded" (Just (toJSON ([] :: [Text]))) (permissionField "allowed_tools" replaced)
   assertEqual "whole request replacement removes startup sandbox" Nothing (permissionField "sandbox" replaced)
+  assertEqual "describe receives the distinct per-call replacement request" [Just (toJSON override)]
+    [field "event" value >>= field "permissions" | value <- overrideDescriptions]
   (reset, resetValues, resetDescriptions, resetWarnings) <- invokeAndRead "supported" (Just startup) ((providerRef "fake") {providerRefPermissions = Just emptyPermissions})
   assertEqual "empty object restores ordinary provider params" Nothing (field "permissions" reset)
-  assertEqual "empty object does not probe" 0 resetDescriptions
+  assertEqual "empty object does not probe" 0 (length resetDescriptions)
   assertEqual "empty object has no warnings" 0 resetWarnings
   case resetValues of
     [value] -> assertEqual "empty object remains in requested report" (Just (object [])) (field "permission_report" value >>= field "requested")
@@ -1849,6 +1853,15 @@ testInvocationPermissions workspace executable = do
   (legacy, _, _, legacyWarnings) <- invokeAndRead "legacy" Nothing ((providerRef "fake") {providerRefPermissions = Just override})
   assertEqual "legacy provider retains ordinary params" Nothing (field "permissions" legacy)
   assertEqual "legacy provider warning" 1 legacyWarnings
+  (_, receiptValues, _, receiptWarnings) <- invokeAndRead "receipt" Nothing ((providerRef "fake") {providerRefPermissions = Just override})
+  assertEqual "provider dynamic fallback warning remains visible" 1 receiptWarnings
+  case receiptValues of
+    [value] -> do
+      let receipt = object ["effective" .= object [], "status" .= ("dynamic-fallback" :: Text)]
+      assertEqual "original provider receipt is retained separately" (Just receipt) (field "provider_permission_report" value)
+      assertEqual "runtime report identifies its declaration basis" (Just (String "capability_declaration")) (field "permission_report_basis" value)
+      assertEqual "runtime report retains its own requested configuration" (Just (toJSON override)) (field "permission_report" value >>= field "requested")
+    _ -> failTest "missing provider receipt value"
   dispatchDirectory <- vacantTemporaryPath workspace "clef-permission-dispatch"
   let dispatcher = dispatchDirectory </> if takeExtension executable == ".exe" then "tactus.exe" else "tactus"
       prepare = createDirectory dispatchDirectory >> copyFile executable dispatcher
@@ -2419,7 +2432,11 @@ fakePermissionProvider policy = do
   case method of
     "describe" -> do
       whenDispatch policy
-      event "fixture.describe"
+      let requested = case params of
+            Object fields -> KeyMap.lookup "permissions" fields
+            _ -> Nothing
+      emit (object ["type" .= ("event" :: Text), "id" .= requestId,
+        "event" .= object ["type" .= ("fixture.describe" :: Text), "permissions" .= requested]])
       if policy == "slow" then threadDelay 700000 else pure ()
       succeed $ if policy == "legacy" then object [] else object
         ["permissions_capabilities" .= object
@@ -2429,7 +2446,14 @@ fakePermissionProvider policy = do
     "invoke" -> do
       event "fixture.invoke"
       if policy == "slow" then threadDelay 700000 else pure ()
-      succeed (object ["text" .= Text.Encoding.decodeUtf8 (strictEncode params), "received" .= params])
+      if policy == "receipt" then emit (object
+        ["type" .= ("event" :: Text), "id" .= requestId,
+          "event" .= object ["type" .= ("provider.permission.warning" :: Text),
+            "code" .= ("permission_unsupported" :: Text), "field" .= ("allowed_tools" :: Text),
+            "message" .= ("fixture provider reported a dynamic fallback" :: Text)]]) else pure ()
+      let receipt = if policy == "receipt" then
+            ["permission_report" .= object ["effective" .= object [], "status" .= ("dynamic-fallback" :: Text)]] else []
+      succeed (object (["text" .= Text.Encoding.decodeUtf8 (strictEncode params), "received" .= params] <> receipt))
     _ -> failTest "unexpected fake permission method"
   where
     whenDispatch selected = if selected == "dispatch" then failTest "dispatch must not be probed" else pure ()

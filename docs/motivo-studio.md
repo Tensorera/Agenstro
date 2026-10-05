@@ -208,7 +208,7 @@ independently of a provider reply. The core returns structured evidence; the
 CLI wrapper adds red/green validation and reports. Place these numbered entries
 in `.tactus/motivoscript` so installed helper modules are in the include path.
 See the installed `references/tdd.md` and the runnable
-[`motivo/examples/tdd`](../motivo/examples/tdd/README.md) example.
+`motivo/examples/tdd/` example.
 
 Test reports retain `motivo.run/v1`, with `method = "test"` and `test_suite`
 metadata, and join the same offline index. `artifacts/suite.json` stores the
