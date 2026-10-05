@@ -357,6 +357,35 @@ main = do
             print("PASS: real Bubblewrap red → edit only temporary implementation → matching green; sandbox cannot write the project")
         else:
             print("SKIP: real sandbox acceptance (non-Linux or explicit --skip-real-sandbox); no host fallback")
+
+        # Recreate a workspace from before the Test/Record entries existed.
+        # The stub exposes precisely the old public Run API, without relying on
+        # git history, a checkout, or an export added by the new implementation.
+        helpers = project / ".tactus/motivoscript/Motivo"
+        (helpers / "Run.hs").write_text('''{-# LANGUAGE OverloadedStrings #-}
+module Motivo.Run (runMethod, parseSections, validateNotes) where
+import Data.Text (Text)
+import Motivo.Method (Method)
+runMethod :: Method -> IO ()
+runMethod _ = pure ()
+parseSections :: Text -> [(Text, Text)]
+parseSections _ = []
+validateNotes :: Method -> Text -> Either String ()
+validateNotes _ _ = Right ()
+''', encoding="utf-8")
+        old_modules = {name: (helpers / name).read_bytes() for name in ["Run.hs", "Method.hs", "Html.hs", "Markdown.hs"]}
+        for path in [helpers / "Test.hs", helpers / "Record.hs", project / ".tactus/motivoscript/090_test.hs"]:
+            path.unlink()
+        (project / ".tactus/tactus.toml").write_text(config, encoding="utf-8")
+        execute([tactus, "init", str(project), "--sdk", str(ROOT / "clef-sdk")], ROOT)
+        assert all((helpers / name).read_bytes() == content for name, content in old_modules.items())
+        execute([tactus, "check", "--root", str(project), "--scripts-dir", ".tactus/motivoscript", "--all"], project)
+        upgraded = run("upgraded-old-workspace", manifest([case("addition", "pass", [
+            {"kind": "exit_code", "expected": 0}, {"kind": "stdout_equals", "expected": "4\n"}])]))
+        assert upgraded["status"] == "test-passed"
+        assert all((helpers / name).read_bytes() == content for name, content in old_modules.items())
+        checks += 1
+        print("PASS: init adds Test/Record to a preserved old Run API; installed TDD compiles/runs without changing old module bytes")
     print(f"Motivo TDD acceptance passed: {checks} checks")
 
 

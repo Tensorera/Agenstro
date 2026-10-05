@@ -3,22 +3,28 @@
 -- | Shared bounded input and safe, atomic report publication.
 module Motivo.Record
   ( atomicWriteJson, atomicWriteText, ensureDirectory, findWorkspace, isLinked,
-    jsonText, newRunId, nowText, readBoundedText, validToken
+    jsonText, newRunId, nowText, readBoundedText, refreshWorkspaceIndex, validToken,
+    valueText
   ) where
 
-import Control.Exception (bracketOnError, onException)
-import Control.Monad (unless, when)
-import Data.Aeson (Value, encode)
+import Control.Exception (IOException, bracketOnError, onException, try)
+import Control.Monad (forM, unless, when)
+import Data.Aeson (Value (..), eitherDecodeStrict', encode)
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as Bytes
 import qualified Data.ByteString.Lazy as LazyBytes
 import Data.Char (isAlphaNum, isAscii)
+import Data.List (sortOn)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.IO as TextIO
-import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
+import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
+import Motivo.Html (escapeHtml, renderPage)
 import System.Directory
-  ( canonicalizePath, createDirectoryIfMissing, doesFileExist,
+  ( canonicalizePath, createDirectoryIfMissing, doesFileExist, listDirectory,
     pathIsSymbolicLink, removeFile, renameFile
   )
 import System.FilePath ((</>), takeDirectory)
@@ -86,3 +92,43 @@ atomicWriteText path content = bracketOnError
 
 atomicWriteJson :: FilePath -> Value -> IO ()
 atomicWriteJson path = atomicWriteText path . (<> "\n") . jsonText
+
+-- | New test entries must not depend on an export added to a preserved old Run
+-- module. Both report types use this newly installed helper instead.
+refreshWorkspaceIndex :: FilePath -> Text -> Text -> IO ()
+refreshWorkspaceIndex root template generated = do
+  let runs = root </> ".tactus/motivo/runs"
+  names <- listDirectory runs
+  reports <- forM (filter (validToken . Text.pack) names) $ \name -> do
+    let directory = runs </> name
+    linked <- isLinked directory
+    metadataLinked <- isLinked (directory </> "run.json")
+    if linked || metadataLinked then pure Nothing else do
+      metadata <- try (withBinaryFile (directory </> "run.json") ReadMode (\handle -> Bytes.hGet handle (1024 * 1024 + 1))) :: IO (Either IOException Bytes.ByteString)
+      pure $ case metadata of
+        Right bytes | Bytes.length bytes <= 1024 * 1024 -> case eitherDecodeStrict' bytes of
+          Right value@(Object _) -> Just (name, value)
+          _ -> Nothing
+        _ -> Nothing
+  let sorted = take 200 (sortOn (\(name, value) -> (Down (recordTimestamp value), name)) [row | Just row <- reports])
+      body = "<header class=\"motivo-header\"><p class=\"eyebrow\">MOTIVO · WORKSPACE OBSERVATIONS</p><h1>Method runs</h1><p class=\"lede\">Your coding agent leads the work. These records preserve questions, evidence, experiments and decisions.</p></header>"
+        <> "<main><aside class=\"note\">Snapshot generated " <> escapeHtml generated <> ". Concurrent writes may make this overview lag behind an individual run report; keep the report path printed by the method. Reload to read newly generated records. No server, model call or execution control lives on this page.</aside>"
+        <> "<section class=\"run-list\">" <> (if null sorted then "<p class=\"empty\">No recorded runs.</p>" else Text.concat (map runCard sorted)) <> "</section></main>"
+      runCard (name, value) = "<article class=\"run-card\" data-method=\"" <> escapeHtml (valueText "method" value) <> "\"><div><p class=\"eyebrow\">" <> escapeHtml (valueText "started_at" value)
+        <> "</p><h2><a href=\"runs/" <> Text.pack name <> "/report.html\">" <> escapeHtml (valueText "title" value) <> "</a></h2><p>" <> escapeHtml (Text.pack name) <> "</p></div><div><p class=\"status\">"
+        <> escapeHtml (valueText "status" value) <> "</p><p>" <> escapeHtml (valueText "agent" value) <> " · " <> escapeHtml (valueText "model" value) <> "</p></div></article>"
+  page <- either fail pure (renderPage template body)
+  atomicWriteText (root </> ".tactus/motivo/index.html") page
+
+-- Fractional precision varies; parse times instead of sorting their text.
+recordTimestamp :: Value -> Maybe UTCTime
+recordTimestamp = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ"
+  . Text.unpack . valueText "started_at"
+
+valueText :: Text -> Value -> Text
+valueText key (Object values) = case KeyMap.lookup (Key.fromText key) values of
+  Just (String value) -> value
+  Just Null -> "not reported"
+  Just value -> jsonText value
+  Nothing -> "not reported"
+valueText _ _ = "not reported"

@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | File-backed method reports for a coding agent. No model selection or loop.
-module Motivo.Run (runMethod, parseSections, validateNotes, refreshWorkspaceIndex) where
+module Motivo.Run (runMethod, parseSections, validateNotes) where
 
 import Clef
   ( EventSink (..), operation, perform, renderRuntimeRecord, runWorkflow,
@@ -11,30 +11,26 @@ import Clef
   )
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
 import Control.Exception (IOException, SomeException, displayException, throwIO, try)
-import Control.Monad (filterM, forM, forM_, unless, when)
-import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
-import qualified Data.Aeson.Key as Key
+import Control.Monad (filterM, forM_, unless, when)
+import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as Bytes
 import qualified Data.ByteString.Lazy as LazyBytes
-import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
-import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Data.Time (UTCTime, defaultTimeLocale, parseTimeM)
 import Motivo.Html (escapeHtml, renderMarkdown, renderPage)
 import Motivo.Markdown (MarkdownBlock (..), blockLines, markdownBlocks)
 import Motivo.Method
 import Motivo.Record
 import System.Directory
   ( canonicalizePath, createDirectory,
-    doesFileExist, getCurrentDirectory, listDirectory
+    doesFileExist, getCurrentDirectory
   )
 import System.Environment (getArgs, lookupEnv)
 import System.FilePath ((</>), splitDirectories)
-import System.IO (IOMode (AppendMode, ReadMode), hFlush, withBinaryFile, withFile)
+import System.IO (IOMode (AppendMode), hFlush, withFile)
 import System.IO.Error (catchIOError, isAlreadyExistsError)
 import Text.Read (readMaybe)
 
@@ -397,47 +393,6 @@ reportHtml recorder status generated count samples observation =
 
 refreshIndex :: Recorder -> Text -> IO ()
 refreshIndex recorder = refreshWorkspaceIndex (recordRoot recorder) (recordTemplate recorder)
-
--- | Both method and test reports share the same conservative offline index.
-refreshWorkspaceIndex :: FilePath -> Text -> Text -> IO ()
-refreshWorkspaceIndex root template generated = do
-  let runs = root </> ".tactus/motivo/runs"
-  names <- listDirectory runs
-  reports <- forM (filter (validToken . Text.pack) names) $ \name -> do
-    let directory = runs </> name
-    linked <- isLinked directory
-    metadataLinked <- isLinked (directory </> "run.json")
-    if linked || metadataLinked then pure Nothing else do
-      metadata <- try (withBinaryFile (directory </> "run.json") ReadMode (\handle -> Bytes.hGet handle (1024 * 1024 + 1))) :: IO (Either IOException Bytes.ByteString)
-      pure $ case metadata of
-        Right bytes | Bytes.length bytes <= 1024 * 1024 -> case eitherDecodeStrict' bytes of
-          Right value@(Object _) -> Just (name, value)
-          _ -> Nothing
-        _ -> Nothing
-  let sorted = take 200 (sortOn (\(name, value) -> (Down (recordTimestamp value), name)) [row | Just row <- reports])
-      body = "<header class=\"motivo-header\"><p class=\"eyebrow\">MOTIVO · WORKSPACE OBSERVATIONS</p><h1>Method runs</h1><p class=\"lede\">Your coding agent leads the work. These records preserve questions, evidence, experiments and decisions.</p></header>"
-        <> "<main><aside class=\"note\">Snapshot generated " <> escapeHtml generated <> ". Concurrent writes may make this overview lag behind an individual run report; keep the report path printed by the method. Reload to read newly generated records. No server, model call or execution control lives on this page.</aside>"
-        <> "<section class=\"run-list\">" <> (if null sorted then "<p class=\"empty\">No recorded runs.</p>" else Text.concat (map runCard sorted)) <> "</section></main>"
-      runCard (name, value) = "<article class=\"run-card\" data-method=\"" <> escapeHtml (valueText "method" value) <> "\"><div><p class=\"eyebrow\">" <> escapeHtml (valueText "started_at" value)
-        <> "</p><h2><a href=\"runs/" <> Text.pack name <> "/report.html\">" <> escapeHtml (valueText "title" value) <> "</a></h2><p>" <> escapeHtml (Text.pack name) <> "</p></div><div><p class=\"status\">"
-        <> escapeHtml (valueText "status" value) <> "</p><p>" <> escapeHtml (valueText "agent" value) <> " · " <> escapeHtml (valueText "model" value) <> "</p></div></article>"
-  page <- either fail pure (renderPage template body)
-  atomicWriteText (root </> ".tactus/motivo/index.html") page
-
--- %Q has variable fractional precision, so lexical timestamp order is not time
--- order. Unknown timestamps sort last; the run name breaks equal-time ties.
-recordTimestamp :: Value -> Maybe UTCTime
-recordTimestamp = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ"
-  . Text.unpack . valueText "started_at"
-
-valueText :: Text -> Value -> Text
-valueText key (Object values) = case KeyMap.lookup (fromStringKey key) values of
-  Just (String value) -> value
-  Just Null -> "not reported"
-  Just value -> jsonText value
-  Nothing -> "not reported"
-  where fromStringKey = Key.fromText
-valueText _ _ = "not reported"
 
 displayedModel :: Options -> Text
 displayedModel options = case selectedProvider options of

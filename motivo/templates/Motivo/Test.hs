@@ -35,7 +35,6 @@ import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.IO as TextIO
 import Motivo.Html (escapeHtml, renderPage)
 import Motivo.Record
-import Motivo.Run (refreshWorkspaceIndex)
 import System.Directory (canonicalizePath, createDirectory, doesFileExist, getCurrentDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (..), exitWith)

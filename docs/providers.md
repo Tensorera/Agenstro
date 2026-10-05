@@ -333,10 +333,10 @@ main = do
             { invocationSandbox = Just (SandboxRequest ReadOnly Nothing) }) }
       ordinary = (providerRef "codex")
         { providerRefPermissions = Just emptyPermissions }
-      task = textTask "explain" (\topic -> "Explain briefly: " <> topic)
+      explainTask = textTask "explain" (\topic -> "Explain briefly: " <> topic)
   answer <- runTactus $ do
-    first <- invokeWith reader task "the configured workspace"
-    invokeWith ordinary task first
+    first <- invokeWith reader explainTask "the configured workspace"
+    invokeWith ordinary explainTask first
   Text.putStrLn answer
 ```
 
