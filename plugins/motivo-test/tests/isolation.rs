@@ -427,14 +427,14 @@ fn single_deadline_covers_multiple_commands_and_preserves_partial_logs() {
             &[
                 "/bin/sh",
                 "-c",
-                "echo preparing; sleep 1; echo prepared; sleep 1; echo too-late > escaped",
+                "echo preparing; sleep 0.1; echo prepared; sleep 20; echo too-late > escaped",
             ],
-            2,
+            4,
         )),
     );
     assert_eq!(result["status"], "timed_out");
     assert!(
-        started.elapsed() < Duration::from_millis(2300),
+        started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );
@@ -449,13 +449,14 @@ const ESCAPING_SCRIPT: &str = "setsid sh -c 'trap \"\" TERM; sleep 1.5; echo esc
 #[test]
 fn timeout_kills_descendants_that_create_a_new_session() {
     let root = workspace();
-    let result = value(
-        root.path(),
-        &request(params(&["/bin/sh", "-c", ESCAPING_SCRIPT], 1)),
-    );
+    // Release the descendant only after timeout cleanup has completed. This
+    // checks that it was killed without racing sandbox startup on a busy host.
+    let script = "setsid sh -c 'trap \"\" TERM; echo ready > ready; while [ ! -f release ]; do sleep 0.05; done; echo escaped > escaped' </dev/null >/dev/null 2>&1 & sleep 20";
+    let result = value(root.path(), &request(params(&["/bin/sh", "-c", script], 4)));
     assert_eq!(result["status"], "timed_out");
     assert!(sample(root.path()).join("ready").exists());
-    thread::sleep(Duration::from_millis(1600));
+    fs::write(sample(root.path()).join("release"), "released\n").unwrap();
+    thread::sleep(Duration::from_millis(500));
     assert!(!sample(root.path()).join("escaped").exists());
 }
 
