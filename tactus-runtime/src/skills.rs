@@ -272,7 +272,7 @@ pub(crate) fn reconcile(
         let current_hash = current.as_deref().map(content_hash);
         let known = current_hash.as_ref().is_some_and(|hash| {
             manifest.files.get(relative) == Some(hash)
-                || legacy_hash(relative) == Some(hash.as_str())
+                || legacy_hashes(relative).contains(&hash.as_str())
         });
         if current.is_none() {
             entry.action = "installed".to_owned();
@@ -507,41 +507,44 @@ fn bundle_digest(files: &[(String, String)]) -> String {
 }
 
 /// Normalized hashes of the seven canonical files and six discovery files
-/// actually shipped by `tactus init` at commit 3e90ad1. No Git access at runtime.
-fn legacy_hash(path: &str) -> Option<&'static str> {
+/// shipped by `tactus init` at the pre-PR main baseline (34abcba) and the later
+/// pre-manifest bundle (3e90ad1). No Git access at runtime.
+fn legacy_hashes(path: &str) -> &'static [&'static str] {
     match path {
-        ".tactus/skills/tactus/SKILL.md" => {
-            Some("df769b4da6b2f0f410e2da2c26ac0c92dbf10fce78e4033d3ca0e4f325fc6ddf")
-        }
-        ".tactus/skills/tactus/references/commands.md" => {
-            Some("0b4ecaa5ee408b8fc1e680888fc28b09bff9ab239b0c12f4ef0376ce851d6145")
-        }
+        ".tactus/skills/tactus/SKILL.md" => &[
+            "e7ee3e5cf7b89d74409d87695708cf49746d9600414c1b6e576b3c992e546660",
+            "df769b4da6b2f0f410e2da2c26ac0c92dbf10fce78e4033d3ca0e4f325fc6ddf",
+        ],
+        ".tactus/skills/tactus/references/commands.md" => &[
+            "1e792bb9f204c85c7f05f5593f050e84fb4dcaed4c355d7335c33f42d3c95a82",
+            "0b4ecaa5ee408b8fc1e680888fc28b09bff9ab239b0c12f4ef0376ce851d6145",
+        ],
         ".tactus/skills/tactus/references/outcomes.md" => {
-            Some("b18fff2d4c053c5096661aca7e47524ece386d84f7f1b394abebd88fc0eb5064")
+            &["b18fff2d4c053c5096661aca7e47524ece386d84f7f1b394abebd88fc0eb5064"]
         }
         ".tactus/skills/motivo/SKILL.md" => {
-            Some("986a8a2551c1dcfa63626fe6abf185a55c6aac0764344f4ba454163cf2011ac8")
+            &["986a8a2551c1dcfa63626fe6abf185a55c6aac0764344f4ba454163cf2011ac8"]
         }
         ".tactus/skills/motivo/references/methods.md" => {
-            Some("db714e821b689b6d7ce7101ed7567e4b7ee2bf3c49c85b124d0c403335611676")
+            &["db714e821b689b6d7ce7101ed7567e4b7ee2bf3c49c85b124d0c403335611676"]
         }
         ".tactus/skills/motivo/references/runs.md" => {
-            Some("e183e1457cdfffe1d2203c35f5b83ef756a313f60d560fcc047845354f10816b")
+            &["e183e1457cdfffe1d2203c35f5b83ef756a313f60d560fcc047845354f10816b"]
         }
         ".tactus/skills/motivo/assets/report-template.html" => {
-            Some("d97d37453f3f51f078055d943115386cf1f6eae005be6656548d7dee4dd4e2ca")
+            &["d97d37453f3f51f078055d943115386cf1f6eae005be6656548d7dee4dd4e2ca"]
         }
         ".agents/skills/tactus/SKILL.md"
         | ".claude/skills/tactus/SKILL.md"
         | ".opencode/skills/tactus/SKILL.md" => {
-            Some("5a5c2a7e0656ce7ce9f3e2a9291de7882d2441b0720ad3ba1689f7c43aba2968")
+            &["5a5c2a7e0656ce7ce9f3e2a9291de7882d2441b0720ad3ba1689f7c43aba2968"]
         }
         ".agents/skills/motivo/SKILL.md"
         | ".claude/skills/motivo/SKILL.md"
         | ".opencode/skills/motivo/SKILL.md" => {
-            Some("1aeee69b93566028014eb9446a858a1c41e6f2129861521099ee5a2cd4aeaf47")
+            &["1aeee69b93566028014eb9446a858a1c41e6f2129861521099ee5a2cd4aeaf47"]
         }
-        _ => None,
+        _ => &[],
     }
 }
 
@@ -638,6 +641,22 @@ mod tests {
 
     #[test]
     fn legacy_release_upgrades_without_a_manifest_including_crlf_checkouts() {
+        assert_legacy_upgrade(
+            include_str!("../tests-rust/fixtures/skills-legacy/tactus.md"),
+            include_str!("../tests-rust/fixtures/skills-legacy/commands.md"),
+        );
+    }
+
+    #[test]
+    fn main_branch_release_upgrades_without_a_manifest_including_crlf_checkouts() {
+        // Original `tactus init` bundle at the pre-PR merge base, 34abcba.
+        assert_legacy_upgrade(
+            include_str!("../tests-rust/fixtures/skills-legacy/main/tactus.md"),
+            include_str!("../tests-rust/fixtures/skills-legacy/main/commands.md"),
+        );
+    }
+
+    fn assert_legacy_upgrade(tactus: &str, commands: &str) {
         for crlf in [false, true] {
             let (_temporary, root, _sdk) = project();
             fs::remove_dir_all(root.join(".tactus/skills")).expect("remove new bundle");
@@ -648,13 +667,15 @@ mod tests {
             let bundle = bundled_files();
             let mut legacy_count = 0;
             for (path, current) in &bundle {
-                let Some(expected) = legacy_hash(path) else {
+                let expected = legacy_hashes(path);
+                if expected.is_empty() {
                     continue;
-                };
+                }
                 let legacy = match path.as_str() {
-                    ".tactus/skills/tactus/SKILL.md" => include_str!("../tests-rust/fixtures/skills-legacy/tactus.md").to_owned(),
-                    ".tactus/skills/tactus/references/commands.md" => include_str!("../tests-rust/fixtures/skills-legacy/commands.md").to_owned(),
+                    ".tactus/skills/tactus/SKILL.md" => tactus.to_owned(),
+                    ".tactus/skills/tactus/references/commands.md" => commands.to_owned(),
                     ".tactus/skills/motivo/SKILL.md" => include_str!("../tests-rust/fixtures/skills-legacy/motivo.md").to_owned(),
+                    ".tactus/skills/motivo/references/runs.md" => include_str!("../tests-rust/fixtures/skills-legacy/motivo-runs.md").to_owned(),
                     path if !path.starts_with(".tactus/") && path.contains("/tactus/") => current.replace(
                         "Write, check, and execute Haskell workflows; configure daemon supervision and inspect live provider output with Tactus.",
                         "Write, check, and execute project Haskell workflows with Clef and Tactus.",
@@ -667,9 +688,8 @@ mod tests {
                 } else {
                     legacy
                 };
-                assert_eq!(
-                    content_hash(legacy.as_bytes()),
-                    expected,
+                assert!(
+                    expected.contains(&content_hash(legacy.as_bytes()).as_str()),
                     "legacy fixture for {path}"
                 );
                 fs::create_dir_all(root.join(path).parent().expect("parent")).expect("directory");
@@ -678,7 +698,12 @@ mod tests {
             }
             assert_eq!(legacy_count, 13);
             let report = update_skills(&root, false).expect("legacy update");
-            assert!(report.files.iter().any(|entry| entry.action == "updated"));
+            for path in [
+                ".tactus/skills/tactus/SKILL.md",
+                ".tactus/skills/tactus/references/commands.md",
+            ] {
+                assert_eq!(entry(&report, path).action, "updated", "{path}");
+            }
             assert!(report.files.iter().all(|entry| entry.candidate.is_none()));
             for (path, content) in bundle {
                 assert_eq!(

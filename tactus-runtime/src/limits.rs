@@ -381,6 +381,52 @@ mod tests {
     }
 
     #[test]
+    fn plugin_dual_queues_accept_the_exact_resident_budget_and_reject_excess() {
+        let exact = RuntimeLimits {
+            max_frame_bytes: 32 * 1024 * 1024,
+            event_queue_bound: 4,
+            ..RuntimeLimits::default()
+        };
+        exact.validate().expect("two queues exactly fit 256 MiB");
+
+        let oversized = RuntimeLimits {
+            event_queue_bound: 5,
+            ..exact
+        };
+        assert!(
+            oversized
+                .validate()
+                .expect_err("two queues would retain 320 MiB")
+                .contains("2 * max_frame_bytes * event_queue_bound")
+        );
+    }
+
+    #[test]
+    fn escaped_provider_frame_accepts_the_exact_budget_and_rejects_one_byte_less() {
+        // A control byte may encode as six JSON bytes. Only the numeric limits
+        // are exercised here; no buffer of the configured size is allocated.
+        let exact_frame_bytes = 6 * (4 * 1024 * 1024) + 1024 * 1024 + 65_536;
+        let exact = RuntimeLimits {
+            native_max_result_bytes: 4 * 1024 * 1024,
+            max_request_bytes: 1024 * 1024,
+            max_frame_bytes: exact_frame_bytes,
+            ..RuntimeLimits::default()
+        };
+        exact.validate().expect("escaped terminal exactly fits");
+
+        let undersized = RuntimeLimits {
+            max_frame_bytes: exact_frame_bytes - 1,
+            ..exact
+        };
+        assert!(
+            undersized
+                .validate()
+                .expect_err("escaped terminal exceeds the frame by one byte")
+                .contains("max_frame_bytes must cover")
+        );
+    }
+
+    #[test]
     fn rejects_an_outer_deadline_that_can_preempt_provider_cleanup() {
         let limits = RuntimeLimits {
             provider_outer_timeout_seconds: RuntimeLimits::default().provider_timeout_seconds,

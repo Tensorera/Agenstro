@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { JSDOM } from "jsdom";
 
 const template = await readFile(new URL("../report-template.html", import.meta.url), "utf8");
@@ -37,4 +38,31 @@ test("reader controls expand evidence without an execution endpoint", () => {
   assert.equal(button.textContent, "展开证据");
   assert.equal(document.querySelectorAll("button").length, 2);
   dom.window.close();
+});
+
+test("reload requests one refresh and preserves recorded evidence", () => {
+  const dom = new JSDOM(template.replace("<!-- MOTIVO_CONTENT -->", content), {
+    url: "file:///tmp/report.html",
+  });
+  try {
+    const document = dom.window.document;
+    let reloads = 0;
+    // Execute the actual inline script with only navigation replaced. JSDOM's
+    // location is non-configurable and does not implement browser navigation.
+    const scripts = [...document.querySelectorAll("script:not([src])")];
+    assert.equal(scripts.length, 1);
+    runInNewContext(scripts[0].textContent, {
+      document,
+      window: { location: { reload: () => reloads++ } },
+    });
+    assert.equal(reloads, 0, "opening a report must not reload it");
+    document.getElementById("expand-evidence").click();
+    const evidence = document.querySelector(".document").innerHTML;
+    document.getElementById("reload-report").click();
+    assert.equal(reloads, 1);
+    assert.equal(document.querySelector(".document").innerHTML, evidence);
+    assert.ok([...document.querySelectorAll("details")].every((detail) => detail.open));
+  } finally {
+    dom.window.close();
+  }
 });

@@ -2,7 +2,7 @@
 title: Studio control API v1
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-05
+last_verified: 2026-09-18
 applies_to: "agenstro.studio/v1 and tactus.control/v1"
 platforms: [windows, ubuntu]
 ---
@@ -88,6 +88,7 @@ or generation prompts.
 The run limit is between 1 and 200. Tactus examines at most 2,000 run
 directories for one snapshot. An unreadable or corrupt individual run is
 reported as corrupt without preventing the rest of the workspace snapshot.
+Failure to enumerate the workspace's run directory still fails the request.
 
 ## Event pages
 
@@ -154,9 +155,16 @@ errors or path metadata may still be sensitive.
 
 The event count limit is 1–1,000; the page and individual JSONL-record limits
 are 36 MiB so a valid escaped 32 MiB plugin frame remains inspectable. A
-summary is limited to 2 MiB. A partial final line or exhausted page budget
-yields `partial`; a complete malformed record, sequence gap, mismatched API,
-run id, or summary count yields `corrupt`.
+summary is limited to 2 MiB. A partial final line yields `partial` only while
+the journal has no terminal summary; the same tail in a closed journal yields
+`corrupt`. Complete malformed records, sequence gaps, mismatched API or run id,
+and summary-count mismatches also yield `corrupt`.
+
+If the next event would exceed the requested byte budget after some events
+have been returned, the page is `partial`. If no event fits, the request fails
+with `invalid_limit`; increase `--max-bytes` before retrying. Reaching the event
+count limit leaves `complete` false without changing an otherwise `ok`
+integrity value. Continue from `nextAfter` to read the remaining events.
 
 ## Compatibility rules
 

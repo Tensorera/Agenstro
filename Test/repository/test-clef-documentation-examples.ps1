@@ -1,15 +1,25 @@
 $ErrorActionPreference = "Stop"
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
-$documentPath = Join-Path $repositoryRoot "docs\clef.md"
-$document = [System.IO.File]::ReadAllText($documentPath, [System.Text.Encoding]::UTF8)
-$examples = [regex]::Matches(
-    $document,
-    '(?ms)^```haskell compile\s*\r?\n(?<source>.*?)^```\s*$'
+$examples = @(
+    foreach ($documentPath in Get-ChildItem -LiteralPath (Join-Path $repositoryRoot "docs") -Recurse -File -Filter "*.md" | Sort-Object FullName) {
+        $document = [System.IO.File]::ReadAllText($documentPath.FullName, [System.Text.Encoding]::UTF8)
+        $matches = [regex]::Matches(
+            $document,
+            '(?ms)^```haskell compile[^\S\r\n]*\r?\n(?<source>.*?)^```[^\S\r\n]*\r?$'
+        )
+        for ($index = 0; $index -lt $matches.Count; $index++) {
+            [pscustomobject]@{
+                Path = [System.IO.Path]::GetRelativePath($repositoryRoot, $documentPath.FullName).Replace('\', '/')
+                Number = $index + 1
+                Source = $matches[$index].Groups['source'].Value
+            }
+        }
+    }
 )
 
 if ($examples.Count -eq 0) {
-    throw "No compile-checked Haskell examples found in docs/clef.md"
+    throw "No compile-checked Haskell examples found under docs/"
 }
 
 $temporaryRoot = Join-Path (
@@ -20,22 +30,31 @@ $temporaryRoot = Join-Path (
 try {
     for ($index = 0; $index -lt $examples.Count; $index++) {
         $sourcePath = Join-Path $temporaryRoot ("Example{0}.hs" -f ($index + 1))
-        $module = @"
+        $example = $examples[$index]
+        # Complete modules are checked verbatim; short declaration examples
+        # retain the historical Clef wrapper used by docs/clef.md.
+        $module = if ($example.Source -match '(?m)^module\s+Main\b') {
+            $example.Source
+        }
+        else {
+            @"
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Clef
 
-$($examples[$index].Groups['source'].Value)
+$($example.Source)
 
 main :: IO ()
 main = pure ()
 "@
+        }
         [System.IO.File]::WriteAllText($sourcePath, $module, [System.Text.UTF8Encoding]::new($false))
 
-        & cabal exec --builddir=Build/cabal -- ghc -fno-code -Wall -Werror -package clef-sdk $sourcePath
+        Write-Output "Checking $($example.Path) example $($example.Number)"
+        & cabal exec --builddir=Build/cabal -- ghc -fno-code -Wall -Werror -package clef-sdk -package segno-flow $sourcePath
         if ($LASTEXITCODE -ne 0) {
-            throw "Clef documentation example $($index + 1) did not compile"
+            throw "$($example.Path) example $($example.Number) did not compile"
         }
     }
 }
@@ -45,4 +64,4 @@ finally {
     }
 }
 
-Write-Output "Compiled $($examples.Count) Clef documentation example(s)."
+Write-Output "Compiled $($examples.Count) Haskell documentation example(s)."

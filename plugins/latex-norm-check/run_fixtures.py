@@ -79,8 +79,17 @@ def main() -> int:
             check_protocol(frames, request_id)
             terminal = frames[-1]
             assert terminal["ok"] == expect["ok"], f"ok mismatch: {terminal}"
+            for event_type, expected_events in expect.get("events", {}).items():
+                actual_events = [
+                    frame["event"] for frame in frames
+                    if frame.get("type") == "event"
+                    and frame.get("event", {}).get("type") == event_type
+                ]
+                assert actual_events == expected_events, f"{event_type} events: {actual_events}"
             if terminal["ok"]:
                 value = terminal["value"]
+                if "violationCount" in expect:
+                    assert len(value["violations"]) == expect["violationCount"], f"violation count: {len(value['violations'])}"
                 if "violationNorms" in expect:
                     actual = sorted(item["norm"] for item in value["violations"])
                     assert actual == sorted(expect["violationNorms"]), f"violations {actual}"
@@ -91,6 +100,10 @@ def main() -> int:
                     locus = value["violations"][0]["locus"]
                     for key, wanted in expect["firstLocus"].items():
                         assert locus.get(key) == wanted, f"locus.{key} = {locus.get(key)!r}"
+                if "lastLocus" in expect:
+                    locus = value["violations"][-1]["locus"]
+                    for key, wanted in expect["lastLocus"].items():
+                        assert locus.get(key) == wanted, f"last locus.{key} = {locus.get(key)!r}"
             else:
                 assert terminal["error"]["code"] == expect["code"], f"code mismatch: {terminal}"
             if "exitCode" in expect:

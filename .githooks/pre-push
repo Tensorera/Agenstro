@@ -9,4 +9,4 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     fi
 done
 
-exec pwsh -NoProfile -File scripts/quality.ps1 -Profile Full -RequireClean -CleanIfOverGiB 5
+exec pwsh -NoProfile -File scripts/quality.ps1 -Profile Full -RequireClean

@@ -2,7 +2,7 @@
 title: Agenstro CLI reference
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Tactus/Motivo Studio 0.3.0 and Segno 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -155,8 +155,10 @@ otherwise `SEGNO_REGISTRY` or the platform user-data directory selects the
 SQLite registry. See [Segno](../segno.md#machine-local-timestamp-service) for
 the timestamp/result contract and example organization of working directories.
 
-The task timeout is per Tactus build/run phase, defaults to 15,300 seconds, and
-accepts 1–604,800 seconds. Segno derives a longer Running lease from it.
+The task timeout is per Tactus build/run phase and accepts 1–604,800 seconds.
+Typed `install`, `once`, and `driver` commands default to 15,300 seconds;
+`service register` defaults to 1,800 seconds. Segno derives a longer Running
+lease from the selected timeout.
 
 `history --state-key` and `history --occurrence` are mutually exclusive.
 Business-state history can contain plugin values. Tactus journals persist only

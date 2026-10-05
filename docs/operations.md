@@ -2,7 +2,7 @@
 title: Operate an Agenstro workspace
 status: alpha
 owners: [release]
-last_verified: 2026-08-20
+last_verified: 2026-09-18
 applies_to: "Agenstro 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -41,8 +41,11 @@ some plugins can contact external systems.
 Normally version:
 
 - `.tactus/tactus.toml` after removing machine-local or sensitive values;
-- `.tactus/PROMPT.md`;
-- `.tactus/scripts`;
+- the files configured by `instructions` and optional `runtime_instructions`
+  after reviewing their contents; the default generation file is `.tactus/PROMPT.md`;
+- `.tactus/scripts`, `.tactus/motivoscript`, and any additional project-owned
+  source trees selected through `--scripts-dir`;
+- `.tactus/segno.hs` when using the machine-local timestamp service;
 - `.tactus/skills` when the project intentionally customizes the bundled
   guidance; and
 - project documentation that explains required plugins and provider policy.
@@ -60,29 +63,49 @@ Normally ignore:
 
 The repository's own `.gitignore` is not automatically copied into every
 target project. Establish the target project's policy before the first live
-run.
+run. Decide separately whether Motivo drafts, method evidence under
+`.tactus/motivo`, and experiment fixtures/results under `.tactus/motivotest`
+belong in version control; they can contain business material.
 
 ## Backup
 
-Stop active Tactus commands and the Segno driver before taking a consistency
-backup. Then preserve at least:
+Stop active Tactus commands, Motivo method runs, and the Segno driver or
+machine-local service before taking a consistency backup. Preserve the
+following paths when present:
 
 ```text
 .tactus/tactus.toml
 .tactus/cabal.project
 .tactus/PROMPT.md
 .tactus/scripts/
+.tactus/motivoscript/
+.tactus/motivo/
+.tactus/motivotest/
 .tactus/skills/
+.tactus/skills-manifest.json
+.tactus/skill-updates/
 .tactus/sessions/
+.tactus/segno.hs
 .tactus/segno/jobs/
 .tactus/segno/triggers/
 .tactus/segno/state/business.sqlite3
 .tactus/segno/state/lifecycle.sqlite3
 ```
 
+Also preserve the actual files referenced by `instructions` and
+`runtime_instructions`, additional source trees selected by `--scripts-dir`,
+and any task working directories outside these paths. `init` can recreate
+bundled method templates, but cannot restore project edits, recorded reports,
+or experiment evidence.
+
 The two Segno databases are separate by design. Copy both from the same stopped
 workspace snapshot. A business-state checkpoint and lifecycle transition are
 not a cross-database exactly-once transaction.
+
+The machine-local timestamp service has a separate SQLite registry outside
+the workspace by default. Back up its selected `--registry` / `SEGNO_REGISTRY`
+file while the service is stopped if registrations and service history need
+to survive; see [Segno service storage](segno.md#machine-local-timestamp-service).
 
 Copy `sessions/` as one stopped-workspace unit. Its current document and
 append-only transcript jointly explain which human choice was accepted; do not

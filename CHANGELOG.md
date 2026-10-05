@@ -6,6 +6,23 @@ do not imply a package-registry release or compatibility guarantee.
 
 ## Unreleased — daemon, Segno service and live output
 
+- Reject negative, overflowing, and non-decimal `time.interval` values before
+  they can wrap into a different scheduling interval.
+- Limit retained project caches to 2 GiB (2,147,483,648 bytes) by default after
+  every quality profile, including failures; preserve executables for the current host platform,
+  Cabal source distributions,
+  and quality receipts separately from removable build output. Count retained
+  project tool dependencies in the budget and leave global caches/toolchains alone.
+- Share lean Cargo dev/test settings across direct builds and quality gates;
+  disable debug symbols and compiler incremental output while retaining reuse
+  of unchanged dependencies until cache cleanup.
+- Restore the documented 15,300-second default for typed Segno task commands,
+  keeping the service registration timeout independent.
+- Keep Studio workspace inspection available when an individual run summary
+  cannot be read; expose that run as corrupt.
+- Repair the offline tutorial and current setup, backup, and protocol guides;
+  compile marked Haskell examples across the documentation tree and validate
+  published skills and auxiliary README links in the documentation gate.
 - Add the Google Antigravity CLI provider (`antigravity` / `agy`) with streamed
   stdin, live response deltas, model/effort selection and supervised deadlines.
 - Add a dedicated Segno authoring/service skill and expand Tactus daemon/live

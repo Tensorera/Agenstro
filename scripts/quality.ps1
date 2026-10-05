@@ -5,6 +5,9 @@ param(
     [switch] $Staged,
     [switch] $RequireClean,
     [switch] $Clean,
+    [ValidateRange(1, 2147483648)]
+    [long] $CacheBudgetBytes = 2147483648,
+    [ValidateRange(0, [double]::MaxValue)]
     [double] $CleanIfOverGiB = 0,
     [switch] $FailFast
 )
@@ -22,6 +25,12 @@ $commands = [System.Collections.Generic.List[object]]::new()
 $hasFailures = $false
 $currentStepName = $null
 $unhandledError = $null
+$cacheReport = $null
+. (Join-Path $PSScriptRoot "build-cache.ps1") -CacheBudgetBytes $CacheBudgetBytes
+if ($CleanIfOverGiB -gt 0) {
+    # Legacy callers may request a tighter limit, never relax the 2 GiB policy.
+    $CacheBudgetBytes = [math]::Max(1, [math]::Min($CacheBudgetBytes, [math]::Floor($CleanIfOverGiB * 1GB)))
+}
 $pythonCommand = if (Get-Command "python" -ErrorAction SilentlyContinue) {
     "python"
 }
@@ -120,44 +129,14 @@ function Invoke-QualityStep {
     }
 }
 
-function Get-CargoTargetSizeGiB {
-    if (-not (Test-Path -LiteralPath $cargoTarget -PathType Container)) {
-        return 0.0
-    }
-    $bytes = (Get-ChildItem -LiteralPath $cargoTarget -Recurse -File -ErrorAction SilentlyContinue |
-        Measure-Object -Property Length -Sum).Sum
-    if ($null -eq $bytes) {
-        return 0.0
-    }
-    return [math]::Round($bytes / 1GB, 3)
-}
-
-function Invoke-CargoClean {
-    Invoke-QualityStep "cargo-clean" {
-        $expected = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "Build\cargo"))
-        $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "Build"))
-        if ($cargoTarget -ne $expected -or -not $cargoTarget.StartsWith(
-            $buildRoot,
-            [System.StringComparison]::OrdinalIgnoreCase
-        )) {
-            throw "Refusing to clean unexpected Cargo target: $cargoTarget"
+function Invoke-CacheMaintenance {
+    Invoke-QualityStep "build-cache-budget" {
+        $script:cacheReport = Invoke-BuildCacheBudget -Root $repositoryRoot `
+            -BudgetBytes $CacheBudgetBytes -ForceClean:($Clean -or $Profile -eq "Clean")
+        Write-Output "Project cache: $($cacheReport.before_bytes) -> $($cacheReport.after_bytes) bytes (limit < $CacheBudgetBytes)."
+        if ($cacheReport.removed.Count -gt 0) {
+            Write-Output "Removed rebuildable directories: $($cacheReport.removed -join ', ')"
         }
-        foreach ($path in @($buildRoot, $cargoTarget)) {
-            if (Test-Path -LiteralPath $path) {
-                $item = Get-Item -LiteralPath $path -Force
-                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw "Refusing to clean a Cargo target below a reparse point: $path"
-                }
-            }
-        }
-        if (Test-Path -LiteralPath $cargoTarget -PathType Container) {
-            $nestedReparsePoint = Get-ChildItem -LiteralPath $cargoTarget -Force -Recurse -Attributes ReparsePoint -ErrorAction Stop |
-                Select-Object -First 1
-            if ($null -ne $nestedReparsePoint) {
-                throw "Refusing to clean a Cargo target containing a reparse point: $($nestedReparsePoint.FullName)"
-            }
-        }
-        Invoke-NativeCommand "cargo" @("clean", "--target-dir", $cargoTarget)
     }
 }
 
@@ -177,6 +156,11 @@ function Invoke-RepositoryDiffCheck {
 
 function Invoke-FastSteps {
     Invoke-QualityStep "repository-diff-check" { Invoke-RepositoryDiffCheck }
+    Invoke-QualityStep "build-cache-safety-tests" {
+        Invoke-NativeCommand "pwsh" @(
+            "-NoProfile", "-File", "Test/repository/test-build-cache.ps1"
+        )
+    }
     Invoke-QualityStep "rust-format" {
         Invoke-NativeCommand "cargo" @("fmt", "--all", "--check")
     }
@@ -426,11 +410,9 @@ try {
         $Profile = "Clean"
     }
     $env:CARGO_TARGET_DIR = $cargoTarget
-    if ($Profile -in @("Full", "Release")) {
-        $env:CARGO_INCREMENTAL = "0"
-        $env:CARGO_PROFILE_DEV_DEBUG = "0"
-        $env:CARGO_PROFILE_TEST_DEBUG = "0"
-    }
+    $env:CARGO_INCREMENTAL = "0"
+    $env:CARGO_PROFILE_DEV_DEBUG = "0"
+    $env:CARGO_PROFILE_TEST_DEBUG = "0"
 
     if ($RequireClean -or $Profile -eq "Release") {
         Invoke-QualityStep "clean-worktree" {
@@ -448,7 +430,7 @@ try {
         "Full" { Invoke-FullSteps }
         "Audit" { Invoke-AuditSteps }
         "Bootstrap" { Invoke-BootstrapSteps }
-        "Clean" { Invoke-CargoClean }
+        "Clean" { } # The finally block performs forced cleanup.
         "Release" {
             Invoke-QualityStep "release-node-dependencies" {
                 Invoke-NativeCommand "npm" @("ci") (Join-Path $repositoryRoot "motivo-studio")
@@ -472,27 +454,12 @@ try {
                 Invoke-NativeCommand "cargo" @("build", "--release", "--locked", "--workspace")
             }
             Invoke-QualityStep "cabal-source-distributions" {
-                Invoke-NativeCommand "cabal" @("sdist", "--builddir=../Build/cabal") (Join-Path $repositoryRoot "clef-sdk")
-                Invoke-NativeCommand "cabal" @("sdist", "--builddir=../Build/cabal") (Join-Path $repositoryRoot "segno-flow")
+                $cabalBuildDirectory = "--builddir=$(Join-Path $repositoryRoot 'Build/cabal')"
+                Invoke-NativeCommand "cabal" @("sdist", $cabalBuildDirectory) (Join-Path $repositoryRoot "clef-sdk")
+                Invoke-NativeCommand "cabal" @("sdist", $cabalBuildDirectory) (Join-Path $repositoryRoot "segno-flow")
             }
             Invoke-QualityStep "motivo-offline-report" {
                 Invoke-NativeCommand "npm" @("run", "build") (Join-Path $repositoryRoot "motivo-studio")
-            }
-        }
-    }
-
-    if ($Clean -and $Profile -ne "Clean") {
-        Invoke-CargoClean
-    }
-    elseif ($CleanIfOverGiB -gt 0) {
-        if ($hasFailures) {
-            Write-Warning "Skipping threshold cleanup because a quality step failed."
-        }
-        else {
-            $sizeGiB = Get-CargoTargetSizeGiB
-            Write-Host "[quality] Cargo target size: $sizeGiB GiB"
-            if ($sizeGiB -gt $CleanIfOverGiB) {
-                Invoke-CargoClean
             }
         }
     }
@@ -503,6 +470,13 @@ catch {
     throw
 }
 finally {
+    # Run even after failed prerequisites, FailFast, or compiler errors. Keep
+    # summary generation independent of FailFast and cleanup failures.
+    try { Invoke-CacheMaintenance }
+    catch {
+        $script:hasFailures = $true
+        if ($null -eq $unhandledError) { $script:unhandledError = $_.Exception.Message }
+    }
     foreach ($name in $originalEnvironment.Keys) {
         if ($null -eq $originalEnvironment[$name]) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
@@ -521,7 +495,10 @@ finally {
         commit = $initialHead
         dirty_before = -not [string]::IsNullOrWhiteSpace($initialStatus)
         dirty_after = -not [string]::IsNullOrWhiteSpace($finalStatus)
-        cargo_target_gib = Get-CargoTargetSizeGiB
+        cargo_target_gib = if ($null -eq $cacheReport) { $null } else {
+            [math]::Round((($cacheReport.directories | Where-Object path -eq 'Build/cargo').bytes / 1GB), 3)
+        }
+        build_cache = $cacheReport
         passed = -not $hasFailures
         error = $unhandledError
         environment = $toolVersions

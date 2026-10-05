@@ -2,7 +2,7 @@
 title: Segno trigger and state plugin wire v1
 status: alpha
 owners: [segno]
-last_verified: 2026-08-16
+last_verified: 2026-09-18
 applies_to: "Segno Flow Haskell 0.3.0.0"
 platforms: [windows, ubuntu]
 ---
@@ -48,9 +48,13 @@ driver calls `poll`; `plan` exists for inspection and deterministic tests.
   "config": {"every_ms": "60000"},
   "cursor": {"logical_time": "2026-08-16T12:00:00Z"},
   "now": "2026-08-16T12:03:00Z",
-  "limit": 100
+  "limit": 1
 }
 ```
+
+For `time.interval`, `config.every_ms` is an ASCII decimal string with a value
+from `1` through `18446744073709551615` milliseconds. Leading zeros are allowed;
+signs, whitespace, other numeric formats, and out-of-range values are rejected.
 
 `cursor` is `null` before the first acknowledged occurrence. `limit` is an
 integer from 1 through 1000. For identical inputs the plugin must return the

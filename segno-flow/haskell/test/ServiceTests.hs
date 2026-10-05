@@ -20,7 +20,7 @@ import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import qualified Database.SQLite.Simple as SQLite
 import Network.Socket
   ( Family (AF_INET), SocketType (Stream), SockAddr (SockAddrInet), bind, close,
-    connect, defaultProtocol, getSocketName, socket, tupleToHostAddress )
+    connect, defaultProtocol, getSocketName, listen, socket, tupleToHostAddress )
 import Network.Socket.ByteString (recv, sendAll)
 import Segno.Driver (Clock (..))
 import Segno.Service (ServiceEnvironment (..), serviceOnceWith)
@@ -48,6 +48,8 @@ runServiceTests = do
   test "slow prior task does not consume the next task lease" testFreshClaimLease
   test "result timestamp mismatch pauses schedule" testMismatchedResult
   test "status HTTP remains responsive while task is running" testWebDuringTask
+  test "status HTTP rejects unsafe request headers without mutating jobs" testWebRequestBoundaries
+  test "occupied status port prevents scheduler startup" testWebOccupiedPort
   where
     test label action = putStr ("[test] service " <> label <> " ... ") >> action >> putStrLn "ok"
 
@@ -226,10 +228,63 @@ testWebDuringTask = withFixture "web" $ \registry root -> do
   jobs <- listServiceJobs registry
   assert (not (any serviceJobEnabled jobs)) "service cancellation failed to pause uncertain invocation"
 
+testWebRequestBoundaries :: IO ()
+testWebRequestBoundaries = withFixture "web-boundaries" $ \registry root -> do
+  void (registerServiceJob registry "alpha" root 60 30 now)
+  originalJobs <- listServiceJobs registry
+  originalHistory <- serviceRunHistory registry 10
+  port <- unusedPort
+  started <- newEmptyMVar
+  release <- newEmptyMVar
+  let host = "Host: 127.0.0.1:" <> show port <> "\r\n"
+      request method headers = method <> " /api/status HTTP/1.1\r\n" <> headers <> "Connection: close\r\n\r\n"
+      cases =
+        [ ("POST", request "POST" host, "404 Not Found"),
+          ("missing Host", request "GET" "", "403 Forbidden"),
+          ("duplicate Host", request "GET" (host <> host), "403 Forbidden"),
+          ("cross-site", request "GET" (host <> "Sec-Fetch-Site: cross-site\r\n"), "403 Forbidden"),
+          ("same-site", request "GET" (host <> "Sec-Fetch-Site: same-site\r\n"), "403 Forbidden"),
+          ("same-origin", request "GET" (host <> "Sec-Fetch-Site: same-origin\r\n"), "200 OK")
+        ]
+      scheduler = putMVar started () >> takeMVar release
+  withAsync (withServiceWeb registry port scheduler) $ \_ -> do
+    ready <- timeout 5000000 (takeMVar started)
+    assert (ready == Just ()) "request-boundary listener did not start"
+    forM_ cases $ \(label, raw, expected) -> do
+      response <- timeout 5000000 (httpRequest port raw)
+      case response of
+        Just bytes -> assert (("HTTP/1.1 " <> expected <> "\r\n") `BS.isPrefixOf` bytes) (label <> ": unexpected HTTP status")
+        Nothing -> fail (label <> ": request did not finish within its deadline")
+  retainedJobs <- listServiceJobs registry
+  retainedHistory <- serviceRunHistory registry 10
+  assert (retainedJobs == originalJobs && retainedHistory == originalHistory) "read-only HTTP requests changed jobs or run history"
+
+testWebOccupiedPort :: IO ()
+testWebOccupiedPort = withFixture "web-port-conflict" $ \registry root -> do
+  void (registerServiceJob registry "alpha" root 60 30 now)
+  originalJobs <- listServiceJobs registry
+  calls <- newIORef (0 :: Int)
+  bracket (socket AF_INET Stream defaultProtocol) close $ \listener -> do
+    bind listener (SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)))
+    listen listener 1
+    address <- getSocketName listener
+    port <- case address of
+      SockAddrInet selected _ -> pure (fromIntegral selected)
+      _ -> fail "expected IPv4 listener"
+    result <- timeout 2000000 (try (withServiceWeb registry port (modifyIORef' calls (+ 1))) :: IO (Either IOException ()))
+    assert (maybe False isLeft result) "occupied status port did not fail before scheduling"
+  invoked <- readIORef calls
+  retainedJobs <- listServiceJobs registry
+  history <- serviceRunHistory registry 10
+  assert (invoked == 0 && retainedJobs == originalJobs && null history) "port collision invoked the scheduler or changed its registry"
+
 http :: Int -> String -> IO BS.ByteString
-http port host = bracket (socket AF_INET Stream defaultProtocol) close $ \client -> do
+http port host = httpRequest port ("GET /api/status HTTP/1.1\r\nHost: " <> host <> "\r\nConnection: close\r\n\r\n")
+
+httpRequest :: Int -> String -> IO BS.ByteString
+httpRequest port request = bracket (socket AF_INET Stream defaultProtocol) close $ \client -> do
   connect client (SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1)))
-  sendAll client (Char8.pack ("GET /api/status HTTP/1.1\r\nHost: " <> host <> "\r\nConnection: close\r\n\r\n"))
+  sendAll client (Char8.pack request)
   let collect acc = do
         chunk <- recv client 65536
         if BS.null chunk then pure acc else collect (acc <> chunk)

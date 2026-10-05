@@ -119,6 +119,8 @@ runTests = do
           ("rubric validation gates emit structured failures", testValidationGate workspace executable),
           ("critique gates reject mismatched evidence without changing unchecked policy", testCritiqueGateIntegrity workspace executable),
           ("refinement is bounded and feeds critiques back", testNormRefinement workspace executable),
+          ("refinement returns the last rejected candidate at its round budget", testRefinementRoundBudget workspace executable),
+          ("refinement propagates generator failures without retry", testRefinementGeneratorFailure workspace executable),
           ("runtime config schema", testRuntimeConfig executable workspace),
           ("JSONL terminal protocol", testProtocolRules),
           ("shared Rust and Haskell protocol conformance vectors", testProtocolConformance workspace),
@@ -145,7 +147,10 @@ runTests = do
           ("Segno trigger manifest is typed and deterministic", testSegnoManifest),
           ("Segno describe publishes an atomic result document", testSegnoDescribe workspace),
           ("Segno execute checkpoints through the generic state plugin", testSegnoExecute workspace executable),
-          ("Segno gate ignores before loading the Clef runtime", testSegnoGate workspace)
+          ("Segno gate ignores before loading the Clef runtime", testSegnoGate workspace),
+          ("Segno schema mismatch requires an explicit migration", testSegnoMissingMigration workspace executable),
+          ("Segno migration errors stop before workflow execution", testSegnoFailedMigration workspace executable),
+          ("Segno migrations preserve explicit Keep and Set semantics", testSegnoMigrationTransitions workspace executable)
         ]
   runTestGroup tests
 
@@ -695,6 +700,55 @@ testNormRefinement workspace executable =
       "native checks validate loci"
       (\case RequirementFailed message -> "invalid norm id, severity, or locus" `Text.isInfixOf` message; _ -> False)
       (runWorkflow runtime (judge (rubric [invalidLocusNorm]) "article"))
+
+testRefinementRoundBudget :: FilePath -> FilePath -> IO ()
+testRefinementRoundBudget workspace executable =
+  forM_ [1, 3] $ \budget ->
+    withRuntime (testConfig workspace executable) $ \runtime -> do
+      calls <- newMVar (0 :: Int)
+      let identity = NormId "native.always-rejected"
+          rejected candidate = violation identity Correctness ("rejected candidate " <> Text.pack (show candidate))
+          selectedNorm :: Norm Int
+          selectedNorm =
+            (norm identity "Every candidate is rejected by this fixture." Correctness)
+              { normCheck = Just (NativeCheck (\candidate -> pure [rejected candidate]))
+              }
+          policy = defaultRefinePolicy {refineMaxRounds = budget, refineAcceptable = null . critiqueViolations}
+          generate _ = do
+            candidate <- liftIO (modifyMVar calls (\previous -> let next = previous + 1 in pure (next, next)))
+            -- Fail promptly if the combinator exceeds its budget, even if a
+            -- regression would otherwise keep generating forever.
+            liftIO $ unless (candidate <= budget) (failTest "refinement generated beyond its round budget")
+            pure candidate
+      (candidate, critique) <- runWorkflow runtime (refineWith defaultNormChecker policy (rubric [selectedNorm]) generate)
+      assertEqual "refinement uses exactly the configured total candidate rounds" budget =<< readMVar calls
+      assertEqual "budget exhaustion returns the final candidate" budget candidate
+      assertEqual
+        "budget exhaustion retains the final rejected critique"
+        (Critique [rejected budget] [identity] [])
+        critique
+      assertEqual "budget exhaustion does not silently accept the candidate" False (refineAcceptable policy critique)
+
+testRefinementGeneratorFailure :: FilePath -> FilePath -> IO ()
+testRefinementGeneratorFailure workspace executable =
+  forM_ [1, 2] $ \failureRound ->
+    withRuntime (testConfig workspace executable) $ \runtime -> do
+      calls <- newMVar (0 :: Int)
+      let identity = NormId "native.generator-failure"
+          selectedNorm :: Norm Int
+          selectedNorm =
+            (norm identity "The initial candidate still needs repair." Correctness)
+              { normCheck = Just (NativeCheck (\_ -> pure [violation identity Correctness "still rejected"]))
+              }
+          failure = RequirementFailed "deliberate generator failure"
+          policy = defaultRefinePolicy {refineMaxRounds = 3, refineAcceptable = null . critiqueViolations}
+          generate _ = do
+            candidate <- liftIO (modifyMVar calls (\previous -> let next = previous + 1 in pure (next, next)))
+            if candidate >= failureRound then liftIO (throwIO failure) else pure candidate
+      outcome <- try (runWorkflow runtime (refineWith defaultNormChecker policy (rubric [selectedNorm]) generate))
+        :: IO (Either WorkflowError (Int, Critique))
+      assertEqual "generator WorkflowError propagates unchanged" (Left failure) outcome
+      assertEqual "generator failure is not treated as a rejected candidate to retry" failureRound =<< readMVar calls
 
 testRuntimeConfig :: FilePath -> FilePath -> IO ()
 testRuntimeConfig executable workspace = do
@@ -1974,8 +2028,140 @@ testSegnoGate workspace = do
         result :: IO Text
     assertEqual "gate rejection becomes Ignore" "ignore" kind
 
+testSegnoMissingMigration :: FilePath -> FilePath -> IO ()
+testSegnoMissingMigration workspace executable =
+  assertSegnoMigrationRejected
+    workspace
+    executable
+    (state (StateKey "window-count") (SchemaVersion 2) (0 :: Int))
+    "stored state schema requires an explicit migration"
+
+testSegnoFailedMigration :: FilePath -> FilePath -> IO ()
+testSegnoFailedMigration workspace executable =
+  assertSegnoMigrationRejected
+    workspace
+    executable
+    (stateWithMigration defaultStateBackend (StateKey "window-count") (SchemaVersion 2) (0 :: Int)
+      (\_ _ -> Left "legacy state cannot be migrated"))
+    "legacy state cannot be migrated"
+
+assertSegnoMigrationRejected :: FilePath -> FilePath -> State Int -> Text -> IO ()
+assertSegnoMigrationRejected workspace executable selectedState reason = do
+  calls <- newMVar (0 :: Int)
+  let selectedTask = segnoMigrationTask selectedState $ \handle -> do
+        liftIO (modifyMVar_ calls (pure . (+ 1)))
+        pure (Complete (KeepState handle) (currentState handle))
+      invocation = segnoInvocationWithState (SchemaVersion 1) (object ["legacy_count" .= (7 :: Int)]) 1
+  (outcome, published) <- runSegnoMigrationFixture workspace executable selectedTask invocation
+  assertEqual "migration failure retains its structured reason" (Left (InvalidSegnoDocument reason)) outcome
+  assertEqual "rejected state never enters the workflow" 0 =<< readMVar calls
+  assertEqual "rejected state does not publish a successful result" Nothing published
+
+testSegnoMigrationTransitions :: FilePath -> FilePath -> IO ()
+testSegnoMigrationTransitions workspace executable =
+  forM_ cases $ \(label, storedVersion, storedValue, shouldSet, expectedValue) -> do
+    observed <- newMVar ([] :: [(Int, Maybe StateRevision)])
+    let selectedState =
+          stateWithMigration defaultStateBackend (StateKey "window-count") (SchemaVersion 2) (0 :: Int) migrate
+        selectedTask = segnoMigrationTask selectedState $ \handle -> do
+          liftIO (modifyMVar_ observed (pure . ((currentState handle, stateRevision handle) :)))
+          let transition = if shouldSet then SetState handle (currentState handle + 1) else KeepState handle
+          pure (Complete transition (currentState handle))
+        invocation = segnoInvocationWithState storedVersion storedValue 1
+        expectedTransition =
+          if shouldSet
+            then object
+              [ "kind" .= ("set" :: Text),
+                "expected_revision" .= ("state-1" :: Text),
+                "schema_version" .= (2 :: Int),
+                "value" .= (expectedValue + 1)
+              ]
+            else object
+              [ "kind" .= ("keep" :: Text),
+                "expected_revision" .= ("state-1" :: Text)
+              ]
+        expectedResult = object
+          [ "api" .= ("agenstro.segno.result/v1" :: Text),
+            "task" .= ("minute-counter" :: Text),
+            "occurrence_id" .= ("occ-minute-1" :: Text),
+            "decision" .= object
+              [ "kind" .= ("complete" :: Text),
+                "state" .= expectedTransition,
+                "output" .= expectedValue
+              ]
+          ]
+    (outcome, published) <- runSegnoMigrationFixture workspace executable selectedTask invocation
+    assertEqual (label <> ": execution succeeds") (Right ()) outcome
+    assertEqual
+      (label <> ": workflow receives the decoded value and original revision exactly once")
+      [(expectedValue, Just (StateRevision "state-1"))]
+      =<< readMVar observed
+    assertEqual (label <> ": only the explicit transition requests persistence") (Just expectedResult) published
+  where
+    cases :: [(String, SchemaVersion, Value, Bool, Int)]
+    cases =
+      [ ("migrated Keep", SchemaVersion 1, object ["legacy_count" .= (7 :: Int)], False, 17),
+        ("migrated Set", SchemaVersion 1, object ["legacy_count" .= (7 :: Int)], True, 17),
+        ("matching schema bypasses migration", SchemaVersion 2, toJSON (9 :: Int), False, 9)
+      ]
+    migrate version value
+      | version /= SchemaVersion 1 = Left "migration must only receive the legacy schema"
+      | otherwise =
+          case parseEither (withObject "legacy state" (.: "legacy_count")) value of
+            Left message -> Left (Text.pack message)
+            Right legacyCount -> Right (legacyCount + 10)
+
+segnoMigrationTask :: State Int -> (StateHandle Int -> Workflow (Decision Int Int)) -> PersistentTask Int Int Int
+segnoMigrationTask selectedState workflow =
+  persistentTask
+    "minute-counter"
+    (triggerSource (TriggerId "each-minute") "time.interval" (object []))
+    selectedState
+    (\_ -> workflow)
+
+runSegnoMigrationFixture :: FilePath -> FilePath -> PersistentTask Int Int Int -> Value -> IO (Either SegnoError (), Maybe Value)
+runSegnoMigrationFixture workspace executable selectedTask invocation = do
+  invocationPath <- temporaryFile workspace "segno-migration-invocation.json"
+  runtimePath <- temporaryFile workspace "segno-migration-runtime.json"
+  resultPath <- vacantTemporaryPath workspace "segno-migration-result.json"
+  let environment =
+        [ ("SEGNO_MODE", "execute"),
+          ("SEGNO_INVOCATION_PATH", invocationPath),
+          ("SEGNO_RESULT_PATH", resultPath),
+          ("TACTUS_RUNTIME_CONFIG", runtimePath)
+        ]
+      -- No state plugin is registered: merely decoding a migrated value must
+      -- not perform a checkpoint or launch a plugin process.
+      runtimeDocument = object
+        [ "api" .= ("clef.runtime/v1" :: Text),
+          "workspace" .= workspace,
+          "default_provider" .= ("unused" :: Text),
+          "providers" .= object ["unused" .= object ["command" .= [executable, "--fake-exit"]]],
+          "effects" .= object [],
+          "plugins" .= object [],
+          "instructions" .= ("" :: Text)
+        ]
+      encodedInvocation = strictEncode invocation
+      cleanup = mapM_ removeIfPresent [invocationPath, runtimePath, resultPath]
+  flip finally cleanup $ do
+    ByteString.writeFile invocationPath encodedInvocation
+    ByteString.writeFile runtimePath (strictEncode runtimeDocument)
+    outcome <- try (withEnvironment environment (runPersistentTask selectedTask))
+    exists <- doesFileExist resultPath
+    published <-
+      if exists
+        then do
+          encoded <- ByteString.readFile resultPath
+          Just <$> either (failTest . ("invalid Segno migration result: " <>)) pure (eitherDecodeStrict' encoded)
+        else pure Nothing
+    assertEqual "migration leaves the original state invocation unchanged" encodedInvocation =<< ByteString.readFile invocationPath
+    pure (outcome, published)
+
 segnoInvocation :: Int -> Int -> Value
-segnoInvocation storedValue payloadValue =
+segnoInvocation storedValue = segnoInvocationWithState (SchemaVersion 2) (toJSON storedValue)
+
+segnoInvocationWithState :: SchemaVersion -> Value -> Int -> Value
+segnoInvocationWithState storedVersion storedValue payloadValue =
   object
     [ "api" .= ("agenstro.segno.invocation/v1" :: Text),
       "task" .= ("minute-counter" :: Text),
@@ -1995,7 +2181,7 @@ segnoInvocation storedValue payloadValue =
         .= object
           [ "key" .= ("window-count" :: Text),
             "revision" .= (Just "state-1" :: Maybe Text),
-            "schema_version" .= (2 :: Int),
+            "schema_version" .= unSchemaVersion storedVersion,
             "value" .= storedValue
           ]
     ]

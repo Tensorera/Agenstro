@@ -1086,6 +1086,63 @@ mod tests {
     }
 
     #[test]
+    fn summary_rename_failure_preserves_events_and_allows_finishing_again() {
+        let temporary = tempdir().expect("temporary directory");
+        let workspace = Workspace::at(temporary.path());
+        let mut journal = RunJournal::create(&workspace).expect("journal");
+        journal
+            .record("plugin.frame", serde_json::json!({"n": 1}))
+            .expect("record event");
+        let original_events = fs::read(journal.event_path()).expect("original events");
+
+        // A directory at the destination makes the real rename fail on both
+        // Unix and Windows without changing permissions or exhausting storage.
+        fs::create_dir(journal.summary_path()).expect("block summary destination");
+        assert!(matches!(
+            journal.finish(outcome()),
+            Err(JournalError::Io(_))
+        ));
+        assert!(journal.summary_path().is_dir());
+        assert_eq!(
+            fs::read(journal.event_path()).expect("events after failed publication"),
+            original_events
+        );
+        let mut entries: Vec<String> = fs::read_dir(journal.run_path())
+            .expect("run directory")
+            .map(|entry| {
+                entry
+                    .expect("run entry")
+                    .file_name()
+                    .into_string()
+                    .expect("fixture filename")
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["events.jsonl".to_owned(), "summary.json".to_owned()],
+            "failed publication left a temporary summary behind"
+        );
+
+        fs::remove_dir(journal.summary_path()).expect("remove fixture obstruction");
+        let summary = journal
+            .finish(outcome())
+            .expect("finish after rename failure");
+        assert_eq!(summary.events_recorded, 1);
+        assert_eq!(summary.outcome.kind, InvocationKind::Succeeded);
+        let persisted: RunSummary =
+            serde_json::from_slice(&fs::read(journal.summary_path()).expect("published summary"))
+                .expect("valid summary JSON");
+        assert_eq!(persisted.run_id, journal.run_id());
+        assert_eq!(persisted.events_recorded, 1);
+        assert_eq!(persisted.outcome.kind, InvocationKind::Succeeded);
+        assert_eq!(
+            fs::read(journal.event_path()).expect("events after successful publication"),
+            original_events
+        );
+    }
+
+    #[test]
     fn degraded_journal_keeps_correlation_without_claiming_persistence() {
         let temporary = tempdir().expect("temporary directory");
         let workspace = Workspace::at(temporary.path());

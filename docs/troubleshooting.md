@@ -2,7 +2,7 @@
 title: Agenstro 0.3 troubleshooting
 status: alpha
 owners: [support]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Clef/Segno Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -138,9 +138,12 @@ registry contains the name.
 
 ## `list`, `check`, and `run` disagree about scripts
 
-`check` considers every `.hs`/`.lhs` source below `.tactus/scripts` by default.
-`run` implicitly selects only names matching `NNN_slug.hs` or
-`NNN_slug.lhs`, ordered by prefix and path. Other modules are helpers.
+`list`, `check`, and `run` use `.tactus/scripts` unless `--scripts-dir` selects
+another source directory. Both `check` and `run` require explicit paths,
+`--all`, or a numeric range. `check --all` includes helper modules;
+`run --all` selects only names matching `NNN_slug.hs` or `NNN_slug.lhs`,
+ordered by prefix and path. The standard `.tactus/segno.hs` organizer is a
+separate explicit selection; it is never included in `run --all`.
 
 ```powershell
 tactus list
@@ -182,17 +185,43 @@ failed Clef or Segno package build usable.
 ## Rust validation uses substantial disk space
 
 The repository's `.cargo/config.toml` redirects Cargo output to the ignored
-`Build/cargo` directory. The Full profile disables incremental output and debug
-symbols for its own build, and it can clean only after a chosen size threshold:
+`Build/cargo` directory. Shared dev/test profiles disable debug symbols and
+compiler incremental output for both direct Cargo commands and quality gates.
+Unchanged dependency builds remain reusable until cleanup; debugging has less
+symbol detail, and edits to a crate no longer reuse its internal incremental
+compilation state.
+
+Every quality profile enforces a **2 GiB (2,147,483,648 bytes, binary)** project
+cache budget on completion, including after failed checks. This is a retained
+cache budget; compilation can temporarily exceed it. The inventory includes
+`Build/cargo`, `Build/cabal`, root `dist-newstyle`, generated sites in
+`Build/site` and `Build/quality/*/site`, Vite caches, and local Node/Python tool
+dependencies, including `Build/feature-checks-venv`. Tool dependencies are
+retained and counted. Compiler output and generated sites are removed as
+needed; quality logs and summaries remain.
+
+The inventory counts file lengths, so disk allocation tools may report a
+different total. If retained tool dependencies alone reach the budget, cleanup
+fails explicitly without deleting them.
 
 ```powershell
-./scripts/quality.ps1 -Profile Full -CleanIfOverGiB 5
+./scripts/build-cache.ps1 -MeasureOnly
+./scripts/build-cache.ps1
+./scripts/quality.ps1 -Profile Clean
 ```
 
-Use `./scripts/quality.ps1 -Profile Clean` for an immediate cleanup. The script
-pins and verifies this checkout's `Build/cargo` target, refuses reparse points,
-and leaves Cargo's shared registry/source cache intact. Package-scoped commands
-are usually sufficient while iterating on Tactus.
+The standalone script prints JSON; `-MeasureOnly` makes no changes, and `Clean`
+forces cleanup even below the budget. Available main executables for the current
+host platform and Cabal source distributions are saved under
+`Build/artifacts/cargo/{debug,release}/`,
+`Build/artifacts/segno/`, and `Build/artifacts/cabal/` before compiler output is
+removed. These deliverables are excluded from the cache budget. Cleanup is
+restricted to known project-local rebuildable directories; global Cargo/Cabal
+caches and installed toolchains remain intact.
+
+Direct `cargo`, `cabal`, or documentation-build commands do not automatically
+enforce the budget; run the cache script afterward. Package-scoped commands are
+usually sufficient while iterating on Tactus.
 
 ## Chinese text or emoji produces a protocol error
 
@@ -378,60 +407,42 @@ There is no general dry-run for arbitrary Haskell `IO`, no authorization layer,
 and no rollback. Use reviewed scripts, fake plugins, and a disposable workspace
 when effects are uncertain.
 
-## `motivo-studio` is missing or cannot open a workspace
+## A Motivo report is missing or stale
 
-The Windows x64 install adds `%LOCALAPPDATA%\Programs\MotivoStudio` to the user
-`PATH`, which an already-open terminal does not inherit. Open a new terminal
-first, then check Motivo and Tactus:
+Current Motivo Studio is an offline HTML report. Open
+`.tactus/motivo/index.html` or a method run's `report.html` in a browser.
+There is no desktop launcher to install. The existing coding agent invokes
+methods and explains the result in the original conversation.
 
-```powershell
-Get-Command motivo-studio,tactus -All
-tactus --version
-tactus studio inspect --root D:\path\to\project
-```
-
-If the launcher is still missing, reinstall from the Agenstro repository root:
+For an uninitialized project, create the workspace and inspect the method
+sources from PowerShell:
 
 ```powershell
-npm --prefix motivo-studio ci
-npm --prefix motivo-studio run install:windows
+tactus init 'D:\work\Project with spaces' --sdk D:\src\Agenstro\clef-sdk
+tactus list --root 'D:\work\Project with spaces' --scripts-dir .tactus/motivoscript
 ```
 
-Do not look for an npm global executable; the command installs
-`motivo-studio.exe` in that fixed per-user application directory. Close Studio
-and run the same `install:windows` command after updating the checkout to repair
-or upgrade it. The uninstaller also refuses to run while Studio is open:
+`init` creates missing assets and preserves existing files. For a missing
+bundled skill or report template, inspect `tactus skills update --dry-run`
+from the project, then apply `tactus skills update`; review any incoming
+candidate for a customized file. Method source upgrades require a separate
+manual comparison; the skill updater does not replace `.tactus/motivoscript`.
 
-```powershell
-npm --prefix motivo-studio run uninstall:windows
-```
+If a method did not produce a report, inspect its terminal output, input path,
+and `.tactus/motivo/runs/<run-id>/` artifacts. A report-template error can indicate
+a damaged `.tactus/skills/motivo/assets/report-template.html`. See
+[method execution](motivo-studio.md) before deciding whether to rerun a method,
+especially one that invokes a provider or experiment.
 
-Motivo `0.3` invokes an external Rust `tactus` executable. If Studio is launched
-outside the environment where Tactus resolves, set `MOTIVO_TACTUS_BIN` to the
-exact executable path before invoking `motivo-studio`. **Open workspace** and a
-command-line workspace both require an initialized `.tactus`; use **Initialize
-folder**. When SDK discovery is not available, initialize from a terminal first:
+Refresh the browser after a method publishes a new snapshot. Check the report's
+generation time and run ID: the page cannot show unrecorded agent activity or
+start execution. Viewing reports requires neither Node.js nor a server.
 
-```powershell
-tactus init D:\path\to\project --sdk D:\path\to\clef-sdk
-```
-
-A moved checkout may require repairing the Clef SDK link. Quote paths that
-contain spaces:
-
-```powershell
-motivo-studio 'D:\work\Project with spaces'
-```
-
-If Motivo is already running, a command with a workspace validates and switches
-that window before focusing it; it does not start a second instance. A
-validation error leaves the existing workspace selected and focuses the same
-window after showing the error.
-
-`partial` run integrity means the trace is still open or the bounded page ended
-before the current file. `corrupt` means Rust rejected a complete trace record;
-Motivo does not guess around it. Run `tactus doctor` and preserve a redacted run
-ID when reporting the defect.
+For independent Tactus diagnostics, use `tactus runs show RUN_ID` or
+`tactus studio events RUN_ID`. An unfinished final event line is `partial`
+only while the journal is open; a closed journal with that tail is `corrupt`.
+See the [Studio integrity contract](reference/studio-control-v1.md#event-pages)
+for page limits and error handling.
 
 ## `segno` is missing or rejects the workspace
 

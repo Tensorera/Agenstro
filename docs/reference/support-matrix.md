@@ -2,7 +2,7 @@
 title: Support matrix
 status: alpha
 owners: [release]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Clef/Segno 0.3.0.0, Tactus 0.3.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -140,10 +140,18 @@ used when a Python plugin such as the optional reference norm checker is
 selected, when MkDocs is built, or for offline Motivo acceptance tests.
 
 The checked-in Cargo configuration directs Rust gate output to ignored
-`Build/cargo`. Warm validation retains that rebuildable tree; use the local
-quality `Clean` profile or its size threshold when disk use matters. Cabal,
-MkDocs, and Motivo's static build likewise use dedicated subdirectories below
-`Build/`.
+`Build/cargo`; dev/test builds share disabled debug symbols and compiler
+incremental output. Cabal, MkDocs, and Motivo's static build likewise use
+dedicated subdirectories below `Build/`. Every local quality profile, including
+failed runs, enforces a default retained project cache budget below 2 GiB
+(2,147,483,648 bytes, binary). Compilation can temporarily exceed it. Project-local
+tool dependencies are retained and counted; compiler output and generated sites
+are cleaned as needed. Logs and summaries remain, and available executables for
+the current host platform and Cabal source distributions are preserved separately
+under `Build/artifacts/`.
+Global Cargo/Cabal caches and toolchains are outside this policy. Direct build
+commands require a subsequent `scripts/build-cache.ps1` invocation to enforce
+the budget; see [build-cache troubleshooting](../troubleshooting.md#rust-validation-uses-substantial-disk-space).
 
 ## Version combination
 

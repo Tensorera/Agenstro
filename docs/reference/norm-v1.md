@@ -2,7 +2,7 @@
 title: Norm catalogue and check result v1
 status: alpha
 owners: [clef]
-last_verified: 2026-09-01
+last_verified: 2026-09-18
 applies_to: "agenstro.norm/v1"
 platforms: [windows, ubuntu]
 ---
@@ -103,8 +103,27 @@ The checker method is `check`:
   "method": "check",
   "params": {
     "artifact": "article.tex",
-    "source": "...",
-    "norms": [{"id": "...", "statement": "...", "severity": "Style", "spec": {}}]
+    "source": "Example\nintegral: dx",
+    "norms": [
+      {
+        "id": "math.notation.upright-differential",
+        "statement": "Use an upright differential operator.",
+        "severity": "Style",
+        "spec": {
+          "kind": "Absence",
+          "specPattern": "\\bd(?=[a-zA-Z]\\b)",
+          "specIgnoreCase": false
+        },
+        "provenance": {"kind": "Authored", "author": "project"}
+      },
+      {
+        "id": "math.style.proof-voice",
+        "statement": "Use a consistent voice in proofs.",
+        "severity": "Style",
+        "guidance": "Use the project's preferred proof voice.",
+        "provenance": {"kind": "Authored", "author": "project"}
+      }
+    ]
   }
 }
 ```
@@ -139,6 +158,12 @@ Its terminal value is:
 `checked` and `unchecked` are required. Checker progress can use
 `norm.checked` events, but only the terminal value is authoritative workflow
 data.
+
+The result's `artifact` must match the request. Every requested norm must
+appear exactly once across the disjoint `checked` and `unchecked` arrays;
+duplicate or foreign identities are rejected. Every violation must cite a
+checked norm and retain that norm's configured severity. Clef validates this
+correspondence before returning a critique.
 
 Line and column coordinates are one-based and inclusive, matching SARIF
 regions. LSP positions are zero-based with an exclusive end and commonly use

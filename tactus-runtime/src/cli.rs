@@ -268,7 +268,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable, redacted projections for Motivo Studio.
+    /// Machine-readable, redacted workspace and run projections for inspection tools.
     Studio {
         /// Read-only Studio query.
         #[command(subcommand)]

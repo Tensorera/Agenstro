@@ -2,7 +2,7 @@
 title: Agenstro public roadmap
 status: alpha
 owners: [release]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Agenstro 0.3"
 platforms: [windows, ubuntu]
 ---
@@ -47,7 +47,7 @@ operate, and extend without enlarging the core:
 3. improve bounded cancellation and process-tree acceptance across platforms;
 4. add plugin author kits and shared conformance vectors for Rust, TypeScript,
    C#, and Haskell;
-5. formalize run-retention and diagnostic export commands;
+5. add diagnostic export and extend the existing run-retention commands;
 6. add supported reconciliation operations for Segno `OutcomeUnknown`; and
 7. evaluate Motivo methods on real tasks and improve report clarity and skill
    discoverability without adding another task client.
@@ -66,9 +66,10 @@ promotion of mined norms is not implied.
 Tactus includes opt-in provider daemon supervision and a localhost stream
 viewer. It distributes the Tactus, Motivo and Segno skills and supports
 `skills update` previews and updates that preserve local modifications.
+Bounded run inspection and dry-run-first archive/GC are available through
+[`tactus runs`](operations.md#run-journal-retention).
 Persistent scheduling remains in Haskell Segno. Further work includes
-packaging, config migration tooling,
-bounded run inspection/retention, provider adapter acceptance, and stronger
+packaging, config migration tooling, diagnostic export, provider adapter acceptance, and stronger
 cross-platform descendant cleanup. Session planner registration and
 `session advance` require an explicit invocation contract before they become
 runtime commands.

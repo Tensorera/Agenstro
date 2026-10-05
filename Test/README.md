@@ -30,6 +30,6 @@ checks without contacting a live provider:
 ./scripts/quality.ps1 -Profile Full
 ```
 
-Generated files never belong under `Test/`. Cargo, Cabal, MkDocs, and Electron
-Forge recreate their repository-level output under the ignored `Build/`
+Generated files never belong under `Test/`. Cargo, Cabal, MkDocs, and the Motivo
+static report build recreate their repository-level output under the ignored `Build/`
 directory.

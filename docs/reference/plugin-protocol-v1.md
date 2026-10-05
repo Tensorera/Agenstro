@@ -2,7 +2,7 @@
 title: Local plugin protocol v1
 status: alpha
 owners: [clef, tactus]
-last_verified: 2026-08-31
+last_verified: 2026-09-18
 applies_to: "agenstro.plugin/v1"
 platforms: [windows, ubuntu]
 ---
@@ -59,13 +59,15 @@ the nested tree; on Unix, a process that deliberately creates a new session can
 escape process-group containment. Local termination cannot prove that a remote
 provider did not already complete work.
 
-Direct Clef process calls also apply hard defaults: a 1 MiB request, 1 MiB
+Clef's `callPlugin`, `invoke`, `perform`, and `call` derive transport limits
+from the runtime configuration. Clef's own defaults are a 1 MiB request, 1 MiB
 JSONL frame, 64 MiB total stdout, 10,000 event frames, 1 MiB retained stderr,
-and a 1,800-second wall-clock deadline. Lower-level embedders can replace these
-as one validated `PluginTransportLimits` value through `callPluginWithLimits`;
-`callPlugin`, `invoke`, `perform`, and `call` use the safe defaults. A direct
-post-spawn limit or deadline failure remains outcome-unknown because external
-work may already have happened.
+and a 3,600-second wall-clock deadline for ordinary plugins and effects.
+Provider calls use the separate 14,400-second outer deadline. Lower-level
+embedders can pass an explicit validated `PluginTransportLimits` value to
+`callPluginWithLimits`; `defaultPluginTransportLimits` has the same ordinary
+plugin defaults. A direct post-spawn limit or deadline failure remains
+outcome-unknown because external work may already have happened.
 
 The workspace-owned Tactus/Clef path normally supplies a 1 MiB request default
 and a 32 MiB frame budget. The frame budget cannot exceed 33,554,432 bytes;
@@ -123,9 +125,10 @@ separately rather than changing the invocation outcome.
 Protocol fields and stderr bytes are not user-facing severity.
 Agenstro-generated user-log entries use only `[state]`, `[info]`, `[warning]`,
 or `[error]` plus bounded natural-language text. Direct compiler/workflow
-output is separate process output; Motivo keeps it, raw plugin stdout/stderr,
-payloads, stable codes, and counters in technical details. Stderr alone never
-means `[error]`.
+output is separate process output. Protocol payloads, stable codes, and
+counters belong in technical diagnostics; Tactus's durable journals use the
+bounded diagnostic projection described below. Stderr alone never means
+`[error]`.
 
 ## Terminal result
 

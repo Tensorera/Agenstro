@@ -211,13 +211,30 @@ external effects.
 
 The checked-in Cargo configuration writes to `Build/cargo`; Cabal, MkDocs, and
 Motivo's static build use sibling directories under the same ignored `Build/` root.
-Keep the Cargo cache during normal iteration; clean it explicitly or after it
-crosses a chosen local threshold:
+Every quality profile finishes by enforcing a project cache budget below
+**2 GiB (2,147,483,648 bytes, binary)**, including after failed checks. Compilation can
+temporarily exceed that budget. Project-local Node/Python tool dependencies
+are retained and counted; Cargo/Cabal output and generated sites are removed
+when necessary. Logs and summaries remain available.
 
 ```powershell
-./scripts/quality.ps1 -Profile Full -CleanIfOverGiB 5
+./scripts/quality.ps1 -Profile Full
 ./scripts/quality.ps1 -Profile Clean
+./scripts/build-cache.ps1 -MeasureOnly
 ```
+
+Available main executables for the current host platform and Cabal source
+distributions are saved under
+`Build/artifacts/cargo/{debug,release}/`, `Build/artifacts/segno/`, and
+`Build/artifacts/cabal/` before compiler output is removed. Those deliverables
+are outside the cache budget. Global Cargo/Cabal caches and installed toolchains
+are not cleaned. See [the quality commands](scripts/README.md) for the standalone
+cleanup command and a smaller budget.
+
+Cargo dev/test profiles share `debug = 0` and `incremental = false`, reducing
+debugger detail and disabling reuse within a changed crate. Unchanged dependency
+builds are still reused until cleanup. Direct build commands do not enforce the
+budget; run `./scripts/build-cache.ps1` after them when needed.
 
 Use package-scoped checks while iterating. Run broader workspace checks only
 when the change actually crosses package boundaries.
@@ -361,8 +378,8 @@ this checkout with:
 ./scripts/install-hooks.ps1
 ```
 
-The pre-push hook runs `Full` and removes only this checkout's `Build/cargo`
-target when it has grown beyond 5 GiB. Cargo's shared download cache is left
-alone. It requires a clean worktree and accepts only the current `HEAD` as a
-non-deletion push source; pre-commit rejects unstaged or untracked source so the
-files tested are the files being committed.
+The pre-push hook runs `Full` with the same default 2 GiB project cache budget.
+Global Cargo/Cabal caches and toolchains are left alone. It requires a clean
+worktree and accepts only the current `HEAD` as a non-deletion push source;
+pre-commit rejects unstaged or untracked source so the files tested are the
+files being committed.

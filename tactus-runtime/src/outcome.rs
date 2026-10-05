@@ -260,6 +260,65 @@ mod tests {
     }
 
     #[test]
+    fn outcome_consistency_checks_terminal_and_exit_combinations() {
+        let terminals = [
+            ("missing", None),
+            (
+                "success",
+                Some(TerminalResult::Success {
+                    value: serde_json::json!({"ok": true}),
+                }),
+            ),
+            ("failure", failed_with("validation_failed").terminal),
+        ];
+        let exit_codes = [None, Some(0), Some(1)];
+        // Rows are missing/success/failure terminal; columns are absent/zero/
+        // nonzero exit code. A reported plugin failure remains authoritative
+        // for every exit code, while process failure requires the contradicted
+        // success terminal and cannot have a zero exit code.
+        for (kind, accepted) in [
+            (
+                InvocationKind::Succeeded,
+                [
+                    [false, false, false],
+                    [false, true, false],
+                    [false, false, false],
+                ],
+            ),
+            (
+                InvocationKind::PluginFailed,
+                [
+                    [false, false, false],
+                    [false, false, false],
+                    [true, true, true],
+                ],
+            ),
+            (
+                InvocationKind::ProcessFailed,
+                [
+                    [false, false, false],
+                    [true, false, true],
+                    [false, false, false],
+                ],
+            ),
+        ] {
+            for ((terminal_name, terminal), accepted_exits) in terminals.iter().zip(accepted) {
+                for (exit_code, should_accept) in exit_codes.into_iter().zip(accepted_exits) {
+                    let mut value = failed_with("validation_failed");
+                    value.kind = kind;
+                    value.terminal = terminal.clone();
+                    value.exit_code = exit_code;
+                    assert_eq!(
+                        validate_outcome_consistency(&value).is_ok(),
+                        should_accept,
+                        "kind={kind:?}, terminal={terminal_name}, exit_code={exit_code:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn diagnostic_contains_only_typed_progress_and_safe_context() {
         let diagnostic = OutcomeUnknownDiagnostic::from_outcome(
             OutcomeContext {

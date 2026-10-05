@@ -85,11 +85,13 @@ executable segno
 test-suite segno-flow-tests
   import: warnings, dependencies
   type: exitcode-stdio-1.0
-  hs-source-dirs: haskell/test
+  hs-source-dirs: haskell/test, haskell/app
   main-is: Main.hs
   other-modules: ServiceTests
+                 Segno.Cli
   ghc-options: -threaded
   build-depends:
+      optparse-applicative >=0.18 && <0.20,
       segno-flow
   if !os(windows)
     build-depends: unix >=2.8 && <2.9

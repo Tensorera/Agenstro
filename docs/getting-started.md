@@ -2,7 +2,7 @@
 title: Start with your coding agent
 status: alpha
 owners: [documentation]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Clef Haskell 0.3.0.0 and Tactus Rust 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -127,7 +127,7 @@ When a repeatable action needs a Haskell entry, the main agent follows the
 Tactus skill and writes it under `.tactus/scripts`. This small example makes no
 model call. Save it as `.tactus/scripts/010_offline.hs`:
 
-```haskell
+```haskell compile
 {-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
@@ -137,8 +137,7 @@ main :: IO ()
 main = do
   result <- runTactus $ do
     value <- pure (20 :: Int)
-    requireBecause "arithmetic invariant" (value + 22 == 42)
-    pure (value + 22)
+    requireBecause "arithmetic invariant" (== 42) (value + 22)
   print result
 ```
 

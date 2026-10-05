@@ -1,4 +1,4 @@
-//! Bounded, redacted projections for desktop and other control-plane clients.
+//! Bounded, redacted projections for workspace and run inspection clients.
 //!
 //! The on-disk workspace and trace layouts remain runtime implementation
 //! details.  Consumers use these versioned DTOs instead of parsing TOML,
@@ -28,7 +28,7 @@ use crate::{
 
 /// Version of the machine-readable control envelope.
 pub const CONTROL_API: &str = "tactus.control/v1";
-/// Version of Motivo's read-only runtime projection.
+/// Version of the read-only Studio runtime projection.
 pub const STUDIO_API: &str = "agenstro.studio/v1";
 
 const MAX_RUN_LIMIT: usize = 200;
@@ -578,7 +578,8 @@ fn recent_runs(workspace: &Workspace, limit: usize) -> Result<Vec<StudioRun>, St
                         StudioError::Json(_)
                         | StudioError::CorruptTrace(_)
                         | StudioError::BudgetExceeded(_)
-                        | StudioError::UnsafeTracePath(_),
+                        | StudioError::UnsafeTracePath(_)
+                        | StudioError::Io(_),
                     ) => {
                         let mut run = project_run(&path, &run_id, None);
                         run.state = "corrupt".to_owned();
@@ -588,6 +589,11 @@ fn recent_runs(workspace: &Workspace, limit: usize) -> Result<Vec<StudioRun>, St
                     Err(error) => Err(error),
                 },
                 Ok(false) | Err(StudioError::UnsafeTracePath(_)) => Ok(project_unsafe_run(&run_id)),
+                Err(StudioError::Io(_)) => {
+                    let mut run = project_unsafe_run(&run_id);
+                    run.label = "Unreadable run journal".to_owned();
+                    Ok(run)
+                }
                 Err(error) => Err(error),
             },
         )
@@ -1295,6 +1301,79 @@ mod tests {
             snapshot.runs[0].integrity,
             StudioIntegrity::Corrupt
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_run_does_not_hide_healthy_runs_or_workspace_data() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempdir().expect("temporary");
+        let sdk = temporary.path().join("clef-sdk");
+        fs::create_dir(&sdk).expect("sdk");
+        fs::write(sdk.join("clef-sdk.cabal"), "name: clef-sdk\n").expect("manifest");
+        let project = temporary.path().join("project");
+        let workspace = initialize_workspace(&project, Some(&sdk))
+            .expect("workspace")
+            .workspace;
+        let mut journal = RunJournal::create(&workspace).expect("healthy journal");
+        journal
+            .record("fixture.started", Value::Null)
+            .expect("event");
+        let healthy_run_id = journal.run_id().to_owned();
+        journal.finish(outcome()).expect("healthy summary");
+        drop(journal);
+        let unreadable_run_id = "run-9999999999999-1-0";
+        let run_path = workspace.runs_path.join(unreadable_run_id);
+        fs::create_dir(&run_path).expect("unreadable run");
+        let summary_path = run_path.join("summary.json");
+        fs::write(&summary_path, b"not-json\n").expect("summary");
+        fs::write(run_path.join("events.jsonl"), b"not-json\n").expect("events");
+
+        for denied_path in [&summary_path, &run_path] {
+            let permissions = fs::metadata(denied_path).expect("metadata").permissions();
+            fs::set_permissions(denied_path, fs::Permissions::from_mode(0o000))
+                .expect("deny access");
+            let denied = File::open(&summary_path);
+            let snapshot = inspect(&project, 10);
+            fs::set_permissions(denied_path, permissions).expect("restore permissions");
+            let Err(error) = denied else {
+                // Privileged users may bypass Unix mode bits.
+                continue;
+            };
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            let snapshot = snapshot.expect("individual unreadable run remains projectable");
+            assert_eq!(snapshot.workspace.name, "project");
+            assert!(!snapshot.health.checks.is_empty());
+            assert_eq!(snapshot.runs.len(), 2);
+            let unreadable = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == unreadable_run_id)
+                .expect("unreadable run projection");
+            assert_eq!(unreadable.state, "corrupt");
+            assert!(matches!(unreadable.integrity, StudioIntegrity::Corrupt));
+            let healthy = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == healthy_run_id)
+                .expect("healthy run projection");
+            assert_eq!(healthy.state, "succeeded");
+            assert!(matches!(healthy.integrity, StudioIntegrity::Ok));
+        }
+
+        let permissions = fs::metadata(&workspace.runs_path)
+            .expect("runs metadata")
+            .permissions();
+        fs::set_permissions(&workspace.runs_path, fs::Permissions::from_mode(0o000))
+            .expect("deny runs access");
+        let denied = fs::read_dir(&workspace.runs_path);
+        let snapshot = inspect(&project, 10);
+        fs::set_permissions(&workspace.runs_path, permissions).expect("restore runs permissions");
+        if let Err(error) = denied {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(matches!(snapshot, Err(StudioError::Io(_))));
+        }
     }
 
     fn assert_linked_run_is_not_read(project: &Path, run_id: &str) {

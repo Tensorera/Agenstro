@@ -2,7 +2,7 @@
 title: Agenstro 0.3 architecture
 status: alpha
 owners: [architecture]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Clef Haskell 0.3.0.0, Tactus Rust 0.3.0, Segno Haskell 0.3.0.0, and Motivo Studio 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -203,6 +203,7 @@ one occurrence; it does not schedule or persist lifecycle state.
   skills/
     tactus/
     motivo/
+    segno/
   runs/
   sessions/
 ```

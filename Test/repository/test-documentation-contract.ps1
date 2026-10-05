@@ -9,14 +9,25 @@ $publishedFiles = @(
     "clef-sdk/README.md",
     "tactus-runtime/README.md",
     "motivo-studio/README.md",
-    "segno-flow/README.md"
+    "segno-flow/README.md",
+    "clef-sdk/MIGRATION.md",
+    "scripts/README.md",
+    "Test/README.md"
 ) + @(
-    Get-ChildItem -LiteralPath (Join-Path $repositoryRoot "docs") -Recurse -File -Filter "*.md" |
-        ForEach-Object {
-            [System.IO.Path]::GetRelativePath($repositoryRoot, $_.FullName).Replace('\', '/')
-        } |
-        Sort-Object
-)
+    foreach ($directory in @("docs", "skills")) {
+        Get-ChildItem -LiteralPath (Join-Path $repositoryRoot $directory) -Recurse -File -Filter "*.md"
+    }
+    foreach ($directory in @("plugins", "examples", "segno-flow/examples")) {
+        Get-ChildItem -LiteralPath (Join-Path $repositoryRoot $directory) -Recurse -File -Filter "README.md"
+    }
+) | ForEach-Object {
+    if ($_ -is [System.IO.FileInfo]) {
+        [System.IO.Path]::GetRelativePath($repositoryRoot, $_.FullName).Replace('\', '/')
+    }
+    else {
+        $_
+    }
+} | Sort-Object -Unique
 
 function Assert-Contract {
     param(

@@ -345,3 +345,142 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_params() -> Map<String, Value> {
+        json!({"run_id":"run-1", "sample_id":"sample_1", "argv":["fixture-command"]})
+            .as_object()
+            .expect("fixture object")
+            .clone()
+    }
+
+    fn assert_invalid(params: Map<String, Value>, scenario: &str) {
+        let error = RunParams::parse(params).expect_err(scenario);
+        assert_eq!(error.code, "invalid_params", "{scenario}: {error:?}");
+    }
+
+    #[test]
+    fn timeout_defaults_and_exact_bounds_are_validated_without_execution() {
+        let defaults = RunParams::parse(valid_params()).expect("default timeout");
+        assert_eq!(defaults.timeout_seconds, 600);
+        for seconds in [1, 600] {
+            let mut params = valid_params();
+            params.insert("timeout_seconds".into(), json!(seconds));
+            assert_eq!(RunParams::parse(params).unwrap().timeout_seconds, seconds);
+        }
+        for invalid in [
+            json!(0),
+            json!(601),
+            json!(-1),
+            json!(1.5),
+            json!("1"),
+            Value::Null,
+        ] {
+            let mut params = valid_params();
+            params.insert("timeout_seconds".into(), invalid.clone());
+            assert_invalid(params, &format!("timeout {invalid}"));
+        }
+    }
+
+    #[test]
+    fn both_identities_enforce_ascii_and_exact_length_boundaries() {
+        for field in ["run_id", "sample_id"] {
+            for accepted in ["a".to_owned(), "A0_-".to_owned(), "z".repeat(100)] {
+                let mut params = valid_params();
+                params.insert(field.into(), json!(accepted));
+                let parsed = RunParams::parse(params).expect("valid identity");
+                let actual = if field == "run_id" {
+                    parsed.run_id
+                } else {
+                    parsed.sample_id
+                };
+                assert_eq!(actual, accepted);
+            }
+            for rejected in [
+                "".to_owned(),
+                "z".repeat(101),
+                "é".into(),
+                "../outside".into(),
+                "a b".into(),
+                "a\0b".into(),
+            ] {
+                let mut params = valid_params();
+                params.insert(field.into(), json!(rejected));
+                assert_invalid(params, &format!("{field} {rejected:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn argv_enforces_count_executable_and_nul_boundaries() {
+        for count in [1, 256] {
+            let mut params = valid_params();
+            params.insert("argv".into(), json!(vec!["fixture-command"; count]));
+            assert_eq!(RunParams::parse(params).unwrap().argv.len(), count);
+        }
+        for rejected in [
+            Vec::<String>::new(),
+            vec!["arg".to_owned(); 257],
+            vec!["".into()],
+            vec!["bad\0command".into()],
+            vec!["fixture-command".into(), "bad\0argument".into()],
+        ] {
+            let mut params = valid_params();
+            params.insert("argv".into(), json!(rejected));
+            assert_invalid(params, &format!("argv {rejected:?}"));
+        }
+    }
+
+    #[test]
+    fn arguments_remain_literal_including_empty_non_executable_arguments() {
+        let argv = vec![
+            "fixture-command",
+            "",
+            "two words",
+            "$(must-not-run)",
+            ";",
+            "中文",
+        ];
+        let mut params = valid_params();
+        params.insert("argv".into(), json!(argv));
+        assert_eq!(RunParams::parse(params).unwrap().argv, argv);
+    }
+
+    #[test]
+    fn workspace_is_optional_but_rejects_empty_and_nul_paths() {
+        assert_eq!(RunParams::parse(valid_params()).unwrap().workspace, None);
+        let mut params = valid_params();
+        params.insert("workspace".into(), json!("directory with spaces/中文"));
+        assert_eq!(
+            RunParams::parse(params).unwrap().workspace.as_deref(),
+            Some("directory with spaces/中文")
+        );
+        for rejected in ["", "a\0b"] {
+            let mut params = valid_params();
+            params.insert("workspace".into(), json!(rejected));
+            assert_invalid(params, &format!("workspace {rejected:?}"));
+        }
+    }
+
+    #[test]
+    fn unsupported_options_unknown_fields_and_wrong_shapes_are_rejected() {
+        let mut empty_options = valid_params();
+        empty_options.insert("options".into(), json!({}));
+        assert!(RunParams::parse(empty_options).unwrap().options.is_empty());
+        for (field, value) in [
+            ("options", json!({"network":true})),
+            ("unknown", json!(true)),
+            ("argv", json!("fixture-command")),
+            ("argv", json!(["fixture-command", 7])),
+            ("run_id", json!(7)),
+            ("workspace", json!(7)),
+        ] {
+            let mut params = valid_params();
+            params.insert(field.into(), value.clone());
+            assert_invalid(params, &format!("{field}: {value}"));
+        }
+    }
+}

@@ -2,7 +2,7 @@
 title: Configure coding-agent providers
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "tactus-runtime provider adapters 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -232,7 +232,7 @@ explicit.
 
 ## Adapter options
 
-All three built-ins recognize these option keys while retaining an open option
+All four built-ins recognize these option keys while retaining an open option
 object for forward compatibility:
 
 ```toml

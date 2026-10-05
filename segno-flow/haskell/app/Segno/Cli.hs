@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Segno.Cli (main) where
+module Segno.Cli (main, Command (..), ServiceCommand (..), options) where
 
 import Control.Exception (SomeException, displayException)
 import Segno.Internal.Exception (trySynchronous)
@@ -143,7 +143,7 @@ serviceParser :: Parser Command
 serviceParser = Service
   <$> optional (strOption (long "registry" <> metavar "PATH" <> help "SQLite registry path; defaults to SEGNO_REGISTRY or platform user data"))
   <*> hsubparser
-    ( command "register" (info (ServiceRegister <$> taskName <*> rootOption <*> everyOption <*> taskTimeoutOption) (progDesc "Register .tactus/segno.hs; first invocation is immediately due"))
+    ( command "register" (info (ServiceRegister <$> taskName <*> rootOption <*> everyOption <*> taskTimeoutOption 1800) (progDesc "Register .tactus/segno.hs; first invocation is immediately due"))
       <> command "list" (info (ServiceList <$> jsonOption) (progDesc "List registered workspace schedules"))
       <> command "status" (info (ServiceStatus <$> jsonOption <*> option boundedLimitReader (long "limit" <> value 100 <> metavar "N")) (progDesc "Show registered tasks and recent invocation results"))
       <> command "once" (info (pure ServiceOnce) (progDesc "Recover expired leases and run due workspace tasks once"))
@@ -156,8 +156,8 @@ serviceParser = Service
     everyOption = option (boundedReader "every-seconds" 1 31536000) (long "every-seconds" <> metavar "SECONDS" <> help "Required interval between scheduled invocations")
 
 boundedReader :: String -> Int -> Int -> ReadM Int
-boundedReader label minimumValue maximumValue = eitherReader $ \encoded -> case reads encoded of
-  [(number, "")] | number >= minimumValue && number <= maximumValue -> Right number
+boundedReader label minimumValue maximumValue = eitherReader $ \encoded -> case reads encoded :: [(Integer, String)] of
+  [(number, "")] | number >= toInteger minimumValue && number <= toInteger maximumValue -> Right (fromInteger number)
   _ -> Left (label <> " must be in " <> show minimumValue <> ".." <> show maximumValue)
 
 rootOption :: Parser FilePath
@@ -169,13 +169,13 @@ sdkOption = optional (strOption (long "sdk" <> metavar "PATH" <> help "Directory
 jsonOption :: Parser Bool
 jsonOption = switch (long "json" <> help "Emit machine-readable JSON")
 
-taskTimeoutOption :: Parser Int
-taskTimeoutOption =
+taskTimeoutOption :: Int -> Parser Int
+taskTimeoutOption defaultSeconds =
   option
     taskTimeoutReader
     ( long "task-timeout-seconds"
         <> metavar "SECONDS"
-        <> value 1800
+        <> value defaultSeconds
         <> help "Per Tactus build/run phase timeout (1..604800 seconds)"
     )
 
@@ -188,20 +188,20 @@ installParser =
     <$> rootOption
     <*> strArgument (metavar "SCRIPT" <> help "Haskell entry point inside the workspace")
     <*> sdkOption
-    <*> taskTimeoutOption
+    <*> taskTimeoutOption (driverTaskTimeoutSeconds defaultDriverEnvironment)
 
 listParser :: Parser Command
 listParser = List <$> rootOption <*> jsonOption
 
 onceParser :: Parser Command
-onceParser = Once <$> rootOption <*> jsonOption <*> taskTimeoutOption
+onceParser = Once <$> rootOption <*> jsonOption <*> taskTimeoutOption (driverTaskTimeoutSeconds defaultDriverEnvironment)
 
 driverParser :: Parser Command
 driverParser =
     Driver
     <$> rootOption
     <*> (realToFrac <$> option auto (long "poll-seconds" <> metavar "SECONDS" <> value (1 :: Double) <> help "Maximum idle wait between polls"))
-    <*> taskTimeoutOption
+    <*> taskTimeoutOption (driverTaskTimeoutSeconds defaultDriverEnvironment)
 
 statusParser :: Parser Command
 statusParser =
@@ -231,13 +231,13 @@ timePluginParser =
     parseTimeKind _ = Left "expected interval or cron"
 
 boundedLimitReader :: ReadM Int
-boundedLimitReader = eitherReader $ \encoded -> case reads encoded of
-  [(number, "")] | number >= 1 && number <= (1000 :: Int) -> Right number
+boundedLimitReader = eitherReader $ \encoded -> case reads encoded :: [(Integer, String)] of
+  [(number, "")] | number >= 1 && number <= 1000 -> Right (fromInteger number)
   _ -> Left "limit must be between 1 and 1000"
 
 taskTimeoutReader :: ReadM Int
-taskTimeoutReader = eitherReader $ \encoded -> case reads encoded of
-  [(number, "")] | number >= 1 && number <= (604800 :: Int) -> Right number
+taskTimeoutReader = eitherReader $ \encoded -> case reads encoded :: [(Integer, String)] of
+  [(number, "")] | number >= 1 && number <= 604800 -> Right (fromInteger number)
   _ -> Left "task timeout must be between 1 and 604800 seconds"
 
 execute :: Command -> IO ()

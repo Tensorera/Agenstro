@@ -2,7 +2,7 @@
 title: Tactus workspace and configuration
 status: alpha
 owners: [tactus]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "tactus-runtime 0.3.0"
 platforms: [windows, ubuntu]
 ---
@@ -55,6 +55,11 @@ for reproducible setup and rerun `doctor` after moving either checkout.
   cabal.project
   PROMPT.md
   scripts/
+  motivoscript/
+  motivo/
+    index.html
+    runs/
+  motivotest/
   runs/
   sessions/
   skills/
@@ -67,6 +72,7 @@ for reproducible setup and rerun `doctor` after moving either checkout.
   skill-updates/
   path-effect/
   dist-newstyle/
+  segno.hs
   segno/
 ```
 
@@ -76,6 +82,9 @@ for reproducible setup and rerun `doctor` after moving either checkout.
 | `cabal.project` | Init-generated link to Clef; repair it after moving the SDK |
 | `PROMPT.md` | Project-owned instructions included in workflow-generation requests |
 | `scripts/` | Project-owned Haskell entries and helper modules |
+| `motivoscript/` | Init-installed Motivo method templates and helpers; existing project edits are preserved |
+| `motivo/` | Method inputs, evidence, and generated HTML reports; may contain business material |
+| `motivotest/` | Project experiment fixtures and results, organized by run and sample |
 | `skills/{tactus,motivo,segno}/` | Installed agent instructions, references and assets; preserve local customizations |
 | `skills-manifest.json` | Runtime-owned hashes used to recognize unchanged installed skill files |
 | `skill-updates/` | Incoming bundled skill versions preserved for comparison with local edits |
@@ -83,16 +92,22 @@ for reproducible setup and rerun `doctor` after moving either checkout.
 | `sessions/` | Runtime-owned current elicitation state and append-only decision evidence |
 | `path-effect/` | Runtime-owned snapshot/observation tokens |
 | `dist-newstyle/` | Rebuildable Cabal output |
+| `segno.hs` | Project-owned, explicit-only timestamp organizer for the machine-local service; supplied separately from Tactus initialization |
 | `segno/` | Segno-owned job, trigger, lifecycle, and business-state data |
 
+The optional `runtime_instructions` file is also project-owned; its location
+comes from configuration and need not be below `.tactus`.
+
 Do not edit runtime-owned state while a command is active. Back up project-owned
-files, session evidence, and Segno databases before deleting `.tactus`; see
+files, Motivo and session evidence, and Segno databases before deleting `.tactus`; see
 [Workspace operations](operations.md).
 
 `sessions/` is additive for existing workspaces: `session list` returns an
 empty list when the directory has not been created yet, while a later
-idempotent `tactus init` creates it. Motivo and other clients use
+idempotent `tactus init` creates it. Session clients use
 `tactus session list/show/answer`; they do not read or write this directory.
+Current Motivo methods use the coding-agent conversation and offline reports,
+without calling the session API.
 See the [session control API](reference/session-control-v1.md).
 
 The three skills have separate responsibilities: Tactus covers workflow
@@ -344,4 +359,6 @@ tactus list
 
 `runtime-json` contains resolved business-task instructions and command paths. Use it
 for local diagnosis; do not commit or paste it without reviewing sensitive
-content. Motivo uses `tactus studio inspect` instead of reading this document.
+content. Machine consumers needing a redacted workspace view can use
+`tactus studio inspect`. Current Motivo HTML reports display method-generated
+snapshots and do not call that API.

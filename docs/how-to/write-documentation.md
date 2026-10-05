@@ -30,9 +30,11 @@ platforms: [windows, ubuntu]
 - `applies_to` names the contract, component, or version range the page covers.
 - `platforms` uses `windows`, `ubuntu`, or `all`.
 
-The site index, ADRs, and this documentation-authoring guide are structural
-pages with an explicit metadata exemption. ADR status remains part of the ADR
-content rather than mutable front matter.
+The site index, this documentation-authoring guide, and ADRs 0003–0006 have
+explicit metadata exemptions in the contract check. Later ADRs include the
+same front matter as other pages; their decision status also remains in the
+ADR content. New pages require metadata unless the contract explicitly exempts
+them.
 
 ## Choose one document type
 
@@ -98,13 +100,23 @@ From the repository root:
 ./scripts/quality.ps1 -Profile Full
 ```
 
-For a documentation-only iteration, run the two underlying checks directly:
+For a documentation-only iteration, run the underlying checks directly:
 
 ```powershell
 python -m mkdocs build --strict
 ./Test/repository/test-documentation-contract.ps1
+./Test/repository/test-clef-documentation-examples.ps1
 ```
 
 The build must contain every current page in navigation. The contract discovers
 every Markdown page under `docs/` and validates its metadata, canonical claims,
-and local links, so a newly added page cannot silently bypass the schema.
+and local links. It also checks published skills and component, plugin, example,
+and contributor README files. Historical test fixtures are not published guides.
+
+Mark self-contained Haskell examples with a `haskell compile` code fence. The
+example check discovers those fences throughout `docs/`, type-checks complete
+`module Main` programs verbatim, and wraps declaration-only snippets with
+`import Clef` and an empty `main`. Both `clef-sdk` and `segno-flow` are available.
+Build the packages first with `cabal build --builddir=Build/cabal all --enable-tests`.
+Compilation makes no model calls; also run model-free tutorial commands when
+changing their promised output or setup steps.

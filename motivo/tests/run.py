@@ -63,6 +63,13 @@ if sys.argv[1]=="forbidden":
     raise SystemExit("The implicit default provider was invoked")
 if sys.argv[1]=="provider":
     value={"text":"Independent evidence was returned without mandatory headings. <script>motivo_attack()</script>"}
+elif sys.argv[1]=="effect" and params["run_id"].startswith("probe-status-"):
+    assert request["method"]=="run"
+    cases=json.loads(pathlib.Path(__file__).with_name("probe-status-fixtures.json").read_text(encoding="utf-8"))
+    assert params["argv"]==cases["argv"]
+    assert params["sample_id"]=="sample-001"
+    assert params["timeout_seconds"]==7
+    value=cases["results"][params["run_id"]]
 else:
     assert request["method"]=="run"
     if params["run_id"]=="probe-error":
@@ -180,6 +187,7 @@ command = [{python}, {fixture_literal}, "effect"]
         assert probe["provider_error"] is None
         assert "## Experiment observation" in (runs / "probe-case/report.md").read_text(encoding="utf-8")
         assert "<h2>Experiment observation</h2>" in (runs / "probe-case/report.html").read_text(encoding="utf-8")
+        assert '<p class="status status-experiment-failed">experiment-failed</p>' in (runs / "probe-case/report.html").read_text(encoding="utf-8")
         assert "artifacts/experiment.json" in probe["artifacts"]
         calls = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
         assert [call["mode"] for call in calls] == ["provider", "effect"]
@@ -238,24 +246,31 @@ This is a real section outside the fences.
 ## Evidence
 An unclosed block keeps the remaining headings as code.
 """
-        note.write_text(fenced_note, encoding="utf-8")
-        run_method("analyze", "fenced-headings")
-        fenced = runs / "fenced-headings"
-        fenced_record = json.loads((fenced / "run.json").read_text(encoding="utf-8"))
-        assert "Evidence" not in fenced_record["missing_sections"]
-        assert "Local reflection" not in fenced_record["missing_sections"]
-        assert (fenced / "artifacts/submitted-notes.md").read_text(encoding="utf-8") == fenced_note
-        fenced_html = (fenced / "report.html").read_text(encoding="utf-8")
-        submitted_html = fenced_html.split('<section class="submitted-material">', 1)[1].split("</section>", 1)[0]
-        code_blocks = [unescape(code) for code in re.findall(r"<pre><code>(.*?)</code></pre>", submitted_html, re.S)]
-        assert len(code_blocks) == 5, code_blocks
-        assert all(block.startswith("## Evidence\n") for block in code_blocks)
-        assert "```\n~~~\n" in code_blocks[1]
-        assert "~~~not-a-closing-fence\n" in code_blocks[3]
-        assert code_blocks[4].endswith("An unclosed block keeps the remaining headings as code.\n")
-        assert "<h2>Local reflection</h2>" in submitted_html
-        assert submitted_html.count("<h2>Evidence</h2>") == 1
-        print("PASS: section extraction and HTML share tilde, indented, variable-length and unclosed code fence boundaries")
+        for line_endings, source in [
+            ("lf", fenced_note),
+            ("crlf", fenced_note.replace("\n", "\r\n")),
+            ("mixed", "".join(line + ("\r\n" if index % 2 else "\n")
+                              for index, line in enumerate(fenced_note.splitlines()))),
+        ]:
+            note.write_bytes(source.encode("utf-8"))
+            run_id = f"fenced-headings-{line_endings}"
+            run_method("analyze", run_id)
+            fenced = runs / run_id
+            fenced_record = json.loads((fenced / "run.json").read_text(encoding="utf-8"))
+            assert "Evidence" not in fenced_record["missing_sections"], line_endings
+            assert "Local reflection" not in fenced_record["missing_sections"], line_endings
+            assert (fenced / "artifacts/submitted-notes.md").read_bytes() == source.encode("utf-8")
+            fenced_html = (fenced / "report.html").read_bytes().decode("utf-8")
+            submitted_html = fenced_html.split('<section class="submitted-material">', 1)[1].split("</section>", 1)[0]
+            code_blocks = [unescape(code) for code in re.findall(r"<pre><code>(.*?)</code></pre>", submitted_html, re.S)]
+            assert len(code_blocks) == 5, (line_endings, code_blocks)
+            assert all(block.startswith("## Evidence\n") for block in code_blocks)
+            assert "```\n~~~\n" in code_blocks[1]
+            assert "~~~not-a-closing-fence\n" in code_blocks[3]
+            assert code_blocks[4].endswith("An unclosed block keeps the remaining headings as code.\n")
+            assert "<h2>Local reflection</h2>" in submitted_html
+            assert submitted_html.count("<h2>Evidence</h2>") == 1
+        print("PASS: LF, CRLF and mixed notes share code fence boundaries in sections and HTML while preserving source bytes")
 
         # Custom IDs have no temporal meaning. More than 2,000 lexically later
         # old directories must not hide the fresh aaa-current method run.
@@ -296,6 +311,51 @@ Does the report preserve wrapped reflection answers?
         assert 'runs/zz-old-0003/report.html' not in current_index
         print("PASS: multiline reflections retain every answer and current custom IDs remain visible beyond 2,000 older names")
         print("PASS: index sorts actual fractional times, uses stable ID ties and places invalid timestamps last")
+
+        # Component checks through the existing entrypoint: probeStatus is not
+        # exported. The effect returns fixed JSON and never executes its argv.
+        # The existing probe-case above already covers exited/nonzero.
+        status_cases = [
+            ("exited-zero", {"status": "exited", "exit_code": 0}, "experiment-passed"),
+            ("timed-out", {"status": "timed_out"}, "timed-out"),
+            ("cancelled", {"status": "cancelled"}, "cancelled"),
+            ("missing-exit-code", {"status": "exited"}, "needs-check"),
+            ("unknown-status", {"status": "unexpected", "exit_code": 0}, "needs-check"),
+            ("null-result", None, "needs-check"),
+        ]
+        unexpected_experiment = Path(temporary) / "unexpected-experiment.txt"
+        experiment_argv = [
+            sys.executable, "-c",
+            "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('unexpected experiment', encoding='utf-8')",
+            str(unexpected_experiment),
+        ]
+        fixture.with_name("probe-status-fixtures.json").write_text(json.dumps({
+            "argv": experiment_argv,
+            "results": {f"probe-status-{case}": result for case, result, _ in status_cases},
+        }), encoding="utf-8")
+        calls_before = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
+        provider_calls_before = [call for call in calls_before if call["mode"] == "provider"]
+        assert not unexpected_experiment.exists()
+        for number, (case, result, expected_status) in enumerate(status_cases, start=1):
+            run_id = f"probe-status-{case}"
+            run_method("probe", run_id, ["--timeout-seconds", "7", "--", *experiment_argv])
+            directory = runs / run_id
+            record = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+            html = (directory / "report.html").read_text(encoding="utf-8")
+            assert record["status"] == expected_status, case
+            assert f'<p class="status status-{expected_status}">{expected_status}</p>' in html, case
+            assert record["experiment"] == result, case
+            assert record["requested_provider"] is None and record["provider_error"] is None, case
+            assert json.loads((directory / "artifacts/experiment.json").read_text(encoding="utf-8")) == result, case
+            calls = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()]
+            assert calls[:len(calls_before)] == calls_before, case
+            assert len(calls) == len(calls_before) + number, case
+            assert [call["mode"] for call in calls[len(calls_before):]] == ["effect"] * number, case
+            assert [call for call in calls if call["mode"] == "provider"] == provider_calls_before, case
+            assert calls[-1]["params"]["run_id"] == run_id, case
+            assert calls[-1]["params"]["argv"] == experiment_argv, case
+            assert not unexpected_experiment.exists(), f"{case}: experiment argv was executed"
+        print("PASS: probe status fixtures agree in JSON and HTML without additional provider calls or experiment execution")
     print("Motivo template checks passed (no live model calls).")
 
 

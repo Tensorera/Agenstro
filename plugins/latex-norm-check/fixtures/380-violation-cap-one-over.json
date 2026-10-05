@@ -1,0 +1,18 @@
+{
+  "name": "380-violation-cap-one-over",
+  "request": {
+    "api": "agenstro.plugin/v1", "id": "cap-51", "method": "check",
+    "params": {
+      "artifact": "article.tex", "source": "",
+      "norms": [{"id": "style.no-x", "statement": "Do not use x.", "severity": "Style", "spec": {"kind": "Absence", "specPattern": "x", "specIgnoreCase": false}}]
+    }
+  },
+  "requestRepeats": [{"path": ["params", "source"], "text": "x\n", "count": 51}],
+  "expect": {
+    "ok": true, "exitCode": 0,
+    "violationCount": 50, "checked": ["style.no-x"], "unchecked": [],
+    "firstLocus": {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1},
+    "lastLocus": {"startLine": 50, "startColumn": 1, "endLine": 50, "endColumn": 1},
+    "events": {"norm.truncated": [{"type": "norm.truncated", "norm": "style.no-x", "limit": 50}]}
+  }
+}

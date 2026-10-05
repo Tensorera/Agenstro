@@ -9,6 +9,8 @@ ExecStart=%h/.local/bin/segno service start --port 47832
 Environment=PATH=%h/.local/bin:%h/.ghcup/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=10
+# Run Segno's interruption cleanup before stopping the service.
+KillSignal=SIGINT
 TimeoutStopSec=30
 
 [Install]

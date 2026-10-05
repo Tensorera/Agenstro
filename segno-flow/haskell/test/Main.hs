@@ -25,11 +25,14 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Data.Word (Word32)
+import Options.Applicative (ParserResult (..), defaultPrefs, execParserPure)
+import qualified Segno.Cli as Cli
 import Segno.Driver
   ( Clock (..),
     DriverEnvironment (..),
@@ -75,6 +78,7 @@ import Segno.Store.SQLite
     compareAndSetBusinessState,
     initialiseStore,
     insertOccurrence,
+    lifecycleHistory,
     lifecycleStatus,
     loadBusinessState,
     markOccurrenceRunning,
@@ -83,7 +87,8 @@ import Segno.Store.SQLite
     segnoPaths,
   )
 import Segno.Trigger.Time
-  ( IntervalConfig (..),
+  ( CronConfig (..),
+    IntervalConfig (..),
     planTimeSource,
   )
 import System.Directory
@@ -108,9 +113,14 @@ import ServiceTests (runServiceTests)
 main :: IO ()
 main = do
   useRepositoryTactus
+  run "CLI task timeouts distinguish typed tasks and service organizers" testCliTaskTimeouts
+  run "CLI service numbers reject out-of-range integers before conversion" testCliServiceNumbers
   run "strict plugin request ids" testStrictRequestIds
   run "strict trigger and state plugin payloads" testStrictPluginPayloads
   run "pure interval planning" testIntervalPlanning
+  run "cron respects minute boundaries and acknowledged cursors" testCronPlanningBoundaries
+  run "time planners resume a full catch-up page without skipping occurrences" testTimePlanningCatchupLimit
+  run "time planners reject invalid configuration, cursors and limits" testTimePlanningInvalidInputs
   run "idempotency is scoped by job and trigger" testCrossJobIdempotency
   run "checkpoint operation id is scoped by occurrence" testCheckpointOperationScope
   run "stale fencing token cannot checkpoint after reclaim" testStaleFence
@@ -119,11 +129,14 @@ main = do
   run "plugin registration parses TOML and preserves custom commands" testPluginRegistration
   run "bad trigger does not starve a ready occurrence" testBadTriggerIsolation
   run "outcome unknown is not automatically retried" testOutcomeUnknownStops
+  run "explicit Retry keeps state and waits until due before exhausting attempts" testExplicitRetryBudget
+  run "explicit Fail preserves details and is not executed again" testExplicitFailDetails
   run "synchronous handlers preserve cancellation and timeout" testSynchronousBoundary
   run "driver cancellation propagates through every execution phase" testDriverCancellation
   run "virtual clock and fake runner execute one persistent occurrence" testVirtualDriver
   run "virtual minute task checkpoints three windows and survives restart" testVirtualWindowPersistence
   runServiceTests
+  run "interval decimal strings reject negative and overflowing values" testIntervalDecimalBounds
   putStrLn "segno-flow: all tests passed"
 
 run :: String -> IO () -> IO ()
@@ -134,6 +147,66 @@ run label test = do
 
 assert :: Bool -> String -> IO ()
 assert condition message = unless condition (ioError (userError message))
+
+testCliTaskTimeouts :: IO ()
+testCliTaskTimeouts = forM_ cases $ \(arguments, expectedDefault) -> do
+  assertTimeout arguments expectedDefault
+  forM_ [1, 7200, 604800] $ \seconds ->
+    assertTimeout (arguments <> ["--task-timeout-seconds", show seconds]) seconds
+  forM_ (invalidBoundedNumbers 1 604800) $ \invalid ->
+    case execParserPure defaultPrefs Cli.options (arguments <> ["--task-timeout-seconds", invalid]) of
+      Failure _ -> pure ()
+      _ -> fail ("CLI accepted invalid task timeout: " <> show (arguments, invalid))
+  where
+    cases =
+      [ (["install", "task.hs"], 15300),
+        (["once"], 15300),
+        (["driver"], 15300),
+        (["service", "register", "report", "--every-seconds", "60"], 1800)
+      ]
+    assertTimeout arguments expected =
+      case execParserPure defaultPrefs Cli.options arguments of
+        Success commandValue -> do
+          actual <- case commandValue of
+            Cli.Install _ _ _ seconds -> pure seconds
+            Cli.Once _ _ seconds -> pure seconds
+            Cli.Driver _ _ seconds -> pure seconds
+            Cli.Service _ (Cli.ServiceRegister _ _ _ seconds) -> pure seconds
+            _ -> fail "unexpected CLI command in timeout test"
+          assert (actual == expected) ("incorrect task timeout: " <> show (arguments, actual, expected))
+        _ -> fail ("CLI rejected task arguments: " <> show arguments)
+
+testCliServiceNumbers :: IO ()
+testCliServiceNumbers = forM_ cases $ \(arguments, flag, minimumValue, maximumValue) -> do
+  forM_ [minimumValue, maximumValue] $ \expected ->
+    case execParserPure defaultPrefs Cli.options (arguments <> [flag, show expected]) of
+      Success commandValue -> do
+        actual <- case commandValue of
+          Cli.Service _ (Cli.ServiceRegister _ _ seconds _) -> pure seconds
+          Cli.Service _ (Cli.ServiceStart port _) -> pure port
+          Cli.Service _ (Cli.ServiceStatus _ limit) -> pure limit
+          Cli.History _ _ _ limit _ -> pure limit
+          _ -> fail "unexpected CLI command in numeric bounds test"
+        assert (actual == expected) ("incorrect numeric argument: " <> show (arguments, flag, actual, expected))
+      _ -> fail ("CLI rejected numeric boundary: " <> show (arguments, flag, expected))
+  forM_ (invalidBoundedNumbers minimumValue maximumValue) $ \invalid ->
+    case execParserPure defaultPrefs Cli.options (arguments <> [flag, invalid]) of
+      Failure _ -> pure ()
+      _ -> fail ("CLI accepted invalid number: " <> show (arguments, flag, invalid))
+  where
+    cases =
+      [ (["service", "register", "report"], "--every-seconds", 1, 31536000),
+        (["service", "start"], "--port", 1024, 65535),
+        (["service", "status"], "--limit", 1, 1000),
+        (["history"], "--limit", 1, 1000)
+      ]
+
+invalidBoundedNumbers :: Int -> Int -> [String]
+invalidBoundedNumbers minimumValue maximumValue =
+  ["", "not-a-number", "1.5", "12x", replicate 100 '9']
+    <> map show [toInteger minimumValue - 1, toInteger maximumValue + 1, -1]
+    -- Each overflow would wrap to a valid lower bound on the given word size.
+    <> [show (direction * 2 ^ bits + toInteger minimumValue) | bits <- [32, 64, 128 :: Int], direction <- [-1, 1]]
 
 -- Initialization crosses the same local Tactus configuration boundary as the
 -- installed executable. Prefer this checkout's build over an older PATH copy.
@@ -307,6 +380,110 @@ testIntervalPlanning = do
       case later of
         Left message -> ioError (userError (Text.unpack message))
         Right catchup -> assert (length (pollOccurrences catchup) == 3) "interval catch-up did not enumerate missed occurrences"
+
+testCronPlanningBoundaries :: IO ()
+testCronPlanningBoundaries = do
+  let minute = read "2026-08-16 12:00:00 UTC" :: UTCTime
+      midnight = read "2026-08-17 00:00:00 UTC" :: UTCTime
+      configuration = toJSON (CronConfig "* * * * *" "UTC")
+      cursor timestamp = Just (object ["logical_time" .= timestamp])
+      cases =
+        [ ("initial exact minute", Nothing, minute, [minute], addUTCTime 60 minute),
+          ("initial fractional minute", Nothing, addUTCTime 30.5 minute, [minute], addUTCTime 60 minute),
+          ("acknowledged current minute", cursor minute, minute, [], addUTCTime 60 minute),
+          ("not yet due", cursor minute, addUTCTime 59.999 minute, [], addUTCTime 60 minute),
+          ("due at exact boundary", cursor minute, addUTCTime 60 minute, [addUTCTime 60 minute], addUTCTime 120 minute),
+          ("future cursor", cursor (addUTCTime 300 minute), minute, [], addUTCTime 360 minute),
+          ("UTC date rollover", cursor (addUTCTime (-60) midnight), midnight, [midnight], addUTCTime 60 midnight)
+        ]
+  forM_ cases $ \(label, acknowledged, current, expected, wake) -> do
+    result <- either (fail . Text.unpack) pure (planTimeSource "time.cron" "clock" configuration acknowledged current 10)
+    assert (map plannedLogicalTime (pollOccurrences result) == expected) (label <> ": incorrect due times")
+    assert (pollNextWake result == Just wake) (label <> ": incorrect next wake")
+    forM_ (pollOccurrences result) $ \planned -> do
+      let payload = object ["logical_time" .= plannedLogicalTime planned]
+      assert (plannedCursor planned == payload && plannedPayload planned == payload) (label <> ": cursor/payload changed logical time")
+  defaultZone <- either (fail . Text.unpack) pure $
+    planTimeSource "time.cron" "clock" (object ["expression" .= ("* * * * *" :: Text)]) Nothing minute 1
+  assert (map plannedLogicalTime (pollOccurrences defaultZone) == [minute]) "omitted cron timezone did not default to UTC"
+
+testTimePlanningCatchupLimit :: IO ()
+testTimePlanningCatchupLimit = do
+  let initial = read "2026-08-16 12:00:00 UTC" :: UTCTime
+      current = addUTCTime 180 initial
+      at seconds = addUTCTime seconds initial
+      initialCursor = object ["logical_time" .= initial]
+      planners =
+        [ ("time.interval", toJSON (IntervalConfig 60000)),
+          ("time.cron", toJSON (CronConfig "* * * * *" "UTC"))
+        ]
+  forM_ planners $ \(plugin, configuration) -> do
+    let plan cursor = either (fail . Text.unpack) pure (planTimeSource plugin "minute" configuration (Just cursor) current 2)
+    first <- plan initialCursor
+    assert (map plannedLogicalTime (pollOccurrences first) == [at 60, at 120]) "full catch-up page skipped or duplicated due work"
+    assert (pollNextWake first == Just current) "full catch-up page did not point at the next unprocessed occurrence"
+    lastCursor <- case pollOccurrences first of
+      [_, latest] -> pure (plannedCursor latest)
+      _ -> fail "expected exactly two planned occurrences"
+    second <- plan lastCursor
+    assert (map plannedLogicalTime (pollOccurrences second) == [current]) "second catch-up page lost the remaining occurrence"
+    assert (pollNextWake second == Just (at 240)) "finished catch-up did not advance next wake"
+    case pollOccurrences second of
+      [latest] -> do
+        third <- plan (plannedCursor latest)
+        assert (null (pollOccurrences third) && pollNextWake third == Just (at 240)) "acknowledged catch-up occurrence was emitted again"
+        let keys = map plannedIdempotencyKey (pollOccurrences first <> pollOccurrences second)
+        assert (length keys == length (nub keys)) "catch-up pages reused an idempotency key"
+      _ -> fail "expected one final catch-up occurrence"
+
+testTimePlanningInvalidInputs :: IO ()
+testTimePlanningInvalidInputs = do
+  let current = read "2026-08-16 12:00:00 UTC" :: UTCTime
+      interval = toJSON (IntervalConfig 60000)
+      cron = toJSON (CronConfig "* * * * *" "UTC")
+      invalidConfigurations =
+        [ ("zero interval", "time.interval", toJSON (IntervalConfig 0)),
+          ("numeric interval", "time.interval", object ["every_ms" .= (1000 :: Int)]),
+          ("missing interval", "time.interval", object []),
+          ("invalid cron expression", "time.cron", toJSON (CronConfig "not a cron schedule" "UTC")),
+          ("unsupported cron timezone", "time.cron", toJSON (CronConfig "* * * * *" "America/Denver")),
+          ("missing cron expression", "time.cron", object ["timezone" .= ("UTC" :: Text)]),
+          ("unknown time plugin", "time.unknown", interval)
+        ]
+  forM_ invalidConfigurations $ \(label, plugin, configuration) ->
+    assert (isLeft (planTimeSource plugin "clock" configuration Nothing current 1)) (label <> " was accepted")
+  forM_ [("time.interval", interval), ("time.cron", cron)] $ \(plugin, configuration) -> do
+    forM_ [0, -1] $ \limit ->
+      assert (isLeft (planTimeSource plugin "clock" configuration Nothing current limit)) "non-positive catch-up limit was accepted"
+    forM_ [Null, object [], object ["logical_time" .= ("invalid-time" :: Text)]] $ \cursor ->
+      assert (isLeft (planTimeSource plugin "clock" configuration (Just cursor) current 1)) "invalid time cursor was accepted"
+
+testIntervalDecimalBounds :: IO ()
+testIntervalDecimalBounds = do
+  let current = read "2026-08-16 12:00:00 UTC" :: UTCTime
+      plan encoded = planTimeSource "time.interval" "clock" (object ["every_ms" .= (encoded :: Text)]) Nothing current 1
+      decode encoded = parseEither parseJSON (object ["every_ms" .= (encoded :: Text)]) :: Either String IntervalConfig
+      valid =
+        [ ("1", 1),
+          ("9", 9),
+          ("10", 10),
+          ("60000", 60000),
+          ("0001", 1),
+          (Text.replicate 1000 "0" <> "1", 1),
+          ("18446744073709551615", maxBound),
+          ("00018446744073709551615", maxBound)
+        ]
+      rejectedValid = [encoded | (encoded, expected) <- valid, isLeft (plan encoded) || fmap intervalMilliseconds (decode encoded) /= Right expected]
+      invalid =
+        [ "", "0", "0000", "-1", "-0", "+1", " 1", "1 ", "1\n", "1\0",
+          "1.0", "1e3", "0x10", "0o10", "１", "١",
+          "18446744073709551616", "18446744073709551617", "00018446744073709551616", Text.replicate 1024 "9"
+        ]
+      acceptedInvalid = [encoded | encoded <- invalid, not (isLeft (plan encoded))]
+  -- Report every bad boundary in one failure; run this separately after the
+  -- other cases so a numeric decoder regression does not hide driver tests.
+  assert (null rejectedValid && null acceptedInvalid)
+    ("interval decimal boundaries: rejected valid " <> show rejectedValid <> "; accepted invalid " <> show acceptedInvalid)
 
 testCrossJobIdempotency :: IO ()
 testCrossJobIdempotency = withTemporaryWorkspace "cross-job" $ \root -> do
@@ -700,6 +877,129 @@ testOutcomeUnknownStops = withTemporaryWorkspace "outcome-unknown" $ \root -> do
   assert (summaryUnknown first == 1) "failed spawned workflow was not OutcomeUnknown"
   assert (summaryExecuted second == 0 && calls == 1) "OutcomeUnknown was automatically retried"
   assert (fmap recordLifecycle records == [OutcomeUnknown]) "OutcomeUnknown lifecycle was not durable"
+
+testExplicitRetryBudget :: IO ()
+testExplicitRetryBudget = withDecisionDriver "retry-budget" decision $ \paths current attempts environment -> do
+  initial <- readIORef current
+  first <- runOnceWith environment (pathsRoot paths)
+  assert (summaryExecuted first == 1 && summaryWaiting first == 1 && summaryFailed first == 0) "explicit Retry did not enter Waiting"
+  waiting <- onlyDecisionRecord paths
+  assert (recordLifecycle waiting == Waiting && recordAttempt waiting == 1) "first retry attempt was not durably recorded"
+  assert (recordNextAttemptAt waiting == Just (addUTCTime 1.5 initial)) "after_ms was not applied to the retry deadline"
+  assert (recordError waiting == Just "not ready yet") "retry reason was not retained"
+  writeIORef current (addUTCTime 1.499 initial)
+  early <- runOnceWith environment (pathsRoot paths)
+  earlyAttempts <- readIORef attempts
+  assert (summaryExecuted early == 0 && earlyAttempts == [1]) "Waiting task ran before its retry deadline"
+  -- A new environment reopens the same SQLite state; its attempt budget must
+  -- not restart merely because the driver process/environment was recreated.
+  let restarted = defaultDriverEnvironment
+        { driverClock = driverClock environment,
+          driverRunner = driverRunner environment,
+          driverMaximumAttempts = 2
+        }
+  writeIORef current (addUTCTime 1.5 initial)
+  due <- runOnceWith restarted (pathsRoot paths)
+  dueAttempts <- readIORef attempts
+  assert (summaryExecuted due == 1 && summaryFailed due == 1 && summaryWaiting due == 0) "retry at the maximum attempt did not become Failed"
+  assert (dueAttempts == [1, 2]) "retry did not preserve its durable attempt across restart"
+  failed <- onlyDecisionRecord paths
+  assert (recordLifecycle failed == Failed && recordAttempt failed == 2 && recordNextAttemptAt failed == Nothing) "exhausted retry retained a runnable lifecycle"
+  assert (recordError failed == Just "not ready yet; maximum attempts reached") "exhaustion lost the retry reason"
+  writeIORef current (addUTCTime 3600 initial)
+  terminal <- runOnceWith restarted (pathsRoot paths)
+  finalAttempts <- readIORef attempts
+  assert (summaryExecuted terminal == 0 && finalAttempts == [1, 2]) "attempt exhaustion invoked the task again"
+  history <- businessHistory paths (Just "decision-state") 10
+  assert (null history) "Retry/Keep unexpectedly checkpointed business state"
+  where
+    decision = object
+      [ "kind" .= ("retry" :: Text),
+        "state" .= object ["kind" .= ("keep" :: Text), "expected_revision" .= ("0" :: Text)],
+        "after_ms" .= ("1500" :: Text),
+        "reason" .= ("not ready yet" :: Text)
+      ]
+
+testExplicitFailDetails :: IO ()
+testExplicitFailDetails = withDecisionDriver "fail-details" decision $ \paths current attempts environment -> do
+  first <- runOnceWith environment (pathsRoot paths)
+  assert (summaryExecuted first == 1 && summaryFailed first == 1 && summaryUnknown first == 0) "explicit Fail was not a known terminal failure"
+  failed <- onlyDecisionRecord paths
+  assert (recordLifecycle failed == Failed && recordAttempt failed == 1 && recordNextAttemptAt failed == Nothing) "explicit Fail remained runnable"
+  assert (recordError failed == Just "business_rejected: input is unsuitable") "failure code/message did not persist"
+  assert (recordOutput failed == Just details) "structured failure details did not persist"
+  history <- lifecycleHistory paths (Just "decision-occurrence") 10
+  case history of
+    latest : _ -> do
+      historicalOutput <- either fail pure $ parseEither
+        (withObject "lifecycle history" (\fields -> fields .: "details" >>= withObject "transition details" (.: "output"))) latest
+      assert (historicalOutput == details) "failure details were lost from lifecycle history"
+    [] -> fail "explicit Fail did not create lifecycle history"
+  modifyIORef' current (addUTCTime 3600)
+  again <- runOnceWith environment (pathsRoot paths)
+  observed <- readIORef attempts
+  retained <- onlyDecisionRecord paths
+  assert (summaryExecuted again == 0 && observed == [1]) "explicit Fail was automatically retried"
+  assert (retained == failed) "later polling modified terminal failure evidence"
+  where
+    details = object ["field" .= ("payload" :: Text), "retryable" .= False, "observed" .= object ["count" .= (7 :: Int)]]
+    decision = object
+      [ "kind" .= ("fail" :: Text),
+        "error" .= object
+          [ "code" .= ("business_rejected" :: Text),
+            "message" .= ("input is unsuitable" :: Text),
+            "details" .= details
+          ]
+      ]
+
+withDecisionDriver :: String -> Value -> (SegnoPaths -> IORef UTCTime -> IORef [Word32] -> DriverEnvironment -> IO ()) -> IO ()
+withDecisionDriver label decision action = withTemporaryWorkspace label $ \root -> do
+  sdk <- locateSegnoSource
+  createTactusWorkspace root sdk
+  paths <- initialiseWorkspaceWithSdk root (Just sdk)
+  let initial = read "2026-08-16 12:00:00 UTC" :: UTCTime
+      manifest = TaskManifest "decision-task" [SourceManifest "each-minute" "quiet.trigger" (object [])]
+        (StateManifest "decision-state" 1 "segno.state" "compare-and-set" (object ["count" .= (0 :: Int)]))
+      job = InstalledJob ".tactus/scripts/903_decision.hs" manifest
+  current <- newIORef initial
+  attempts <- newIORef ([] :: [Word32])
+  let runTask _ _ mode invocationPath resultPath _context _timeoutSeconds = do
+        assert (mode == "execute") "decision fixture received an unexpected task mode"
+        exists <- doesFileExist resultPath
+        assert (not exists) "decision fixture was given an existing result path"
+        path <- maybe (fail "decision fixture did not receive an invocation") pure invocationPath
+        invocation <- readJsonValue path
+        (task, identity) <- either fail pure (parseEither parseInvocationIdentity invocation)
+        attempt <- either fail pure (parseEither (withObject "invocation" (.: "attempt")) invocation)
+        snapshot <- either fail pure (parseEither (withObject "invocation" (.: "state")) invocation)
+        assert (snapshotRevision snapshot == Just "0" && snapshotValue snapshot == object ["count" .= (0 :: Int)]) "Keep changed the business snapshot"
+        modifyIORef' attempts (<> [attempt])
+        writeJson resultPath (object ["api" .= resultApi, "task" .= task, "occurrence_id" .= identity, "decision" .= decision])
+        pure (ProcessOutcome ExitSuccess "" "" False)
+      callPlugin _ plugin method params = do
+        timestamp <- readIORef current
+        case (plugin, method) of
+          ("quiet.trigger", "poll") -> pure (Right (toJSON (PollResult [] (Just (addUTCTime 60 timestamp)))))
+          ("segno.state", "load") -> do
+            selected <- either fail pure (parseEither parseStateLoad params)
+            Right . toJSON <$> loadBusinessState paths selected timestamp
+          _ -> fail ("decision fixture attempted an unexpected plugin: " <> Text.unpack plugin <> "/" <> Text.unpack method)
+      environment = defaultDriverEnvironment
+        { driverClock = Clock (readIORef current) (writeIORef current),
+          driverRunner = Runner runTask callPlugin,
+          driverMaximumAttempts = 2
+        }
+  writeJson (pathsJobs paths </> "decision-task.json") job
+  writeFile (root </> ".tactus/scripts/903_decision.hs") "main = pure ()\n"
+  _ <- insertOccurrence paths "decision-task" (occurrence "decision-occurrence" "decision-key" initial) initial
+  action paths current attempts environment
+
+onlyDecisionRecord :: SegnoPaths -> IO OccurrenceRecord
+onlyDecisionRecord paths = do
+  records <- lifecycleStatus paths (Just "decision-task")
+  case records of
+    [record] -> pure record
+    _ -> fail "expected one durable decision occurrence"
 
 fakeRunner :: UTCTime -> Runner
 fakeRunner now = Runner runTask callPlugin

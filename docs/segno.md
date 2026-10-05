@@ -2,7 +2,7 @@
 title: Segno persistent tasks
 status: alpha
 owners: [segno]
-last_verified: 2026-09-12
+last_verified: 2026-09-18
 applies_to: "Segno Flow Haskell 0.3.0.0"
 platforms: [windows, ubuntu]
 ---
@@ -48,12 +48,17 @@ Haskell scheduler. Each workspace supplies exactly one standard entry,
 `.tactus/segno.hs`. Ordinary business scripts stay in `.tactus/scripts`.
 The typed `install`/`driver` interface described below remains available.
 
-Initialize both SDK links, copy `segno-flow/examples/service/segno.hs` into `.tactus/segno.hs`,
-and register the workspace:
+Initialize both SDK links and copy both files from the offline service example.
+The organizer calls `010_business.hs`, so both files must be present before
+registering the workspace:
 
 ```sh
 tactus init /path/to/project --sdk /path/to/Agenstro/clef-sdk
 segno init --root /path/to/project --sdk /path/to/Agenstro/segno-flow
+cp /path/to/Agenstro/segno-flow/examples/service/segno.hs /path/to/project/.tactus/segno.hs
+cp /path/to/Agenstro/segno-flow/examples/service/010_business.hs /path/to/project/.tactus/scripts/010_business.hs
+tactus check --root /path/to/project --package segno-flow /path/to/project/.tactus/segno.hs
+tactus check --root /path/to/project /path/to/project/.tactus/scripts/010_business.hs
 segno service register daily-report --root /path/to/project --every-seconds 86400
 segno service list --json
 segno service once
@@ -70,6 +75,10 @@ The dashboard does not execute scripts or change the registry.
 The initial service runs tasks sequentially; a long task delays other tasks
 while the web dashboard remains responsive. Each `once` turn processes at
 most 100 due tasks. `start --no-web` runs only the scheduler.
+Service registration defaults to a 1,800-second timeout for each Tactus
+build/run phase. Set `--task-timeout-seconds` on `service register` to choose
+another value in `1..604800`; the typed task commands below default to 15,300
+seconds.
 
 The default registry is `agenstro/segno/registry.sqlite3` below the platform's
 user data directory. Set `SEGNO_REGISTRY` or pass `--registry PATH` before the service subcommand to select another registry. It is independent of each
@@ -94,7 +103,7 @@ argument. This is the logical scheduled time; delayed polls coalesce missed
 intervals into the latest due time. A workspace cannot have overlapping service
 invocations. Use this minimal entry:
 
-```haskell
+```haskell compile
 {-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 

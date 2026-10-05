@@ -1,9 +1,10 @@
 # Running and reading a method
 
 Initialize the project with `tactus init PROJECT --sdk PATH_TO_CLEF_SDK`.
-New workspaces receive both skills, independent Motivo templates, a report asset
-and the `motivo.test` effect registration. Initialization preserves existing
-files. Re-running init does not replace a project's modified templates/config.
+New workspaces receive the Tactus, Motivo and Segno skills, independent Motivo
+templates, a report asset and the `motivo.test` effect registration. Initialization
+preserves existing files. Re-running init does not replace a project's modified
+templates/config.
 
 For older workspaces, if the experiment effect is missing, add only this entry to
 `.tactus/tactus.toml`, preserving providers and other project settings:
@@ -13,9 +14,15 @@ For older workspaces, if the experiment effect is missing, add only this entry t
 command = ["motivo-test"]
 ```
 
-An absolute installed binary path is valid. Check isolation support with
-`tactus plugin-call motivo.test describe --namespace effect --root PROJECT --json`; absence of the plugin does not prevent non-experiment
-method reports. Do not run a test without the enforcing plugin.
+An absolute installed binary path is valid. Inspect the plugin's static contract
+with `tactus plugin-call motivo.test describe --namespace effect --root PROJECT --json`.
+Check backend presence with
+`tactus plugin-call motivo.test smoke --namespace effect --root PROJECT --json`.
+`describe` does not check isolation support, and a successful `smoke` only confirms
+that Bubblewrap is present; it returns `execution_verified=false`. Only an actual
+`run` verifies that the required namespaces and mounts are usable. Absence of the
+plugin does not prevent non-experiment method reports. Do not run a test without
+the enforcing plugin.
 
 ## Record notes prepared by the current agent
 

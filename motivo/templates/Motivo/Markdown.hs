@@ -21,7 +21,8 @@ blockLines (OrdinaryLines lines') = lines'
 blockLines (FencedCode opening contents closing) = opening : contents ++ maybe [] pure closing
 
 markdownBlocks :: Text -> [MarkdownBlock]
-markdownBlocks = scan . Text.lines
+-- Normalize CRLF for parsing and rendering; recorded source text stays intact.
+markdownBlocks = scan . Text.lines . Text.replace "\r\n" "\n"
   where
     scan [] = []
     scan lines'@(line : rest) = case openingFence line of

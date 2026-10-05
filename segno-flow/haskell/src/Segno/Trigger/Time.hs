@@ -169,9 +169,21 @@ decodeValue value = case parseEither parseJSON value of
   Right decoded -> Right decoded
 
 decimalWord64 :: Text -> Parser Word64
-decimalWord64 encoded = case reads (Text.unpack encoded) of
-  [(value, "")] -> pure value
-  _ -> fail "expected an unsigned decimal string"
+decimalWord64 encoded
+  | Text.null encoded = invalid
+  | otherwise = maybe invalid pure (Text.foldl' appendDigit (Just 0) encoded)
+  where
+    invalid = fail "expected an unsigned decimal string in the Word64 range"
+    appendDigit :: Maybe Word64 -> Char -> Maybe Word64
+    appendDigit Nothing _ = Nothing
+    appendDigit (Just value) character
+      | character < '0' || character > '9' = Nothing
+      -- Check before either arithmetic operation: reading directly into
+      -- Word64 would silently wrap negative and overflowing inputs.
+      | value > (maxBound - digit) `div` 10 = Nothing
+      | otherwise = Just $! value * 10 + digit
+      where
+        digit = fromIntegral (fromEnum character - fromEnum '0')
 
 firstText :: Either String value -> Either Text value
 firstText = either (Left . Text.pack) Right
